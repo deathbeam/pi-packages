@@ -4,7 +4,7 @@ export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 export const SPINNER_INTERVAL_MS = 100;
 /** pi slices extension widgets at ten lines and appends its own truncation note. */
 export const WIDGET_MAX_LINES = 10;
-/** Only a few jobs still fit with their tool-call and tool-result lines: 1 tally + 3×3 lines. */
+/** Only a few jobs still fit with their tool-call and tool-result lines: 1 tally + 3*3 lines. */
 const WIDGET_MAX_DETAIL_JOBS = 3;
 /** In bulk, one row per job: 1 tally + 8 rows + 1 "more running" footer. */
 const WIDGET_MAX_JOBS = 8;

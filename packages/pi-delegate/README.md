@@ -1,4 +1,4 @@
-# @deathbeam/pi-delegate
+# [@deathbeam/pi-delegate](https://www.npmjs.com/package/@deathbeam/pi-delegate)
 
 Run focused subagents with `delegate`, `delegate_list`, `delegate_steer`, and `delegate_cancel`.
 

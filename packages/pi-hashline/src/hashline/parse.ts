@@ -1,12 +1,12 @@
 /**
- * Parsing — prefix regexes, anchor ref parsing, edit item validation, resolveEditAnchors.
+ * Parsing: prefix regexes, anchor ref parsing, edit item validation, resolveEditAnchors.
  *
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
 
 import { NIBBLE_STR, HASH_ALPHABET_RE, HASH_LENGTH } from "./hash";
 
-// ─── Types ──────────────────────────────────────────────────────────────
+// --- Types ---
 
 export type Anchor = { line: number; hash: string; textHint?: string };
 export type HashlineEdit =
@@ -27,13 +27,13 @@ const EXAMPLE_ANCHOR = "5#MQQ";
 /**
  * Display-prefix rejection regexes. These patterns detect (and reject)
  * hashline display prefixes inside edit payloads. The runtime no longer
- * strips them — the model must send literal file content. Matching any of
+ * strips them; the model must send literal file content. Matching any of
  * these triggers `[E_INVALID_PATCH]`.
  *
- * They match all hash lengths seen in older sessions (2–4), not just the
+ * They match all hash lengths seen in older sessions (2-4), not just the
  * current 3: the rejection semantics are "this is rendered read/diff
  * output", and rendered output can come from a stale transcript. A 5+-char
- * run backtracks to no match — that shape is not a valid display prefix
+ * run backtracks to no match; that shape is not a valid display prefix
  * under any configuration and passes as literal content.
  */
 const DISPLAY_HASH_QUANT = `[${NIBBLE_STR}]{2,4}`;
@@ -48,14 +48,14 @@ const DIFF_MINUS_RE = /^-\s*\d+\s{4}/;
  *
  * This is the partial-hash failure mode: the model copies a hash it saw in
  * `read` output into the line content but drops the "LINE#" part. A single
- * such line is genuinely ambiguous — short uppercase keys and abbreviations
- * are legitimate content — so it is never rejected on shape alone.
+ * such line is genuinely ambiguous; short uppercase keys and abbreviations
+ * are legitimate content, so it is never rejected on shape alone.
  * Disambiguation happens against the file's actual hash set in
  * `warnBareHashPrefixLines`.
  */
 export const BARE_PREFIX_RE = new RegExp(`^\\s*([${NIBBLE_STR}]{${HASH_LENGTH}}):`, "i");
 
-// ─── Parsing ────────────────────────────────────────────────────────────
+// --- Parsing ---
 
 /**
  * Validate an anchor's hash for the fixed session length. Returns an error
@@ -144,7 +144,7 @@ function parseAnchorRef(ref: string): Anchor {
     };
 }
 
-// ─── Content preprocessing ─────────────────────────────────────────────────────
+// --- Content preprocessing ---
 
 /**
  * Reject hashline display prefixes in edit payloads. Strict semantics: the
@@ -171,7 +171,7 @@ function assertNoDisplayPrefixes(lines: string[]): void {
  *
  * Array input is preserved verbatim so explicitly provided blank lines remain
  * intact. Display prefixes (full `LINE#HASH:` and diff `+/-` forms) are
- * rejected by `assertNoDisplayPrefixes` — the model must send literal file
+ * rejected by `assertNoDisplayPrefixes`; the model must send literal file
  * content, never rendered read or diff output.
  */
 function hashlineParseText(edit: string[] | undefined): string[] {
@@ -186,19 +186,19 @@ function hashlineParseText(edit: string[] | undefined): string[] {
  * Backstop validation + anchor parsing. Payloads arriving through pi's
  * agent loop were already validated against the published TypeBox schema
  * (additionalProperties, op union, required fields, types), so most of
- * these checks are unreachable there — they exist for direct execute()
+ * these checks are unreachable there; they exist for direct execute()
  * callers, where they keep garbage from crashing parseAnchorRef or
  * silently no-opping unsupported ops.
  *
  * Strict: provided anchors must parse successfully. Missing anchors are
- * fine for append (→ EOF) and prepend (→ BOF), but a malformed anchor
+ * fine for append (to EOF) and prepend (to BOF), but a malformed anchor
  * that was explicitly supplied is always an error.
  *
- * - replace + pos only → single-line replace
- * - replace + pos + end → range replace
- * - append + pos → append after that anchor
- * - prepend + pos → prepend before that anchor
- * - no anchors → file-level append/prepend (only for those ops)
+ * - replace + pos only: single-line replace
+ * - replace + pos + end: range replace
+ * - append + pos: append after that anchor
+ * - prepend + pos: prepend before that anchor
+ * - no anchors: file-level append/prepend (only for those ops)
  */
 
 const ITEM_KEYS = new Set(["op", "pos", "end", "lines"]);

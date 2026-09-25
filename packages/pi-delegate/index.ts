@@ -227,7 +227,7 @@ export default function (pi: ExtensionAPI) {
             output,
             error,
         };
-        // Idle: this starts a new turn. Streaming: steer the report in at the next turn boundary —
+        // Idle: this starts a new turn. Streaming: steer the report in at the next turn boundary;
         // a follow-up waits for a run end that a parent stuck polling may never reach.
         pi.sendMessage(
             { customType: RESULT_MESSAGE, content: reportText(report), display: true, details: report },

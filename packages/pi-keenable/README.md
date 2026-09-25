@@ -1,4 +1,4 @@
-# @deathbeam/pi-keenable
+# [@deathbeam/pi-keenable](https://www.npmjs.com/package/@deathbeam/pi-keenable)
 
 Add Keenable-backed `web_search` and `web_fetch` tools. Set `KEENABLE_API_KEY` for private access.
 

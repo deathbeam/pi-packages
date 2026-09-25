@@ -1,5 +1,5 @@
 /**
- * Hash computation — NIBBLE_STR alphabet, xxh32, per-line hash.
+ * Hash computation: NIBBLE_STR alphabet, xxh32, per-line hash.
  *
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
@@ -8,7 +8,7 @@ import * as XXH from "xxhashjs";
 
 /**
  * Fixed session hash length. 3 characters = 12 bits of the 3-line-window
- * xxh32 — a 2^-12 silent false-accept floor per stale anchor, on top of the
+ * xxh32 has a 2^-12 silent false-accept floor per stale anchor, on top of the
  * line-number primary key and the textHint content veto.
  */
 export const HASH_LENGTH = 3;
@@ -21,12 +21,12 @@ export const HASH_LENGTH = 3;
  * - Common vowels A, E, I, O, U (prevents accidental English words)
  *
  * 16 characters means each hash character encodes exactly one nibble (4 bits),
- * so an N-char hash is a direct read of the low 4·N bits of xxh32 — no base
- * conversion, and the length↔entropy relationship stays obvious.
+ * so an N-char hash is a direct read of the low 4*N bits of xxh32, with no base
+ * conversion, and the length-to-entropy relationship stays obvious.
  *
  * At 3 characters, tokens drawn from real uppercase identifiers may
  * coincidentally share the character set. Detectors must not rely on shape
- * alone to distinguish anchors from content — context and position remain
+ * alone to distinguish anchors from content; context and position remain
  * the authoritative signals.
  */
 export const NIBBLE_STR = "ZPMQVRWSNKTXJBYH";
@@ -38,7 +38,7 @@ export const RE_SIGNIFICANT = /[\p{L}\p{N}]/u;
 
 /**
  * Normalize a line for hash input: strip \r, trimEnd. Leading indentation
- * IS hashed — two lines differing only in indent get different hashes.
+ * IS hashed; two lines differing only in indent get different hashes.
  */
 export function normalizeHashInput(line: string): string {
     return line.replace(/\r/g, "").trimEnd();
@@ -87,7 +87,7 @@ const FUZZY_UNICODE_SPACES_RE = /[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g;
  * Whitespace on BOTH ends is normalized away. Trailing drift is classic
  * copy noise; leading drift covers both a space typed after the ":"
  * separator of an anchor ("12#ABC: content") and re-typed indentation.
- * Hashes themselves stay whitespace-exact — see normalizeHashInput.
+ * Hashes themselves stay whitespace-exact; see normalizeHashInput.
  */
 function normalizeFuzzyLine(text: string): string {
     return text
@@ -102,7 +102,7 @@ export function isFuzzyEquivalentLine(expected: string, actual: string): boolean
     return normalizeFuzzyLine(expected) === normalizeFuzzyLine(actual);
 }
 
-/** First ASCII "..." or Unicode "…" in a hint marks it as model-truncated content. */
+/** First ASCII "..." or Unicode U+2026 in a hint marks it as model-truncated content. */
 const ELLIPSIS_RE = /\.{3}|…/;
 
 /**

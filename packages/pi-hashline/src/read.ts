@@ -234,13 +234,13 @@ export function registerReadTool(pi: ExtensionAPI): void {
                 raw: params.raw,
             });
             // Capture snapshot for stale-anchor recovery. Only hashline (non-raw)
-            // reads mint anchors, so raw reads must not update the slot — anchors
+            // reads mint anchors, so raw reads must not update the slot; anchors
             // from a raw read do not exist, so there is nothing to recover against.
             if (!params.raw) {
                 const canonicalWritePath = await resolveMutationTargetPath(absolutePath);
                 rememberReadSnapshot(canonicalWritePath, normalized);
                 // A deliberate re-read after an edit clears the duplicate-edit guard
-                // for this path — the model has seen the current state and any
+                // for this path; the model has seen the current state and any
                 // subsequent identical payload is intentional, not a retry loop.
                 clearAppliedPayload(canonicalWritePath);
             }

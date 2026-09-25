@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 const jiti = createJiti(import.meta.url);
 const mod = jiti("./index.ts");
-// renderDiff reads pi's global theme singleton — initialize it headless.
+// renderDiff reads pi's global theme singleton; initialize it headless.
 const { initTheme } = jiti("@earendil-works/pi-coding-agent");
 initTheme();
 
@@ -284,7 +284,7 @@ async function run(tool, params) {
 
     // 8. renderer wiring: edit defines NO custom renderers, so pi merges its
     // built-in edit renderers by tool name; read defines a custom (prefix-
-    // stripping) result renderer — see 9.
+    // stripping) result renderer; see 9.
     const fakeTheme = { fg: (name, txt) => `«${name}»${txt}`, bg: (_n, txt) => txt, bold: (txt) => txt };
     const renderToString = (comp) => comp.render(120).join("\n");
     const stripAnsi = (s) => s.replace(/\u001b\[[0-9;]*m/g, "");
@@ -300,7 +300,7 @@ async function run(tool, params) {
     const warnFile = join(dir, "warn.ts");
     writeFileSync(warnFile, "const a = 1;\nconst b = 2;\nconst c = 3;\n");
     const wRead = await run(byName.read, { path: warnFile });
-    // append after line 1 the exact lines that already follow it → duplicate-insert warning
+    // append after line 1 the exact lines that already follow it: duplicate-insert warning
     const firstAnchor = wRead.content[0].text.match(/^\s*1#([A-Z]{3}):/m);
     const warnRes = await run(byName.edit, {
         path: warnFile,
@@ -459,7 +459,7 @@ async function run(tool, params) {
     if (!/const /.test(gExpanded)) throw new Error("expanded grep render lost content");
     console.log("--- grep renderer: prefixes stripped OK ---");
 
-    // 11. grep highlighting: rg byte offsets → JS char offsets (multi-byte safe)
+    // 11. grep highlighting: rg byte offsets to JS char offsets (multi-byte safe)
     const hlFile = join(dir, "hl.ts");
     writeFileSync(
         hlFile,

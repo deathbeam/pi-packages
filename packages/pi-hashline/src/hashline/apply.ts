@@ -1,5 +1,5 @@
 /**
- * Apply engine — anchor validation, edit-span resolution, assembly.
+ * Apply engine: anchor validation, edit-span resolution, assembly.
  *
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
@@ -30,7 +30,7 @@ interface NoopEdit {
     currentContent: string;
 }
 
-// ─── Mismatch formatting ────────────────────────────────────────────────
+// --- Mismatch formatting ---
 
 // Max total candidates across all anchors before we stop listing per-anchor candidates.
 const CANDIDATE_TOTAL_LIMIT = 8;
@@ -40,7 +40,7 @@ const CANDIDATE_PER_ANCHOR_LIMIT = 3;
 function formatMismatchError(mismatches: HashMismatch[], fileLines: string[]): string {
     // Report only the stale refs: after an insert/delete, the content now sitting at
     // a stale line number is unrelated to what the model meant to edit, so echoing
-    // it wastes tokens and invites relocating an anchor by line number — which the
+    // it wastes tokens and invites relocating an anchor by line number, which the
     // runtime never does. The content-matched "Did you mean" candidates below point
     // at the real current anchors instead. Recovery is re-read, not slide-to-nearby.
     const staleRefs = mismatches.map((mismatch) => `${mismatch.line}#${mismatch.expected}`).join(", ");
@@ -49,8 +49,8 @@ function formatMismatchError(mismatches: HashMismatch[], fileLines: string[]): s
     ];
 
     // Scan for fuzzy-match candidates for stale anchors that carry a textHint.
-    // Runs only on the error path after all mismatches are collected (O(n×mismatches), acceptable).
-    // No-signal hints (empty / ellipsis-leading) would match every line — skip them.
+    // Runs only on the error path after all mismatches are collected (O(n * mismatches), acceptable).
+    // No-signal hints (empty / ellipsis-leading) would match every line; skip them.
     const hintedMismatches = mismatches.filter((m) => m.textHint !== undefined && hintHasSignal(m.textHint));
     if (hintedMismatches.length > 0) {
         // Per-anchor candidate lists: 1-based line numbers outside the display window.
@@ -118,7 +118,7 @@ function formatMismatchError(mismatches: HashMismatch[], fileLines: string[]): s
     return out.join("\n");
 }
 
-// ─── Content preprocessing ─────────────────────────────────────────────────────
+// --- Content preprocessing ---
 
 function maybeWarnSuspiciousUnicodeEscapePlaceholder(edits: HashlineEdit[], warnings: string[]): void {
     for (const edit of edits) {
@@ -423,7 +423,7 @@ function assertNoConflictingSpans(spans: ResolvedEditSpan[]): void {
 
 /**
  * Warn when an append or prepend payload exactly matches the lines already
- * adjacent at the insertion point — indicates a duplicate insert after a
+ * adjacent at the insertion point; indicates a duplicate insert after a
  * previous successful call. Never blocks the edit (non-fatal warning).
  */
 function warnDuplicateInsert(
@@ -511,10 +511,10 @@ function validateAnchorEdits(
         const line = lineIndex.fileLines[ref.line - 1]!;
         const actual = computeLineHash(lineIndex.fileLines, ref.line - 1);
         if (actual === ref.hash) {
-            // QUESTIONING: hash matches but textHint says otherwise → treat as stale (anti-collision guard).
+            // QUESTIONING: hash matches but textHint says otherwise; treat as stale (anti-collision guard).
             // Guards the 1/256 collision case: a model that copied "LINE#HASH:content" gets the content
             // cross-checked for free. If the hint clearly differs from the actual line, the anchor is stale.
-            // Ellipsis-truncated hints ("console.log(...)") compare by prefix — see hintMatchesLine.
+            // Ellipsis-truncated hints ("console.log(...)") compare by prefix; see hintMatchesLine.
             if (ref.textHint !== undefined && !hintMatchesLine(ref.textHint, line)) {
                 mismatches.push({ line: ref.line, expected: ref.hash, actual, textHint: ref.textHint });
                 return false;
@@ -600,7 +600,7 @@ function validateAnchorEdits(
                     );
                 }
                 // Warn when the inserted lines are identical to the lines already adjacent
-                // at the insertion point — symptom of a duplicate insert after a prior success.
+                // at the insertion point; symptom of a duplicate insert after a prior success.
                 warnDuplicateInsert("append", edit, lineIndex, warnings);
                 break;
             }
@@ -698,9 +698,9 @@ function assembleEditResult(content: string, spans: ResolvedEditSpan[], signal: 
  * Apply hashline-anchored edits to file content.
  *
  * Three-phase pipeline:
- *   1. validateAnchorEdits — check hash matches, collect warnings + mismatches
- *   2. resolveEditSpans   — map edits to character spans, dedup, conflict-detect, sort
- *   3. assembleEditResult — apply spans back-to-front, compute changed range
+ *   1. validateAnchorEdits: check hash matches, collect warnings + mismatches
+ *   2. resolveEditSpans: map edits to character spans, dedup, conflict-detect, sort
+ *   3. assembleEditResult: apply spans back-to-front, compute changed range
  */
 export function applyHashlineEdits(
     content: string,

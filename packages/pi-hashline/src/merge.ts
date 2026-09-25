@@ -4,8 +4,8 @@
  * fuzzFactor 0: hunk context lines must match exactly (no fuzzed context),
  * and jsdiff's applyPatch still scans backwards and forwards from the hunk's
  * recorded position to find an exactly-matching context window. That scanning
- * is load-bearing — it is what lets a replayed hunk apply after an external
- * insert shifted the file — but it means the hunk lands at the *nearest*
+ * is load-bearing: it lets a replayed hunk apply after an external
+ * insert shifted the file, but it means the hunk lands at the *nearest*
  * matching window, not necessarily the intended one. When a hunk's window is
  * duplicated in the live file the replay is refused (see {@link isAmbiguous}),
  * so recovery is context-matched but never a coin flip.
@@ -47,7 +47,7 @@ function isAmbiguous(lines: readonly string[], pattern: readonly string[]): bool
 }
 
 /**
- * Replay the changes made from `base` → `baseEdited` onto `current`.
+ * Replay the changes made from `base` to `baseEdited` onto `current`.
  *
  * Returns the merged text, or null when:
  * - a hunk's search window is duplicated in `current` (ambiguous placement),

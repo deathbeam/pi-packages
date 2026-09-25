@@ -207,7 +207,7 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
         };
 
         // setEncoding lets Node's stream decoder handle multi-byte UTF-8 sequences
-        // that span chunk boundaries correctly — spawn's options.encoding is an exec
+        // that span chunk boundaries correctly; spawn's options.encoding is an exec
         // parameter and has no effect here, so we set encoding on the streams directly.
         child.stdout.setEncoding("utf-8");
         child.stderr.setEncoding("utf-8");

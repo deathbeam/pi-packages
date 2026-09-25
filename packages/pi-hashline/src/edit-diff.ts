@@ -1,6 +1,6 @@
 import * as Diff from "diff";
 
-// ─── Line ending normalization ──────────────────────────────────────────
+// --- Line ending normalization ---
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
     const crlfIdx = content.indexOf("\r\n");
@@ -36,11 +36,11 @@ export function stripBom(content: string): { bom: string; text: string } {
     return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
 
-// ─── Diff generation ────────────────────────────────────────────────────
+// --- Diff generation ---
 
 // Emits pi's standard diff line format (`+N content` / `-N content` /
 // ` N content`) so the TUI renders it with the shared renderDiff (colored
-// lines, intra-line highlighting). The diff string is display-only — the
+// lines, intra-line highlighting). The diff string is display-only; the
 // model sees the anchors block, never this string.
 function formatDiffPreviewLine(prefix: " " | "+" | "-", lineNum: number, lineNumWidth: number, line: string): string {
     const paddedLineNum = String(lineNum).padStart(lineNumWidth, " ");

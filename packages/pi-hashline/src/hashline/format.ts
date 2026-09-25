@@ -1,5 +1,5 @@
 /**
- * Format helpers — hashline region rendering, affected-line range, changed-line range.
+ * Format helpers: hashline region rendering, affected-line range, changed-line range.
  *
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
@@ -39,7 +39,7 @@ export function splitVisibleLines(text: string): string[] {
     return text.endsWith("\n") ? lines.slice(0, -1) : lines;
 }
 
-// ─── Affected-line computation (for returning anchors after edit) ───────
+// --- Affected-line computation (for returning anchors after edit) ---
 
 const ANCHOR_CONTEXT_LINES = 2;
 const ANCHOR_MAX_OUTPUT_LINES = 12;
@@ -88,7 +88,7 @@ export function formatHashlineRegion(fileLines: readonly string[], startLine: nu
     return out.join("\n");
 }
 
-// ─── Changed line range computation ─────────────────────────────────
+// --- Changed line range computation ---
 
 /**
  * Compute first/last changed line numbers between two document versions.
