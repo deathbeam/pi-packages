@@ -1,0 +1,39 @@
+{
+  "name": "@deathbeam/pi-delegate",
+  "version": "0.0.1",
+  "description": "Run focused Pi subagents as background or foreground tasks",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deathbeam/pi-packages.git",
+    "directory": "packages/pi-delegate"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "index.ts",
+    "child.ts",
+    "format.ts",
+    "agents",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node check.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

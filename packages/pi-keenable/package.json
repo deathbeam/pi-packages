@@ -1,0 +1,32 @@
+{
+  "name": "@deathbeam/pi-keenable",
+  "version": "0.0.1",
+  "description": "Keenable web_search and web_fetch tools for Pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deathbeam/pi-packages.git",
+    "directory": "packages/pi-keenable"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

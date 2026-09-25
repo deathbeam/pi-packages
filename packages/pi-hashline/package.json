@@ -1,0 +1,42 @@
+{
+  "name": "@deathbeam/pi-hashline",
+  "version": "0.0.1",
+  "description": "Hashline read/edit/grep tool overrides for Pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deathbeam/pi-packages.git",
+    "directory": "packages/pi-hashline"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "prompts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node check.mjs"
+  },
+  "dependencies": {
+    "diff": "^8.0.2",
+    "xxhashjs": "^0.2.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
