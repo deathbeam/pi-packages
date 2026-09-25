@@ -3,6 +3,7 @@ import { createJiti } from "jiti";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const jiti = createJiti(import.meta.url);
 const mod = jiti("./index.ts");
@@ -52,6 +53,27 @@ async function run(tool, params) {
         throw new Error("snapshotId should be gone");
     }
 
+    // Pi path conventions are shared by read, edit and grep.
+    const spaceFile = join(dir, "space name.ts");
+    writeFileSync(spaceFile, "const path = 1;\n");
+    const spaceRef = `@${spaceFile.replace(" ", "\u202f")}`;
+    const spaceRead = await run(byName.read, { path: spaceRef });
+    const spaceAnchor = spaceRead.content[0].text.match(/1#[A-Z]{3}/)?.[0];
+    if (!spaceAnchor) throw new Error("read did not resolve Pi-style @/Unicode-space path");
+    await run(byName.edit, {
+        path: spaceRef,
+        edits: [{ op: "replace", pos: spaceAnchor, lines: ["const path = 2;"] }],
+    });
+    const spaceGrep = await run(byName.grep, { pattern: "const path = 2;", path: spaceRef, literal: true });
+    if (!/#[A-Z]{3}:const path = 2;/.test(spaceGrep.content[0].text)) {
+        throw new Error("edit/grep did not resolve Pi-style @/Unicode-space path");
+    }
+    const urlRead = await run(byName.read, { path: pathToFileURL(spaceFile).href });
+    if (!/#[A-Z]{3}:const path = 2;/.test(urlRead.content[0].text)) {
+        throw new Error("read did not resolve Pi-style file URL");
+    }
+    console.log("--- shared Pi-style path resolution OK ---");
+
     // 2. edit: replace line 2 using the anchor from read output
     const anchor = readText.match(/^\s*2#([A-Z]{3}):/m);
     if (!anchor) throw new Error("no anchor for line 2");
@@ -96,6 +118,35 @@ async function run(tool, params) {
         throw new Error("bug1: hinted anchor wrongly rejected: " + hintedEdit.content[0].text);
     }
     console.log("--- bug1 (space after colon) OK ---");
+
+    // A no-op must not claim that mixed line endings were rewritten.
+    const endingsFile = join(dir, "endings.txt");
+    const mixedEndings = "alpha\r\nbeta\n";
+    writeFileSync(endingsFile, mixedEndings);
+    const endingsRead = await run(byName.read, { path: endingsFile });
+    const endingsAnchor = endingsRead.content[0].text.match(/1#[A-Z]{3}/)?.[0];
+    if (!endingsAnchor) throw new Error("missing anchor for mixed-ending check");
+    const endingsNoop = await run(byName.edit, {
+        path: endingsFile,
+        edits: [{ op: "replace", pos: endingsAnchor, lines: ["alpha"] }],
+    });
+    if (
+        !endingsNoop.details.warnings.some((warning) => warning.startsWith("No changes made to ")) ||
+        "classification" in endingsNoop.details ||
+        /Classification: noop/.test(endingsNoop.content[0].text) ||
+        readFileSync(endingsFile, "utf8") !== mixedEndings ||
+        endingsNoop.details.warnings.some((warning) => /rewrote/.test(warning))
+    ) {
+        throw new Error("no-op incorrectly claimed to rewrite mixed line endings");
+    }
+    const endingsChanged = await run(byName.edit, {
+        path: endingsFile,
+        edits: [{ op: "replace", pos: endingsAnchor, lines: ["ALPHA"] }],
+    });
+    if (!endingsChanged.details.warnings.some((warning) => /rewrote/.test(warning))) {
+        throw new Error("real edit lost its mixed-line-ending warning");
+    }
+    console.log("--- mixed-endings warning only on actual write OK ---");
 
     // 4. replace_text must fail with the teaching error
     try {
@@ -181,11 +232,8 @@ async function run(tool, params) {
     const nearCapFile = join(dir, "near-cap.txt");
     writeFileSync(nearCapFile, "x".repeat(50 * 1024 - 500));
     const nearCap = await run(byName.read, { path: nearCapFile });
-    if (/exceeds 50\.0KB/.test(nearCap.content[0].text) || !nearCap.details.truncation?.firstLineExceedsLimit) {
-        throw new Error("read misreported a line within 50KB as exceeding 50KB");
-    }
-    if (nearCap.details.truncation.content !== undefined) {
-        throw new Error("read details.truncation duplicates the preview content");
+    if (!/^1#[A-Z]{3}:x/m.test(nearCap.content[0].text) || nearCap.details.truncation?.firstLineExceedsLimit) {
+        throw new Error("read did not use the full 50KB content budget");
     }
 
     // 6b. read caps before formatting, including a huge explicit limit; wide
@@ -202,8 +250,8 @@ async function run(tool, params) {
     if (!wideNotice || wideRead.details.nextOffset !== Number(wideNotice[1]) || wideAnchorLines.length > 2000) {
         throw new Error("wide read did not cap with a stable continuation offset");
     }
-    if (Buffer.byteLength(wideText, "utf8") > 50 * 1024) {
-        throw new Error("wide read exceeded the 50KB cap");
+    if (Buffer.byteLength(wideText.split("\n\n[Showing lines ")[0], "utf8") > 50 * 1024) {
+        throw new Error("wide read content exceeded the 50KB cap");
     }
     const wideContinuation = await run(byName.read, { path: wideFile, offset: wideRead.details.nextOffset });
     const wideAnchor = wideContinuation.content[0].text.match(/^\s*\d+#([A-Z]{3}):/m);
@@ -229,6 +277,85 @@ async function run(tool, params) {
             throw new Error("grep output missing 3-char anchors");
         }
 
+        // A whole-line anchor cannot fit for a huge line; report it rather than hiding the match.
+        const longMatchFile = join(dir, "long-match.txt");
+        writeFileSync(longMatchFile, `oversized ${"x".repeat(60 * 1024)}\noversized short\n`);
+        const longMatch = await run(byName.grep, { pattern: "oversized", path: longMatchFile });
+        const longMatchText = longMatch.content[0].text;
+        if (
+            !/Line 1 cannot fit.*\(match\)/.test(longMatchText) ||
+            !/^2#[A-Z]{3}:oversized short$/m.test(longMatchText) ||
+            longMatch.details.truncated !== true ||
+            !longMatch.details.noticeCount
+        ) {
+            throw new Error("grep hid a match on a line too large to anchor: " + longMatchText.slice(0, 200));
+        }
+        console.log("--- grep oversized match remains visible as a warning OK ---");
+
+        // When a full anchor would exceed the remaining budget, show a placeholder and keep scanning.
+        const budgetFile = join(dir, "budget-match.txt");
+        writeFileSync(budgetFile, `budget ${"a".repeat(26 * 1024)}\nbudget ${"b".repeat(26 * 1024)}\nbudget short\n`);
+        const budgetMatch = await run(byName.grep, { pattern: "budget", path: budgetFile });
+        const budgetText = budgetMatch.content[0].text;
+        if (
+            !/^1#[A-Z]{3}:budget a/m.test(budgetText) ||
+            !/Line 2 cannot fit/.test(budgetText) ||
+            !/^3#[A-Z]{3}:budget short$/m.test(budgetText) ||
+            budgetMatch.details.truncated !== true
+        ) {
+            throw new Error("grep lost later matches when a line exceeded the remaining byte budget");
+        }
+        console.log("--- grep shared byte budget preserves later matches OK ---");
+
+        // Match Pi: context has no arbitrary five-line ceiling, while output remains capped.
+        if (byName.grep.parameters.properties.context.maximum !== undefined) {
+            throw new Error("grep context still has a maximum");
+        }
+        const contextual = await run(byName.grep, { pattern: "wide_100 =", path: wideFile, context: 6 });
+        const contextLines = [...contextual.content[0].text.matchAll(/^\s*(\d+)#[A-Z]{3}:/gm)].map((m) => Number(m[1]));
+        if (contextLines.length !== 13 || contextLines[0] !== 95 || contextLines.at(-1) !== 107) {
+            throw new Error("grep context >5 did not show six lines on each side: " + contextLines);
+        }
+        console.log("--- grep context beyond five lines OK ---");
+        const wideContext = await run(byName.grep, { pattern: "wide_100 =", path: wideFile, context: 100000 });
+        const wideContextText = wideContext.content[0].text;
+        const wideContextLines = wideContextText.split("\n");
+        if (
+            !wideContext.details.truncated ||
+            !wideContext.details.noticeCount ||
+            !/Truncated/.test(wideContextText) ||
+            Buffer.byteLength(wideContextLines.slice(0, -wideContext.details.noticeCount - 2).join("\n"), "utf8") >
+                50 * 1024 ||
+            wideContextLines.length - wideContext.details.noticeCount - 2 > 2000
+        ) {
+            throw new Error("unbounded context did not stop at the output budget");
+        }
+        console.log("--- grep large context output capped while formatting OK ---");
+
+        // Exhaust the line cap before the byte cap; still report all selected matches and the rg limit.
+        for (let i = 0; i < 3; i++) {
+            writeFileSync(join(dir, `line-cap-${i}.txt`), `cap-hit\n${"x\n".repeat(2100)}`);
+        }
+        const lineCapped = await run(byName.grep, {
+            pattern: "cap-hit",
+            path: dir,
+            glob: "line-cap-*.txt",
+            limit: 2,
+            context: 3000,
+        });
+        const lineCappedText = lineCapped.content[0].text;
+        if (
+            !/after 2 selected matches \(stopped at match limit 2\)/.test(lineCappedText) ||
+            !lineCapped.details.truncated ||
+            !lineCapped.details.noticeCount ||
+            lineCappedText.split("\n").length - lineCapped.details.noticeCount - 2 > 2000 ||
+            lineCappedText.split("\n").length <= 2000 ||
+            !lineCappedText.includes("selected before output cap")
+        ) {
+            throw new Error("line cap lost the match-limit or selected-match notice");
+        }
+        console.log("--- grep line cap retains selected count and match limit OK ---");
+
         // Hidden tracked files appear, but git metadata/ignored files do not.
         mkdirSync(join(dir, ".git"));
         writeFileSync(join(dir, ".git", "HEAD"), "needle metadata\n");
@@ -248,14 +375,13 @@ async function run(tool, params) {
             throw new Error("grep hidden/.gitignore behavior failed");
         }
         if (
-            Buffer.byteLength(largeGrepText, "utf8") > 50 * 1024 ||
-            largeGrepLines.length > 2000 ||
+            !largeGrep.details.noticeCount ||
+            Buffer.byteLength(largeGrepLines.slice(0, -largeGrep.details.noticeCount - 2).join("\n"), "utf8") >
+                50 * 1024 ||
+            largeGrepLines.length - largeGrep.details.noticeCount - 2 > 2000 ||
             !/Truncated/.test(largeGrepText)
         ) {
             throw new Error("grep output did not cap with a continuation notice");
-        }
-        if (largeGrep.details.truncation?.content !== undefined) {
-            throw new Error("grep details.truncation duplicates the output content");
         }
         for (const line of largeGrepLines.filter((line) => /^\s*\d+#/.test(line))) {
             if (!/^\s*\d+#[A-Z]{3}:needle x{300} \d+$/.test(line)) {
@@ -263,7 +389,8 @@ async function run(tool, params) {
             }
         }
         for (const entry of largeGrep.details.highlights ?? []) {
-            if (entry.line >= largeGrepLines.length) throw new Error("grep highlight points past returned output");
+            if (entry.line >= largeGrepLines.length - largeGrep.details.noticeCount - 2)
+                throw new Error("grep highlight points past returned result lines");
             const stripped = largeGrepLines[entry.line].replace(/^\s*\d+#[A-Z]{3}:/, "");
             for (const [start, end] of entry.ranges) {
                 if (stripped.slice(start, end) !== "needle")
@@ -402,7 +529,7 @@ async function run(tool, params) {
     const errComp = byName.edit.renderResult(
         {
             content: [{ type: "text", text: "[E_STALE_ANCHOR] boom" }],
-            details: { diff: "", classification: "noop", warnings: [] },
+            details: { diff: "", warnings: [] },
         },
         { isPartial: false },
         fakeTheme,
@@ -411,12 +538,25 @@ async function run(tool, params) {
     if (!/E_STALE_ANCHOR/.test(stripAnsi(renderToString(errComp))))
         throw new Error("error text missing from rendered edit result");
     console.log("--- edit renderResult: error path OK ---");
+    const noopDisplay = stripAnsi(
+        renderToString(
+            byName.edit.renderResult(endingsNoop, { isPartial: false, expanded: true }, fakeTheme, {
+                state: {},
+                lastComponent: undefined,
+                isError: false,
+                args: { path: endingsFile },
+            }),
+        ),
+    );
+    if (!noopDisplay.includes("«warning»No changes made")) {
+        throw new Error("no-op edit is not styled as a warning: " + JSON.stringify(noopDisplay.slice(0, 120)));
+    }
 
     // collapsed diffs are capped with an expand hint; expanded shows everything
     const longDiff = Array.from({ length: 30 }, (_, i) => `+${i + 1} const v${i} = ${i};`).join("\n");
     const longRes = {
         content: [{ type: "text", text: "anchors" }],
-        details: { diff: longDiff, classification: "applied", warnings: [] },
+        details: { diff: longDiff, warnings: [] },
     };
     const longCtx = { state: {}, lastComponent: undefined, isError: false, args: { path: warnFile } };
     const collapsedText = stripAnsi(
@@ -460,6 +600,20 @@ async function run(tool, params) {
         throw new Error("edit diff renderer lost the edited line");
     }
     console.log("--- edit renderResult: file escapes sanitized before renderDiff OK ---");
+    const warningDisplay = renderToString(
+        byName.edit.renderResult(
+            {
+                content: [{ type: "text", text: "anchors" }],
+                details: { diff: "+1 const safe = true;", warnings: ["danger \u001b[31mred\ufff9"] },
+            },
+            { isPartial: false, expanded: true },
+            fakeTheme,
+            { state: {}, lastComponent: undefined, isError: false, args: { path: warnFile } },
+        ),
+    );
+    if (warningDisplay.includes("\u001b[31m") || warningDisplay.includes("\ufff9")) {
+        throw new Error("unsafe control characters reached the edit warning renderer");
+    }
 
     // duplicate-payload guard still fires through the pipeline
     writeFileSync(file, "const x = 1;\nconst y = 2;\nconst z = 3;\n");
@@ -479,7 +633,7 @@ async function run(tool, params) {
     // 9. read renderer: content after the LINE#HASH: prefix must be syntax
     // highlighted (the raw prefixed line would highlight as a comment).
     const tsFile = join(dir, "render-check.ts");
-    writeFileSync(tsFile, "const value = 1;\n// a comment\nexport function hi() { return value; }\n");
+    writeFileSync(tsFile, "const value = 1;\n\t// a comment\nexport function hi() { return value; }\n");
     const readRes = await run(byName.read, { path: tsFile });
     const readCtx = {
         state: {},
@@ -512,6 +666,100 @@ async function run(tool, params) {
         throw new Error("read content not syntax highlighted (one color only): " + JSON.stringify(line1));
     }
     console.log("--- read renderer: prefixes stripped + highlighted code OK ---");
+    const limitedRead = await run(byName.read, { path: tsFile, limit: 2 });
+    const limitedDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(limitedRead, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: tsFile, limit: 2 },
+            }),
+        ),
+    );
+    if (!limitedDisplay.includes("«muted»[Showing lines 1-2 of 3")) {
+        throw new Error("read pagination note was syntax highlighted instead of muted");
+    }
+    const cappedDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(wideRead, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: wideFile },
+            }),
+        ),
+    );
+    if (!cappedDisplay.includes("«warning»[Showing lines ")) {
+        throw new Error("read truncation note was syntax highlighted instead of warned");
+    }
+    const emptyFile = join(dir, "empty.ts");
+    writeFileSync(emptyFile, "");
+    const emptyResult = await run(byName.read, { path: emptyFile });
+    const emptyDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(emptyResult, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: emptyFile },
+            }),
+        ),
+    );
+    if (!emptyDisplay.includes("«warning»File is empty."))
+        throw new Error("empty-file advisory was syntax highlighted");
+    const beyondResult = await run(byName.read, { path: tsFile, offset: 99 });
+    const beyondDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(beyondResult, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: tsFile, offset: 99 },
+            }),
+        ),
+    );
+    if (!beyondDisplay.includes("«warning»Offset 99 is beyond end")) {
+        throw new Error("out-of-range advisory was syntax highlighted");
+    }
+    const badUtf8File = join(dir, "bad-utf8.ts");
+    writeFileSync(
+        badUtf8File,
+        Buffer.concat([Buffer.from("const a = "), Buffer.from([0xff]), Buffer.from(";\nconst b = 2;\n")]),
+    );
+    const badUtf8Read = await run(byName.read, { path: badUtf8File });
+    const badUtf8Display = stripAnsi(
+        renderToString(
+            byName.read.renderResult(badUtf8Read, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: badUtf8File },
+            }),
+        ),
+    );
+    if (!badUtf8Display.includes("«warning»[Non-UTF-8 bytes")) {
+        throw new Error("non-UTF-8 warning was syntax highlighted instead of warned");
+    }
+    const badUtf8Page = await run(byName.read, { path: badUtf8File, limit: 1 });
+    const badUtf8PageDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(badUtf8Page, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: badUtf8File, limit: 1 },
+            }),
+        ),
+    );
+    if (
+        !badUtf8PageDisplay.includes("«muted»[Showing lines 1-1 of 2") ||
+        !badUtf8PageDisplay.includes("«warning»[Non-UTF-8 bytes")
+    ) {
+        throw new Error("paginated non-UTF-8 warning was not shown separately in warning color");
+    }
+    const oversizedDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(big, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: bigFile },
+            }),
+        ),
+    );
+    if (!oversizedDisplay.includes("«warning»[Line 1 cannot fit")) {
+        throw new Error("oversized read advisory was not styled as warning");
+    }
+    if (!readRes.content[0].text.includes("\t// a comment") || readRendered.includes("\t")) {
+        throw new Error("read renderer did not expand tabs for display only");
+    }
 
     // raw mode has no prefixes; content must still be highlighted
     const rawRes = await run(byName.read, { path: tsFile, raw: true });
@@ -543,6 +791,23 @@ async function run(tool, params) {
     const gText = stripAnsi(renderToString(gComp));
     if (/^\s*\d+#[A-Z]{3}:/m.test(gText)) throw new Error("grep render still shows anchor prefixes");
     if (!/const /.test(gText)) throw new Error("grep render lost content");
+    const cappedResult = await run(byName.grep, { pattern: "needle", path: dir, limit: 200 });
+    const cappedGrepDisplay = stripAnsi(
+        renderToString(byName.grep.renderResult(cappedResult, { expanded: false, isPartial: false }, fakeTheme, gCtx)),
+    );
+    if (!cappedGrepDisplay.includes("«warning»[Truncated") || !cappedGrepDisplay.includes("«searchMatchText»needle")) {
+        throw new Error("grep truncation notice was hidden or not warning-colored");
+    }
+    const omittedResult = await run(byName.grep, { pattern: "oversized", path: join(dir, "long-match.txt") });
+    const omittedDisplay = stripAnsi(
+        renderToString(byName.grep.renderResult(omittedResult, { expanded: true, isPartial: false }, fakeTheme, gCtx)),
+    );
+    if (
+        !omittedDisplay.includes("«warning»[Line 1 cannot fit") ||
+        !omittedDisplay.includes("«warning»[1 line(s) shown as placeholders")
+    ) {
+        throw new Error("grep oversized-line notices were not warning-colored");
+    }
     const gExpanded = stripAnsi(
         renderToString(
             byName.grep.renderResult(grepRes, { expanded: true, isPartial: false }, fakeTheme, {
@@ -558,7 +823,7 @@ async function run(tool, params) {
     const hlFile = join(dir, "hl.ts");
     writeFileSync(
         hlFile,
-        'const emoji = "\u{1F3AF}\u{1F3AF}"; const target = 1;\nconst plain = 2;\nconst target2 = 3;\n',
+        'const emoji = "\u{1F3AF}\u{1F3AF}"; const \ufff9target = 1;\nconst plain = 2;\nconst target2 = 3;\n',
     );
     const hlRes = await run(byName.grep, { pattern: "target", path: hlFile });
     const outLines = hlRes.content[0].text.split("\n");
@@ -605,6 +870,17 @@ async function run(tool, params) {
     if ((await fk.loadFileKindAndText(pngFile)).kind !== "image") throw new Error("image classification failed");
     if ((await fk.loadFileKindAndText(dir)).kind !== "directory") throw new Error("directory classification failed");
     console.log("--- file-kind: text / binary / image / directory OK ---");
+    const imageResult = await run(byName.read, { path: pngFile });
+    const hiddenImage = byName.read.renderResult(imageResult, { expanded: true, isPartial: false }, fakeTheme, {
+        ...readCtx,
+        args: { path: pngFile },
+        showImages: false,
+        lastComponent: undefined,
+    });
+    if (!stripAnsi(renderToString(hiddenImage)).includes("[Image:")) {
+        throw new Error("read renderer omitted Pi's image fallback placeholder");
+    }
+    console.log("--- hidden image renderer fallback OK ---");
 
     // 12b. expected-version mismatch cleans the temp file and prevents overwrite.
     const fsWrite = jiti("./src/fs-write.ts");

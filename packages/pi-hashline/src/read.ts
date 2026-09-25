@@ -10,7 +10,7 @@ import {
     type Theme,
     type TruncationResult,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { getCapabilities, getImageDimensions, imageFallback, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { access as fsAccess } from "fs/promises";
 import { constants } from "fs";
@@ -30,6 +30,7 @@ import { resolveMutationTargetPath } from "./fs-write";
 import { rememberReadSnapshot } from "./read-snapshot";
 import { clearAppliedPayload } from "./noop-loop-guard";
 
+const UTF8_WARNING = "[Non-UTF-8 bytes shown as U+FFFD; editing rewrites the file as UTF-8.]";
 const READ_DESC = loadPrompt(new URL("../prompts/read.md", import.meta.url))
     .replaceAll("{{DEFAULT_MAX_LINES}}", String(DEFAULT_MAX_LINES))
     .replaceAll("{{DEFAULT_MAX_BYTES}}", formatSize(DEFAULT_MAX_BYTES))
@@ -54,7 +55,7 @@ function normalizePositiveInteger(value: number | undefined, name: "offset" | "l
 function formatHashlineReadPreview(
     text: string,
     options: { offset?: number; limit?: number; raw?: boolean },
-): { text: string; truncation?: TruncationResult; nextOffset?: number } {
+): { text: string; truncation?: TruncationResult; nextOffset?: number; advisory?: boolean } {
     const allLines = splitVisibleLines(text);
     const totalLines = allLines.length;
     const startLine = normalizePositiveInteger(options.offset, "offset") ?? 1;
@@ -62,24 +63,27 @@ function formatHashlineReadPreview(
         if (startLine === 1) {
             return {
                 text: "File is empty. Use edit with prepend or append and omit pos to insert content.",
+                advisory: true,
             };
         }
 
         return {
             text: `Offset ${startLine} is beyond end of file (0 lines total). The file is empty. Use edit with prepend or append and omit pos to insert content.`,
+            advisory: true,
         };
     }
 
     if (startLine > totalLines) {
         return {
             text: `Offset ${startLine} is beyond end of file (${totalLines} lines total). Use offset=1 to read from the start, or offset=${totalLines} to read the last line.`,
+            advisory: true,
         };
     }
 
     const limit = normalizePositiveInteger(options.limit, "limit");
     const requestedEnd = limit ? Math.min(startLine - 1 + limit, totalLines) : totalLines;
-    // Reserve two lines and 1KB for the continuation notice.
-    const candidateEnd = Math.min(requestedEnd, startLine + DEFAULT_MAX_LINES - 3);
+    // Notices are appended after the complete-line content budget.
+    const candidateEnd = Math.min(requestedEnd, startLine + DEFAULT_MAX_LINES - 1);
     let capReason: "lines" | "bytes" | undefined = candidateEnd < requestedEnd ? "lines" : undefined;
     const lineNumberWidth = String(candidateEnd).length;
     const prefixBytes = options.raw
@@ -90,7 +94,7 @@ function formatHashlineReadPreview(
     for (let lineNum = startLine; lineNum <= candidateEnd; lineNum++) {
         const lineBytes =
             prefixBytes + Buffer.byteLength(allLines[lineNum - 1]!, "utf8") + (lineNum > startLine ? 1 : 0);
-        if (outputBytes + lineBytes > DEFAULT_MAX_BYTES - 1024) break;
+        if (outputBytes + lineBytes > DEFAULT_MAX_BYTES) break;
         outputBytes += lineBytes;
         endLine = lineNum;
     }
@@ -103,8 +107,8 @@ function formatHashlineReadPreview(
             ? line
             : `${String(startLine).padStart(lineNumberWidth, " ")}#${"Z".repeat(HASH_LENGTH)}:${line}`;
         return {
-            text: `[Line ${startLine} cannot fit as a complete ${options.raw ? "raw" : "hashline"} line within ${formatSize(DEFAULT_MAX_BYTES)} of output (including pagination). Use bash to inspect it.]`,
-            truncation: truncateHead(oversized, { maxBytes: DEFAULT_MAX_BYTES - 1024 }),
+            text: `[Line ${startLine} cannot fit as a complete ${options.raw ? "raw" : "hashline"} line within ${formatSize(DEFAULT_MAX_BYTES)} of output. Use bash to inspect it.]`,
+            truncation: truncateHead(oversized),
         };
     }
 
@@ -142,9 +146,38 @@ function formatHashlineReadPreview(
     };
 }
 
+/**
+ * Collect the display text for a result: sanitized text blocks, plus a
+ * placeholder per image block when the terminal or the session cannot show
+ * inline images. Mirrors pi's `getTextOutput` so image reads that fall back to
+ * the built-in read tool render the same way.
+ */
+function getRenderText(result: unknown, showImages: boolean): string {
+    const content =
+        (result as { content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }> })?.content ??
+        [];
+    const text = content
+        .filter((entry) => entry.type === "text")
+        .map((entry) => sanitizeOutput(entry.text ?? "").replace(/\r/g, ""))
+        .join("\n");
+    const images = content.filter((entry) => entry.type === "image");
+    if (images.length === 0 || (getCapabilities().images && showImages)) {
+        return text;
+    }
+    const placeholders = images
+        .map((image) => {
+            const mimeType = image.mimeType ?? "image/unknown";
+            const dimensions =
+                image.data && image.mimeType ? (getImageDimensions(image.data, mimeType) ?? undefined) : undefined;
+            return imageFallback(mimeType, dimensions);
+        })
+        .join("\n");
+    return text ? `${text}\n${placeholders}` : placeholders;
+}
+
 /** Strip anchors only in the TUI: highlighting treats `#ABC:` as a comment. */
 function formatReadResultText(output: string, lang: string | undefined, theme: Pick<Theme, "fg">): string {
-    const lines = stripHashlinePrefixes(output).split("\n");
+    const lines = stripHashlinePrefixes(output).replace(/\t/g, "   ").split("\n");
     while (lines.length > 0 && lines[lines.length - 1] === "") {
         lines.pop();
     }
@@ -248,10 +281,7 @@ export function registerReadTool(pi: ExtensionAPI): void {
             // Invalid UTF-8 bytes are decoded as U+FFFD, matching Pi's built-in
             // tools. Warn only when the decoder reported invalid bytes; a literal,
             // valid U+FFFD in a UTF-8 file should not be treated as lossy decoding.
-            const previewText =
-                file.hadUtf8DecodeErrors === true
-                    ? `${preview.text}\n\n[Non-UTF-8 bytes shown as U+FFFD; editing rewrites the file as UTF-8.]`
-                    : preview.text;
+            const previewText = file.hadUtf8DecodeErrors === true ? `${preview.text}\n\n${UTF8_WARNING}` : preview.text;
 
             const { content: _truncatedContent, ...truncationMetadata } = preview.truncation ?? {};
 
@@ -260,6 +290,8 @@ export function registerReadTool(pi: ExtensionAPI): void {
                 details: {
                     truncation: preview.truncation ? truncationMetadata : undefined,
                     ...(preview.nextOffset !== undefined ? { nextOffset: preview.nextOffset } : {}),
+                    ...(preview.advisory ? { advisory: true } : {}),
+                    ...(file.hadUtf8DecodeErrors === true ? { hadUtf8DecodeErrors: true } : {}),
                 },
             };
         },
@@ -274,16 +306,34 @@ export function registerReadTool(pi: ExtensionAPI): void {
                 return text;
             }
 
-            const typed = result as {
-                content?: Array<{ type: string; text?: string }>;
-            };
-            const output = (typed.content ?? [])
-                .filter((entry) => entry.type === "text")
-                .map((entry) => sanitizeOutput(entry.text ?? "").replace(/\r/g, ""))
-                .join("\n");
+            let output = getRenderText(result, context.showImages !== false);
             const rawPath = (context.args as { path?: unknown } | undefined)?.path;
             const lang = !context.isError && typeof rawPath === "string" ? getLanguageFromPath(rawPath) : undefined;
-            text.setText(formatReadResultText(output, lang, theme));
+            const details = (
+                result as {
+                    details?: {
+                        nextOffset?: number;
+                        truncation?: TruncationResult;
+                        hadUtf8DecodeErrors?: boolean;
+                        advisory?: boolean;
+                    };
+                }
+            ).details;
+            if (details?.advisory || (details?.truncation?.firstLineExceedsLimit && output.startsWith("[Line "))) {
+                text.setText(`\n${theme.fg("warning", output)}`);
+                return text;
+            }
+            const utf8Notice =
+                details?.hadUtf8DecodeErrors && output.endsWith(`\n\n${UTF8_WARNING}`) ? UTF8_WARNING : "";
+            if (utf8Notice) output = output.slice(0, -utf8Notice.length - 2);
+            const noticeIndex = details?.nextOffset !== undefined ? output.lastIndexOf("\n\n[Showing lines ") : -1;
+            const notice = noticeIndex < 0 ? "" : output.slice(noticeIndex + 2);
+            const body = noticeIndex < 0 ? output : output.slice(0, noticeIndex);
+            text.setText(
+                formatReadResultText(body, lang, theme) +
+                    (notice ? `\n\n${theme.fg(details?.truncation?.truncated ? "warning" : "muted", notice)}` : "") +
+                    (utf8Notice ? `\n\n${theme.fg("warning", utf8Notice)}` : ""),
+            );
             return text;
         },
     });

@@ -16,12 +16,9 @@ type ToolResult = {
     details: HashlineEditToolDetails;
 };
 
-type EditClassification = "applied" | "noop";
-
 export type HashlineEditToolDetails = {
     diff: string;
     firstChangedLine?: number;
-    classification: EditClassification;
     warnings: string[];
 };
 
@@ -85,14 +82,13 @@ export function buildNoopResponse(input: NoopResponseInput): ToolResult {
         content: [
             {
                 type: "text",
-                text: `No changes made to ${path}\nClassification: noop\n${noopDetailsText}${warningsBlockOf(warnings)}`,
+                text: `No changes made to ${path}\n${noopDetailsText}${warningsBlockOf(warnings)}`,
             },
         ],
         details: {
             diff: "",
             firstChangedLine: undefined,
-            classification: "noop",
-            warnings: warnings ?? [],
+            warnings: [`No changes made to ${path}`, ...(warnings ?? [])],
         },
     };
 }
@@ -118,7 +114,6 @@ export function buildChangedResponse(input: SuccessResponseInput): ToolResult {
         details: {
             diff: diffResult.diff,
             firstChangedLine: editMeta.firstChangedLine,
-            classification: "applied",
             warnings: warnings ?? [],
         },
     };

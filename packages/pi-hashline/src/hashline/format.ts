@@ -9,9 +9,11 @@ import { computeLineHash, HASH_LENGTH, NIBBLE_STR } from "./hash";
 /** Matches a rendered anchor prefix, e.g. ` 12#ABC:`. */
 const ANCHOR_PREFIX_RE = new RegExp(`^(\\s*\\d+#[${NIBBLE_STR}]{${HASH_LENGTH}}:)`);
 
-/** Strip ANSI escapes and control characters so file content cannot inject terminal sequences. */
+/** Strip ANSI escapes and unsafe control/format characters before terminal rendering. */
 export function sanitizeOutput(text: string): string {
-    return text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+    return text
+        .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\ufff9-\ufffb]/g, "");
 }
 
 /**

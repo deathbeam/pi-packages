@@ -220,7 +220,7 @@ async function executeEditPipeline(
         originalEnding,
         hadUtf8DecodeErrors: file.hadUtf8DecodeErrors === true,
         warnings: [
-            ...(mixedEndingWarning ? [mixedEndingWarning] : []),
+            ...(mixedEndingWarning && parts.result !== originalNormalized ? [mixedEndingWarning] : []),
             ...extraWarnings,
             ...(parts.resultWarnings ?? []),
         ],
@@ -365,7 +365,7 @@ function buildEditToolDefinition(): EditToolDefinition {
             const modelText = typed.content?.find((entry) => entry.type === "text")?.text;
 
             if (context.isError) {
-                text.setText(modelText ? theme.fg("error", modelText) : "");
+                text.setText(modelText ? theme.fg("error", sanitizeOutput(modelText)) : "");
                 return text;
             }
 
@@ -375,11 +375,13 @@ function buildEditToolDefinition(): EditToolDefinition {
                 // Sanitize file content before renderDiff adds its own ANSI styling.
                 sections.push(capDiffPreview(renderDiff(sanitizeOutput(details.diff)), expanded, theme));
             }
-            if (details && details.warnings.length > 0) {
-                sections.push(details.warnings.map((warning) => theme.fg("warning", warning)).join("\n"));
+            if (details?.diff && details.warnings.length > 0) {
+                sections.push(
+                    details.warnings.map((warning) => theme.fg("warning", sanitizeOutput(warning))).join("\n"),
+                );
             }
             if (!details?.diff && modelText) {
-                sections.push(modelText);
+                sections.push(details?.warnings.length ? theme.fg("warning", sanitizeOutput(modelText)) : modelText);
             }
             // No leading newline: the call block is a Box with its own bottom
             // padding, and adding one here doubles the gap above the diff.

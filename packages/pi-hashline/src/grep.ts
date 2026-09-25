@@ -1,11 +1,5 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import {
-    DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_LINES,
-    formatSize,
-    keyHint,
-    truncateHead,
-} from "@earendil-works/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "child_process";
@@ -13,13 +7,16 @@ import { createInterface } from "readline";
 import { normalizeToLF, stripBom } from "./edit-diff";
 import { resolveMutationTargetPath } from "./fs-write";
 import { loadFileKindAndText } from "./file-kind";
-import { formatHashlineRegion, sanitizeOutput, splitVisibleLines, stripHashlinePrefixes } from "./hashline";
+import { computeLineHash, HASH_LENGTH, sanitizeOutput, splitVisibleLines, stripHashlinePrefixes } from "./hashline";
 import { resolveToCwd } from "./path-utils";
 import { loadPrompt } from "./prompt-loader";
 import { rememberReadSnapshot } from "./read-snapshot";
 import { throwIfAborted } from "./runtime";
 
-const GREP_DESC = loadPrompt(new URL("../prompts/grep.md", import.meta.url)).trim();
+const GREP_DESC = loadPrompt(new URL("../prompts/grep.md", import.meta.url))
+    .replaceAll("{{DEFAULT_MAX_LINES}}", String(DEFAULT_MAX_LINES))
+    .replaceAll("{{DEFAULT_MAX_BYTES}}", formatSize(DEFAULT_MAX_BYTES))
+    .trim();
 
 const GREP_PROMPT_SNIPPET = loadPrompt(new URL("../prompts/grep-snippet.md", import.meta.url)).trim();
 
@@ -325,8 +322,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             context: Type.Optional(
                 Type.Integer({
                     minimum: 0,
-                    maximum: 5,
-                    description: "Number of context lines to show around each match (0–5, default 0)",
+                    description: "Number of context lines to show before and after each match (default 0)",
                 }),
             ),
             limit: Type.Optional(
@@ -343,20 +339,19 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
             const typed = result as {
                 content?: Array<{ type: string; text?: string }>;
-                details?: {
-                    highlights?: Array<{ line: number; ranges: MatchRanges }>;
-                };
+                details?: { highlights?: Array<{ line: number; ranges: MatchRanges }>; noticeCount?: number };
             };
-            const output = stripHashlinePrefixes(
+            const rawLines = stripHashlinePrefixes(
                 (typed.content ?? [])
                     .filter((entry) => entry.type === "text")
-                    .map((entry) => sanitizeOutput(entry.text ?? ""))
+                    .map((entry) => entry.text ?? "")
                     .join("\n"),
-            );
-            const lines = output.split("\n");
-            while (lines.length > 0 && lines[lines.length - 1] === "") {
-                lines.pop();
-            }
+            ).split("\n");
+            while (rawLines.at(-1) === "") rawLines.pop();
+            const noticeCount = Math.min(typed.details?.noticeCount ?? 0, rawLines.length);
+            const notices = noticeCount ? rawLines.splice(-noticeCount) : [];
+            if (noticeCount && rawLines.at(-1) === "") rawLines.pop();
+            const lines = rawLines.map(sanitizeOutput);
 
             const highlights = new Map<number, MatchRanges>();
             for (const entry of typed.details?.highlights ?? []) {
@@ -366,13 +361,33 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             const maxLines = expanded ? lines.length : 15;
             const shown = lines.slice(0, maxLines).map((line, index) => {
                 const ranges = highlights.get(index);
-                return ranges ? highlightMatchRanges(line, ranges, theme) : theme.fg("toolOutput", line);
+                if (ranges) {
+                    const rawLine = rawLines[index]!;
+                    const adjusted =
+                        rawLine === line
+                            ? ranges
+                            : ranges
+                                  .filter(([start, end]) => start >= 0 && start < end && end <= rawLine.length)
+                                  .map(
+                                      ([start, end]) =>
+                                          [
+                                              sanitizeOutput(rawLine.slice(0, start)).length,
+                                              sanitizeOutput(rawLine.slice(0, end)).length,
+                                          ] as [number, number],
+                                  );
+                    return highlightMatchRanges(line, adjusted, theme);
+                }
+                return /^\[Line \d+ cannot fit as a complete hashline line \((match|context)\)/.test(line)
+                    ? theme.fg("warning", line)
+                    : theme.fg("toolOutput", line);
             });
             let rendered = `\n${shown.join("\n")}`;
             const remaining = lines.length - maxLines;
             if (remaining > 0) {
                 rendered += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
             }
+            if (notices.length)
+                rendered += `\n\n${notices.map((notice) => theme.fg("warning", sanitizeOutput(notice))).join("\n")}`;
             text.setText(rendered);
             return text;
         },
@@ -419,8 +434,22 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             let outputLineIndex = 0;
             let fileCount = 0;
             let shownMatches = 0;
+            let omittedLines = 0;
+            let outputBytes = 0;
+            let outputCapped = false;
+            const addLine = (line: string): boolean => {
+                const nextBytes = outputBytes + Buffer.byteLength(line, "utf8") + (outputLineIndex ? 1 : 0);
+                if (nextBytes > DEFAULT_MAX_BYTES || outputLineIndex >= DEFAULT_MAX_LINES) {
+                    outputCapped = true;
+                    return false;
+                }
+                outputParts.push(line);
+                outputBytes = nextBytes;
+                outputLineIndex++;
+                return true;
+            };
 
-            for (const [filePath, matchRangesByLine] of matchesByFile) {
+            fileLoop: for (const [filePath, matchRangesByLine] of matchesByFile) {
                 throwIfAborted(signal);
 
                 // Load file to compute context-correct hashes
@@ -458,31 +487,30 @@ export function registerGrepTool(pi: ExtensionAPI): void {
 
                 const displayPath = filePath.startsWith(ctx.cwd + "/") ? filePath.slice(ctx.cwd.length + 1) : filePath;
 
-                outputParts.push(`${displayPath}:`);
-                outputLineIndex++;
-
+                if (!addLine(`${displayPath}:`)) break;
                 let prevRangeEnd = -1;
                 for (const range of ranges) {
-                    if (prevRangeEnd !== -1) {
-                        outputParts.push("    ...");
-                        outputLineIndex++;
-                    }
-                    outputParts.push(formatHashlineRegion(fileLines, range.start, range.end));
+                    if (prevRangeEnd !== -1 && !addLine("    ...")) break fileLoop;
+                    const lineNumberWidth = String(range.end).length;
                     for (let lineNum = range.start; lineNum <= range.end; lineNum++) {
-                        const rangesForLine = matchRangesByLine.get(lineNum);
-                        if (rangesForLine && rangesForLine.length > 0) {
-                            highlights.push({
-                                line: outputLineIndex + (lineNum - range.start),
-                                ranges: rangesForLine,
-                            });
+                        const line = fileLines[lineNum - 1]!;
+                        const prefix = `${String(lineNum).padStart(lineNumberWidth, " ")}#`;
+                        const bytes = Buffer.byteLength(line, "utf8") + prefix.length + HASH_LENGTH + 1;
+                        const omitted = outputBytes + bytes + 1 > DEFAULT_MAX_BYTES;
+                        const displayed = omitted
+                            ? `[Line ${lineNum} cannot fit as a complete hashline line (${matchRangesByLine.has(lineNum) ? "match" : "context"}) within ${formatSize(DEFAULT_MAX_BYTES)} of grep output. Use read or bash to inspect it.]`
+                            : `${prefix}${computeLineHash(fileLines, lineNum - 1)}:${line}`;
+                        if (!addLine(displayed)) break fileLoop;
+                        if (omitted) omittedLines++;
+                        else {
+                            const rangesForLine = matchRangesByLine.get(lineNum);
+                            if (rangesForLine?.length)
+                                highlights.push({ line: outputLineIndex - 1, ranges: rangesForLine });
                         }
                     }
-                    outputLineIndex += range.end - range.start + 1;
                     prevRangeEnd = range.end;
                 }
-
-                outputParts.push("---");
-                outputLineIndex++;
+                if (!addLine("---")) break;
             }
 
             // Count only readable matches; rg's count may include files that disappeared.
@@ -501,38 +529,31 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     },
                 };
             }
-            const summary = `${shownMatches} match${shownMatches !== 1 ? "es" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}.${truncated ? ` (stopped at match limit ${limit})` : ""}`;
-            const rawOutput = `${outputParts.join("\n")}\n${summary}`;
-            // Reserve room for the notice; Pi's truncateHead retains complete anchor lines.
-            const truncation = truncateHead(rawOutput, {
-                maxLines: DEFAULT_MAX_LINES - 2,
-                maxBytes: DEFAULT_MAX_BYTES - 1024,
-            });
+            const summary = `${shownMatches} match${shownMatches !== 1 ? "es" : ""} in ${fileCount} file${fileCount !== 1 ? "s" : ""}${outputCapped ? " (selected before output cap)" : ""}.${truncated ? ` (stopped at match limit ${limit})` : ""}`;
             const notices = [
                 warning,
-                truncation.truncated
-                    ? `[Truncated at ${formatSize(DEFAULT_MAX_BYTES)} or ${DEFAULT_MAX_LINES} lines after ${shownMatches} selected matches. Narrow with path/glob or a more specific pattern, then rerun to continue.]`
+                omittedLines
+                    ? `[${omittedLines} line(s) shown as placeholders; use read or bash to inspect them.]`
+                    : undefined,
+                outputCapped
+                    ? `[Truncated at ${formatSize(DEFAULT_MAX_BYTES)} or ${DEFAULT_MAX_LINES} lines after ${totalMatched} selected matches${truncated ? ` (stopped at match limit ${limit})` : ""}. Narrow with path/glob or a more specific pattern, then rerun to continue.]`
                     : truncated
                       ? `[Stopped at match limit ${limit}. Narrow with path/glob or raise the limit, then rerun to continue.]`
                       : undefined,
             ].filter((notice): notice is string => notice !== undefined);
-            const outputLines = truncation.content.split("\n");
-            const visibleHighlights = highlights.filter((entry) => entry.line < outputLines.length);
-            const { content: _truncatedContent, ...truncationMetadata } = truncation;
             return {
                 content: [
                     {
                         type: "text",
-                        text:
-                            notices.length > 0 ? `${truncation.content}\n\n${notices.join("\n")}` : truncation.content,
+                        text: `${outputParts.join("\n")}\n${summary}${notices.length ? `\n\n${notices.join("\n")}` : ""}`,
                     },
                 ],
                 details: {
                     matches: shownMatches,
                     files: fileCount,
-                    truncated: truncated || truncation.truncated || warning !== undefined,
-                    ...(truncation.truncated ? { truncation: truncationMetadata } : {}),
-                    ...(visibleHighlights.length > 0 ? { highlights: visibleHighlights } : {}),
+                    truncated: truncated || outputCapped || warning !== undefined || omittedLines > 0,
+                    ...(notices.length ? { noticeCount: notices.length } : {}),
+                    ...(highlights.length ? { highlights } : {}),
                 },
             };
         },
