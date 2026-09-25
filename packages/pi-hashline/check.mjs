@@ -1,6 +1,6 @@
 /* Self-check for pi-hashline: load the extension via jiti (as pi does) and exercise read/edit. Run: node check.mjs */
 import { createJiti } from "jiti";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -66,6 +66,24 @@ async function run(tool, params) {
         throw new Error(`unexpected file content: ${JSON.stringify(after)}`);
     }
 
+    // Shared-boundary append must follow the whole replacement.
+    writeFileSync(file, "a\nb\nc\n");
+    const orderRead = await run(byName.read, { path: file });
+    const orderAnchor = orderRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    if (!orderAnchor) throw new Error("no anchor for the ordering check");
+    await run(byName.edit, {
+        path: file,
+        edits: [
+            { op: "replace", pos: `2#${orderAnchor[1]}`, lines: ["X", "Y"] },
+            { op: "append", pos: `2#${orderAnchor[1]}`, lines: ["Z"] },
+        ],
+    });
+    const ordered = readFileSync(file, "utf8");
+    if (ordered !== "a\nX\nY\nZ\nc\n") {
+        throw new Error("batched replace+append misordered: " + JSON.stringify(ordered));
+    }
+    console.log("--- batched replace+append ordering OK ---");
+
     // 3. Bug fix 1: anchor with " " after colon (hash matches) must NOT be stale
     writeFileSync(file, "const x = 1;\nconst y = 2;\nconst z = 3;\n");
     const reread = await run(byName.read, { path: file });
@@ -104,7 +122,7 @@ async function run(tool, params) {
         console.log("--- top-level oldText teaching error OK (prepareArguments) ---");
     }
 
-    // 5b. lowercase anchors accepted; lowercase display prefixes still rejected
+    // Lowercase anchors work; even lowercase numbered display prefixes are rejected.
     const lowerFile = join(dir, "lower.ts");
     writeFileSync(lowerFile, "const lower = 1;\nconst second = 2;\n");
     const lowerRead = await run(byName.read, { path: lowerFile });
@@ -128,16 +146,29 @@ async function run(tool, params) {
     try {
         const res = await run(byName.edit, {
             path: lowerFile,
-            edits: [{ op: "replace", pos: `2#${lm2[1]}`, lines: [`1#${lm[1].toLowerCase()}: const smuggled = 1;`] }],
+            edits: [{ op: "replace", pos: `2#${lm2[1]}`, lines: [`1#${lm2[1].toLowerCase()}: const smuggled = 1;`] }],
         });
         prefixOutcome = res.content?.[0]?.text ?? "";
     } catch (e) {
         prefixOutcome = e.message;
     }
     if (!/E_INVALID_PATCH/.test(prefixOutcome) || /smuggled/.test(readFileSync(lowerFile, "utf8"))) {
-        throw new Error("lowercase display prefix not rejected: " + prefixOutcome);
+        throw new Error("numbered display prefix not rejected: " + prefixOutcome);
     }
-    console.log("--- lowercase anchor accepted + lowercase prefix rejected OK ---");
+    const literals = ["# npm: install", "# TSX: notes", "- 12    indented"];
+    const literalRead = await run(byName.read, { path: lowerFile });
+    const lm3 = literalRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    await run(byName.edit, {
+        path: lowerFile,
+        edits: [{ op: "append", pos: `2#${lm3[1]}`, lines: literals }],
+    });
+    const literalFile = readFileSync(lowerFile, "utf8");
+    for (const literal of literals) {
+        if (!literalFile.includes(literal)) {
+            throw new Error(`legitimate literal rejected: ${JSON.stringify(literal)}`);
+        }
+    }
+    console.log("--- lowercase anchor OK; strict LINE#HASH rejection + literal shapes OK ---");
 
     // 6. raw read of a huge single line: no inverted range, no nextOffset
     const bigFile = join(dir, "big.txt");
@@ -152,6 +183,9 @@ async function run(tool, params) {
     const nearCap = await run(byName.read, { path: nearCapFile });
     if (/exceeds 50\.0KB/.test(nearCap.content[0].text) || !nearCap.details.truncation?.firstLineExceedsLimit) {
         throw new Error("read misreported a line within 50KB as exceeding 50KB");
+    }
+    if (nearCap.details.truncation.content !== undefined) {
+        throw new Error("read details.truncation duplicates the preview content");
     }
 
     // 6b. read caps before formatting, including a huge explicit limit; wide
@@ -220,6 +254,9 @@ async function run(tool, params) {
         ) {
             throw new Error("grep output did not cap with a continuation notice");
         }
+        if (largeGrep.details.truncation?.content !== undefined) {
+            throw new Error("grep details.truncation duplicates the output content");
+        }
         for (const line of largeGrepLines.filter((line) => /^\s*\d+#/.test(line))) {
             if (!/^\s*\d+#[A-Z]{3}:needle x{300} \d+$/.test(line)) {
                 throw new Error("grep emitted a partial or invalid anchor line: " + line.slice(0, 80));
@@ -234,6 +271,39 @@ async function run(tool, params) {
             }
         }
         console.log("--- grep hidden + whole-line cap + highlights OK ---");
+
+        let grepError = "";
+        try {
+            await run(byName.grep, { pattern: "needle", path: join(dir, "does-not-exist") });
+        } catch (e) {
+            grepError = e.message;
+        }
+        if (!/ripgrep error/.test(grepError)) {
+            throw new Error("grep swallowed a ripgrep failure: " + grepError);
+        }
+        console.log("--- grep: empty ripgrep failure still errors ---");
+
+        if (process.platform !== "win32" && process.getuid?.() !== 0) {
+            const lockedDir = join(dir, "locked");
+            mkdirSync(lockedDir);
+            writeFileSync(join(dir, "open-hit.ts"), "needle open\n");
+            writeFileSync(join(lockedDir, "secret.ts"), "needle secret\n");
+            chmodSync(lockedDir, 0o000);
+            let partialGrep;
+            try {
+                partialGrep = await run(byName.grep, { pattern: "needle", path: dir, glob: "*.ts" });
+            } finally {
+                chmodSync(lockedDir, 0o700);
+            }
+            const partialText = partialGrep.content[0].text;
+            if (!/needle open/.test(partialText) || !/Partial ripgrep results/.test(partialText)) {
+                throw new Error("partial ripgrep failure lost its matches: " + partialText.slice(-200));
+            }
+            if (partialGrep.details.truncated !== true) {
+                throw new Error("partial ripgrep failure not flagged as truncated");
+            }
+            console.log("--- grep: partial ripgrep failure keeps matches + warns ---");
+        }
     }
     // 7b. stale recovery: a unique search window still merges onto live content
     const shiftFile = join(dir, "shift.ts");
@@ -365,6 +435,31 @@ async function run(tool, params) {
         throw new Error("expanded diff should show all lines, collapsed should not");
     }
     console.log("--- edit renderResult: collapsed cap + expand hint OK ---");
+
+    // raw ANSI escapes in file content must not survive into the diff renderer
+    const escFile = join(dir, "escape.ts");
+    writeFileSync(escFile, "const a = 1;\nconst b = 2;\n");
+    const escRead = await run(byName.read, { path: escFile });
+    const escAnchor = escRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    const escRes = await run(byName.edit, {
+        path: escFile,
+        edits: [{ op: "replace", pos: `2#${escAnchor[1]}`, lines: ["const b = \u001b[2J\u001b[31m2;"] }],
+    });
+    const escText = renderToString(
+        byName.edit.renderResult(escRes, { isPartial: false, expanded: true }, fakeTheme, {
+            state: {},
+            lastComponent: undefined,
+            isError: false,
+            args: { path: escFile },
+        }),
+    );
+    if (escText.includes("\u001b[2J") || escText.includes("\u001b[31m")) {
+        throw new Error("raw file escapes reached the diff renderer");
+    }
+    if (!/const b = .*2;/.test(stripAnsi(escText))) {
+        throw new Error("edit diff renderer lost the edited line");
+    }
+    console.log("--- edit renderResult: file escapes sanitized before renderDiff OK ---");
 
     // duplicate-payload guard still fires through the pipeline
     writeFileSync(file, "const x = 1;\nconst y = 2;\nconst z = 3;\n");

@@ -662,7 +662,8 @@ function resolveEditSpans(
             return right.end - left.end;
         }
         if (left.kind !== right.kind) {
-            return left.kind === "replace" ? -1 : 1;
+            // At equal offsets, insert first so replacing cannot shift its position.
+            return left.kind === "insert" ? -1 : 1;
         }
         if (left.kind === "insert" && right.kind === "insert") {
             return (right.boundary ?? -1) - (left.boundary ?? -1) || left.index - right.index;

@@ -1,4 +1,4 @@
-// Run: node check.mjs (Node >=23 strips the TypeScript helper module's types).
+// Run: node check.mjs (Node >=22.19 supports TypeScript type stripping).
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -91,6 +91,16 @@ fs.writeFileSync(
     line({ type: "message", message: { role: "user", content: "literal\u2028and\u2029separators plain string" } }) +
         "\n",
 );
+fs.writeFileSync(
+    path.join(projB, "2026-09-06T00-00-00-000Z_ffff.jsonl"),
+    [
+        line({ type: "session", version: 3, id: "ffff" }),
+        ...Array.from({ length: 6 }, (_u, i) =>
+            line({ type: "message", message: { role: "user", content: `capmark hit number ${i}` } }),
+        ),
+        "",
+    ].join("\n"),
+);
 const largeFile = path.join(projB, "2026-09-05T00-00-00-000Z_eeee.jsonl");
 const largeFd = fs.openSync(largeFile, "w");
 fs.writeFileSync(largeFd, Buffer.alloc(16 * 1024 * 1024 + 128 * 1024, 120)); // oversized record spans chunks
@@ -159,6 +169,41 @@ for (const limit of [0, -1, 1.5, Infinity, 101]) {
 }
 await assert.rejects(searchSessions(root, "", { limit: 0 }), /limit must be an integer/);
 
+const capped = await searchSessions(root, "capmark", {});
+assert.equal(capped.matches.length, 3);
+assert.match(formatResults("capmark", capped), /at most 3 per session file/);
+
+// Missing archives are normal; permission errors are not clean misses.
+assert.deepEqual(await searchSessions(path.join(root, "no-such-root"), "jwt", {}), {
+    matches: [],
+    bytesScanned: 0,
+    filesScanned: 0,
+    truncated: false,
+});
+const deny = (code) => Object.assign(new Error(`${code}: denied`), { code });
+const realReaddir = fs.promises.readdir;
+fs.promises.readdir = async (dir, opts) => {
+    if (dir === root) throw deny("EACCES");
+    return realReaddir(dir, opts);
+};
+try {
+    await assert.rejects(searchSessions(root, "jwt", {}), { code: "EACCES" });
+} finally {
+    fs.promises.readdir = realReaddir;
+}
+
+fs.promises.readdir = async (dir, opts) => {
+    if (dir === projB) throw deny("EACCES");
+    return realReaddir(dir, opts);
+};
+try {
+    const partial = await searchSessions(root, "jwt", {});
+    assert.ok(partial.matches.length > 0);
+    assert.equal(partial.truncated, true);
+} finally {
+    fs.promises.readdir = realReaddir;
+}
+
 // abort: signal already aborted yields zero matches, truncated flag set
 const ac = new AbortController();
 ac.abort();
@@ -166,20 +211,20 @@ const aborted = await searchSessions(root, "jwt", {}, ac.signal);
 assert.equal(aborted.matches.length, 0);
 assert.equal(aborted.truncated, true);
 
-// A changed/unreadable file during discovery is skipped without throwing.
+// Vanished files are skipped; unreadable files make the search incomplete.
 const realStat = fs.promises.stat;
-fs.promises.stat = async () => {
-    throw new Error("file changed");
-};
-try {
-    assert.deepEqual(await searchSessions(root, "jwt", {}), {
-        matches: [],
-        bytesScanned: 0,
-        filesScanned: 0,
-        truncated: false,
-    });
-} finally {
-    fs.promises.stat = realStat;
+for (const code of ["ENOENT", "EACCES"]) {
+    const truncated = code === "EACCES";
+    fs.promises.stat = async () => {
+        throw deny(code);
+    };
+    try {
+        const result = await searchSessions(root, "jwt", {});
+        assert.equal(result.matches.length, 0);
+        assert.equal(result.truncated, truncated);
+    } finally {
+        fs.promises.stat = realStat;
+    }
 }
 
 // A read error is incomplete, not a definitive archive miss.

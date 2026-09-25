@@ -93,6 +93,7 @@ interface RgSearchResult {
     matchesByFile: Map<string, Map<number, MatchRanges>>;
     matches: number;
     truncated: boolean;
+    warning?: string;
 }
 
 function addMatch(
@@ -177,6 +178,7 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
         let stoppedByLimit = false;
         let settled = false;
         let stderr = "";
+        let warning: string | undefined;
 
         const cleanup = () => {
             signal?.removeEventListener("abort", onAbort);
@@ -186,7 +188,7 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
             if (settled) return;
             settled = true;
             cleanup();
-            resolve({ matchesByFile, matches: totalMatched, truncated });
+            resolve({ matchesByFile, matches: totalMatched, truncated, warning });
         };
 
         const settleReject = (error: Error) => {
@@ -256,6 +258,12 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
                 return;
             }
             if (code === 2) {
+                if (totalMatched > 0) {
+                    const error = sanitizeOutput(stderr).replace(/\s+/g, " ").trim().slice(0, 200);
+                    warning = `Partial ripgrep results: ${error || "unknown error"}`;
+                    settleResolve();
+                    return;
+                }
                 settleReject(new Error(`ripgrep error: ${stderr.trim() || "unknown error"}`));
                 return;
             }
@@ -384,7 +392,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             if (params.glob) rgArgs.push("--glob", params.glob);
             rgArgs.push("--", params.pattern, searchPath);
 
-            const { matchesByFile, matches: totalMatched, truncated } = await runRg(rgArgs, limit, signal);
+            const { matchesByFile, matches: totalMatched, truncated, warning } = await runRg(rgArgs, limit, signal);
 
             throwIfAborted(signal);
 
@@ -483,13 +491,13 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     content: [
                         {
                             type: "text",
-                            text: `${totalMatched} match${totalMatched !== 1 ? "es" : ""} found, but none could be read back for display (binary, unreadable, or deleted files).`,
+                            text: `${totalMatched} match${totalMatched !== 1 ? "es" : ""} found, but none could be read back for display (binary, unreadable, or deleted files).${warning ? ` ${warning}.` : ""}`,
                         },
                     ],
                     details: {
                         matches: 0,
                         files: 0,
-                        truncated,
+                        truncated: truncated || warning !== undefined,
                     },
                 };
             }
@@ -500,25 +508,30 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                 maxLines: DEFAULT_MAX_LINES - 2,
                 maxBytes: DEFAULT_MAX_BYTES - 1024,
             });
-            const notice = truncation.truncated
-                ? `[Truncated at ${formatSize(DEFAULT_MAX_BYTES)} or ${DEFAULT_MAX_LINES} lines after ${shownMatches} selected matches. Narrow with path/glob or a more specific pattern, then rerun to continue.]`
-                : truncated
-                  ? `[Stopped at match limit ${limit}. Narrow with path/glob or raise the limit, then rerun to continue.]`
-                  : undefined;
+            const notices = [
+                warning,
+                truncation.truncated
+                    ? `[Truncated at ${formatSize(DEFAULT_MAX_BYTES)} or ${DEFAULT_MAX_LINES} lines after ${shownMatches} selected matches. Narrow with path/glob or a more specific pattern, then rerun to continue.]`
+                    : truncated
+                      ? `[Stopped at match limit ${limit}. Narrow with path/glob or raise the limit, then rerun to continue.]`
+                      : undefined,
+            ].filter((notice): notice is string => notice !== undefined);
             const outputLines = truncation.content.split("\n");
             const visibleHighlights = highlights.filter((entry) => entry.line < outputLines.length);
+            const { content: _truncatedContent, ...truncationMetadata } = truncation;
             return {
                 content: [
                     {
                         type: "text",
-                        text: notice ? `${truncation.content}\n\n${notice}` : truncation.content,
+                        text:
+                            notices.length > 0 ? `${truncation.content}\n\n${notices.join("\n")}` : truncation.content,
                     },
                 ],
                 details: {
                     matches: shownMatches,
                     files: fileCount,
-                    truncated: truncated || truncation.truncated,
-                    ...(truncation.truncated ? { truncation } : {}),
+                    truncated: truncated || truncation.truncated || warning !== undefined,
+                    ...(truncation.truncated ? { truncation: truncationMetadata } : {}),
                     ...(visibleHighlights.length > 0 ? { highlights: visibleHighlights } : {}),
                 },
             };

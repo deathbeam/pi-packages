@@ -1,6 +1,7 @@
 # [@deathbeam/pi-keenable](https://www.npmjs.com/package/@deathbeam/pi-keenable)
 
 Add Keenable-backed `web_search` and `web_fetch` tools. Set `KEENABLE_API_KEY` for private access.
+Without a key, requests use Keenable's rate-limited `/public` endpoints. Requests time out after 60s.
 
 ## Installation
 
@@ -16,6 +17,6 @@ From this package directory:
 
 ```sh
 npm install
-npm run check --prefix ../..
+npm test
 pi install .
 ```

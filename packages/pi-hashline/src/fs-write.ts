@@ -96,7 +96,6 @@ export async function writeFileAtomically(
             await tempHandle.chmod(existingStats.mode & 0o7777);
         }
         await tempHandle.close();
-        // ponytail: external writes can race after this check; stronger safety needs cooperating writers/locks.
         await assertExpectedContent(targetPath, options?.expectedContent);
         await rename(tempPath, targetPath);
     } catch (error: unknown) {

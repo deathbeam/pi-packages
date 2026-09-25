@@ -253,10 +253,12 @@ export function registerReadTool(pi: ExtensionAPI): void {
                     ? `${preview.text}\n\n[Non-UTF-8 bytes shown as U+FFFD; editing rewrites the file as UTF-8.]`
                     : preview.text;
 
+            const { content: _truncatedContent, ...truncationMetadata } = preview.truncation ?? {};
+
             return {
                 content: [{ type: "text", text: previewText }],
                 details: {
-                    truncation: preview.truncation,
+                    truncation: preview.truncation ? truncationMetadata : undefined,
                     ...(preview.nextOffset !== undefined ? { nextOffset: preview.nextOffset } : {}),
                 },
             };

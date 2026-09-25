@@ -1,5 +1,5 @@
 import * as os from "os";
-import { isAbsolute, resolve as resolvePath } from "path";
+import { resolve as resolvePath } from "path";
 
 function expandPath(filePath: string): string {
     if (filePath === "~") return os.homedir();
@@ -8,6 +8,5 @@ function expandPath(filePath: string): string {
 }
 
 export function resolveToCwd(filePath: string, cwd: string): string {
-    const expanded = expandPath(filePath);
-    return isAbsolute(expanded) ? expanded : resolvePath(cwd, expanded);
+    return resolvePath(cwd, expandPath(filePath));
 }

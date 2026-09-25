@@ -24,26 +24,13 @@ export type HashlineToolEdit = {
 /** Example anchor used in error messages; 3 characters from the alphabet. */
 const EXAMPLE_ANCHOR = "5#MQQ";
 
-/**
- * Display-prefix rejection regexes. These patterns detect (and reject)
- * hashline display prefixes inside edit payloads. The runtime no longer
- * strips them; the model must send literal file content. Matching any of
- * these triggers `[E_INVALID_PATCH]`.
- *
- * They match all hash lengths seen in older sessions (2-4), not just the
- * current 3: the rejection semantics are "this is rendered read/diff
- * output", and rendered output can come from a stale transcript. A 5+-char
- * run backtracks to no match; that shape is not a valid display prefix
- * under any configuration and passes as literal content.
- */
-const DISPLAY_HASH_QUANT = `[${NIBBLE_STR}]{2,4}`;
-const DISPLAY_PREFIX_RE = new RegExp(`^\\s*(?:\\d+\\s*#\\s*|#\\s*)${DISPLAY_HASH_QUANT}:`, "i");
-const DISPLAY_PREFIX_PLUS_RE = new RegExp(`^\\+\\s*(?:\\d+\\s*#\\s*|#\\s*)${DISPLAY_HASH_QUANT}:`, "i");
-
-const DIFF_MINUS_RE = /^-\s*\d+\s{4}/;
+/** Reject copied numbered anchors; bare headings and diff lines may be real content. */
+const DISPLAY_HASH_QUANT = `[${NIBBLE_STR}]{${HASH_LENGTH}}`;
+const DISPLAY_PREFIX_RE = new RegExp(`^\\s*\\d+\\s*#\\s*${DISPLAY_HASH_QUANT}:`, "i");
+const DISPLAY_PREFIX_PLUS_RE = new RegExp(`^\\+\\s*\\d+\\s*#\\s*${DISPLAY_HASH_QUANT}:`, "i");
 
 /**
- * Bare hashline prefix: a 3-char hash followed by ":" with no "LINE#" part
+ * Bare hashline prefix: a hash followed by ":" with no "LINE#" part
  * (e.g. "MQQ:### heading"). Capture group 1 is the hash.
  *
  * This is the partial-hash failure mode: the model copies a hash it saw in
@@ -63,11 +50,6 @@ export const BARE_PREFIX_RE = new RegExp(`^\\s*([${NIBBLE_STR}]{${HASH_LENGTH}})
  */
 function diagnoseHash(ref: string, hash: string): string | null {
     if (hash.length !== HASH_LENGTH) {
-        // Distinguish: looks like a valid anchor from an older session's hash
-        // length vs. plain invalid.
-        if (HASH_ALPHABET_RE.test(hash) && hash.length >= 2 && hash.length <= 4) {
-            return `[E_BAD_REF] Invalid line reference "${ref}": hashes are ${HASH_LENGTH} characters in this session, but this anchor has ${hash.length} — it looks like an anchor from a stale context or an older session. Re-read the file to get current anchors.`;
-        }
         return `[E_BAD_REF] Invalid line reference "${ref}": hash must be exactly ${HASH_LENGTH} characters from ${NIBBLE_STR} (e.g. "${EXAMPLE_ANCHOR}").`;
     }
     if (!HASH_ALPHABET_RE.test(hash)) {
@@ -146,34 +128,17 @@ function parseAnchorRef(ref: string): Anchor {
 
 // --- Content preprocessing ---
 
-/**
- * Reject hashline display prefixes in edit payloads. Strict semantics: the
- * model must send literal file content for `lines`, not the rendered read /
- * diff form: display prefixes are rejected rather than stripped.
- *
- * This covers the unambiguous full `LINE#HASH:` / diff `+/-` forms, rejectable
- * on shape alone. The bare `HH:` variant is context-dependent and lives in
- * `warnBareHashPrefixLines` (apply.ts).
- */
 function assertNoDisplayPrefixes(lines: string[]): void {
     for (const line of lines) {
         if (!line.length) continue;
-        if (DISPLAY_PREFIX_RE.test(line) || DISPLAY_PREFIX_PLUS_RE.test(line) || DIFF_MINUS_RE.test(line)) {
+        if (DISPLAY_PREFIX_RE.test(line) || DISPLAY_PREFIX_PLUS_RE.test(line)) {
             throw new Error(
-                `[E_INVALID_PATCH] "lines" must contain literal file content, not rendered "LINE#HASH:" or diff "+/-" prefixes. Offending line: ${JSON.stringify(line)}`,
+                `[E_INVALID_PATCH] "lines" must contain literal file content, not rendered "LINE#HASH:" prefixes. Offending line: ${JSON.stringify(line)}`,
             );
         }
     }
 }
 
-/**
- * Validate and return replacement lines.
- *
- * Array input is preserved verbatim so explicitly provided blank lines remain
- * intact. Display prefixes (full `LINE#HASH:` and diff `+/-` forms) are
- * rejected by `assertNoDisplayPrefixes`; the model must send literal file
- * content, never rendered read or diff output.
- */
 function hashlineParseText(edit: string[] | undefined): string[] {
     const lines = edit ?? [];
     assertNoDisplayPrefixes(lines);

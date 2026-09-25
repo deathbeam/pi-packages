@@ -1,8 +1,3 @@
-/**
- * Prompt loading. Prompt files are authored with 3-character anchor examples
- * (HASH_LENGTH), so nothing is rewritten at load time.
- */
-
 import { readFileSync } from "node:fs";
 
 export function loadPrompt(url: URL): string {

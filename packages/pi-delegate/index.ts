@@ -339,7 +339,9 @@ export default function (pi: ExtensionAPI) {
             const thinking = agent.thinking ?? ctx.thinkingLevel;
             if (thinking) args.push("--thinking", thinking);
             if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
-            const child = spawn(process.execPath, [process.argv[1]!, "--mode", "rpc", "--no-session", ...args], {
+            const entrypoint = process.argv[1];
+            if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
+            const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", "--no-session", ...args], {
                 cwd: ctx.cwd,
                 shell: false,
                 stdio: "pipe",

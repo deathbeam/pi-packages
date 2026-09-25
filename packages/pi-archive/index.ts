@@ -9,7 +9,6 @@ const MAX_PER_FILE = 3; // max matches per session file
 const MAX_SEARCH_LIMIT = 100;
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
-// ponytail: 16 MiB record ceiling; raise only if real sessions exceed it, or add incremental JSON parsing.
 
 export interface ArchiveMatch {
     file: string;
@@ -194,14 +193,16 @@ export async function searchSessions(
     if (terms.length === 0) return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: false };
     const limit = opts.limit ?? 20;
     const filter = opts.sessionFilter?.toLowerCase();
-
     const files: { file: string; dir: string; name: string; mtime: number }[] = [];
     let rootEntries: fs.Dirent[];
     try {
         rootEntries = await fs.promises.readdir(root, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+        // A missing archive is normal; other errors must not look like clean misses.
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
         return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: false };
     }
+    let incompleteDiscovery = false;
     for (const entry of rootEntries) {
         if (signal?.aborted) break;
         if (!entry.isDirectory()) continue;
@@ -211,8 +212,9 @@ export async function searchSessions(
         let entries: fs.Dirent[];
         try {
             entries = await fs.promises.readdir(dir, { withFileTypes: true });
-        } catch {
-            continue; // directory changed or became unreadable
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") incompleteDiscovery = true;
+            continue;
         }
         for (const fileEntry of entries) {
             if (signal?.aborted) break;
@@ -220,7 +222,9 @@ export async function searchSessions(
             const file = path.join(dir, fileEntry.name);
             try {
                 files.push({ file, dir: dirName, name: fileEntry.name, mtime: (await fs.promises.stat(file)).mtimeMs });
-            } catch {}
+            } catch (err) {
+                if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") incompleteDiscovery = true;
+            }
         }
     }
     if (signal?.aborted) return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: true };
@@ -233,7 +237,7 @@ export async function searchSessions(
     const matches: ArchiveMatch[] = [];
     let bytes = 0;
     let filesScanned = 0;
-    let truncated = false;
+    let truncated = incompleteDiscovery;
     for (const { file, dir, name } of files) {
         if (signal?.aborted || bytes >= MAX_TOTAL_BYTES) {
             truncated = true;
@@ -309,7 +313,7 @@ export function recentSessions(
 }
 
 export function formatResults(query: string, result: Awaited<ReturnType<typeof searchSessions>>): string {
-    const note = result.truncated ? "\n(Search incomplete; narrow with the session filter.)" : "";
+    const note = result.truncated ? "\n(Search incomplete; narrow the search or check archive access.)" : "";
     if (result.matches.length === 0) {
         return `No matches for "${query}" in ${result.filesScanned} scanned session files.${note}`;
     }
@@ -317,7 +321,7 @@ export function formatResults(query: string, result: Awaited<ReturnType<typeof s
         (m) =>
             `${m.file}\n[${m.currentSession ? "this session" : m.sameProject ? "this project" : m.project} | ${m.date} | ${m.role}] ${m.excerpt.replace(/\s+/g, " ")}`,
     );
-    return `Found ${result.matches.length} match(es) for "${query}" — each hit starts with the session file; read or grep it for full context:\n\n${lines.join("\n\n")}${note}`;
+    return `Found ${result.matches.length} match(es) for "${query}" — at most ${MAX_PER_FILE} per session file (read or grep the file for more):\n\n${lines.join("\n\n")}${note}`;
 }
 
 export default async function piArchive(pi: ExtensionAPI) {

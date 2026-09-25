@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
     formatDuration,
@@ -52,7 +53,7 @@ assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).so
     "delegate_steer",
 ]);
 assert.match(index, /!DELEGATION_TOOLS\.has\(tool\)/);
-assert.match(index, /process\.argv\[1\].*--mode", "rpc", "--no-session/);
+assert.match(index, /spawn\(process\.execPath, \[entrypoint, "--mode", "rpc", "--no-session/);
 assert.match(index, /\["--model", model, "--tools", tools\.join\(","\)\]/);
 assert.match(child, /case "agent_settled"/);
 assert.match(child, /type: "steer", message/);
@@ -239,5 +240,42 @@ controller.abort();
 await assert.rejects(active.done, /aborted/);
 assert.equal(abortRequested, true);
 assert.equal(stopping.stdin.writableEnded, true);
+
+// Missing CLI argv must fail before spawning a child.
+const { default: extension } = await import(new URL("index.ts", root).href);
+const registered = [];
+extension({
+    on() {},
+    sendMessage() {},
+    registerMessageRenderer() {},
+    registerTool(tool) {
+        registered.push(tool);
+    },
+    getActiveTools: () => ["read"],
+});
+const delegate = registered.find((tool) => tool.name === "delegate");
+const ctx = {
+    cwd: fileURLToPath(root),
+    hasUI: false,
+    model: { provider: "anthropic", id: "m" },
+    modelRegistry: { find: () => undefined },
+    thinkingLevel: "off",
+};
+const argv = process.argv;
+process.argv = [argv[0]];
+try {
+    await assert.rejects(
+        delegate.execute(
+            "call",
+            { agent: "explore", description: "find callers", task: "trace it" },
+            undefined,
+            () => {},
+            ctx,
+        ),
+        /CLI entrypoint/,
+    );
+} finally {
+    process.argv = argv;
+}
 
 console.log("pi-delegate check passed");

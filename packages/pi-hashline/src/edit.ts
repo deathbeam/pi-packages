@@ -7,7 +7,13 @@ import { access as fsAccess } from "fs/promises";
 import { detectLineEnding, hasMixedLineEndings, normalizeToLF, restoreLineEndings, stripBom } from "./edit-diff";
 import { isRecord, normalizeEditRequest } from "./edit-normalize";
 import { resolveMutationTargetPath, writeFileAtomically } from "./fs-write";
-import { applyHashlineEdits, computeChangedLineRange, resolveEditAnchors, type HashlineToolEdit } from "./hashline";
+import {
+    applyHashlineEdits,
+    computeChangedLineRange,
+    resolveEditAnchors,
+    sanitizeOutput,
+    type HashlineToolEdit,
+} from "./hashline";
 import { loadFileKindAndText } from "./file-kind";
 import { resolveToCwd } from "./path-utils";
 import { loadPrompt, loadPromptGuidelines } from "./prompt-loader";
@@ -366,7 +372,8 @@ function buildEditToolDefinition(): EditToolDefinition {
             const details = typed.details;
             const sections: string[] = [];
             if (details?.diff) {
-                sections.push(capDiffPreview(renderDiff(details.diff), expanded, theme));
+                // Sanitize file content before renderDiff adds its own ANSI styling.
+                sections.push(capDiffPreview(renderDiff(sanitizeOutput(details.diff)), expanded, theme));
             }
             if (details && details.warnings.length > 0) {
                 sections.push(details.warnings.map((warning) => theme.fg("warning", warning)).join("\n"));
