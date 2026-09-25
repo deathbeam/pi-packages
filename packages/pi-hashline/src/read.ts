@@ -281,7 +281,12 @@ export function registerReadTool(pi: ExtensionAPI): void {
             // Invalid UTF-8 bytes are decoded as U+FFFD, matching Pi's built-in
             // tools. Warn only when the decoder reported invalid bytes; a literal,
             // valid U+FFFD in a UTF-8 file should not be treated as lossy decoding.
-            const previewText = file.hadUtf8DecodeErrors === true ? `${preview.text}\n\n${UTF8_WARNING}` : preview.text;
+            const previewText =
+                file.hadUtf8DecodeErrors === true
+                    ? `${preview.text}${preview.nextOffset !== undefined ? "\n" : "\n\n"}${UTF8_WARNING}`
+                    : preview.text;
+            const noticeCount =
+                (preview.nextOffset !== undefined ? 1 : 0) + (file.hadUtf8DecodeErrors === true ? 1 : 0);
 
             const { content: _truncatedContent, ...truncationMetadata } = preview.truncation ?? {};
 
@@ -291,7 +296,7 @@ export function registerReadTool(pi: ExtensionAPI): void {
                     truncation: preview.truncation ? truncationMetadata : undefined,
                     ...(preview.nextOffset !== undefined ? { nextOffset: preview.nextOffset } : {}),
                     ...(preview.advisory ? { advisory: true } : {}),
-                    ...(file.hadUtf8DecodeErrors === true ? { hadUtf8DecodeErrors: true } : {}),
+                    ...(noticeCount ? { noticeCount } : {}),
                 },
             };
         },
@@ -306,7 +311,7 @@ export function registerReadTool(pi: ExtensionAPI): void {
                 return text;
             }
 
-            let output = getRenderText(result, context.showImages !== false);
+            const output = getRenderText(result, context.showImages !== false);
             const rawPath = (context.args as { path?: unknown } | undefined)?.path;
             const lang = !context.isError && typeof rawPath === "string" ? getLanguageFromPath(rawPath) : undefined;
             const details = (
@@ -314,25 +319,27 @@ export function registerReadTool(pi: ExtensionAPI): void {
                     details?: {
                         nextOffset?: number;
                         truncation?: TruncationResult;
-                        hadUtf8DecodeErrors?: boolean;
                         advisory?: boolean;
+                        noticeCount?: number;
                     };
                 }
             ).details;
-            if (details?.advisory || (details?.truncation?.firstLineExceedsLimit && output.startsWith("[Line "))) {
+            if (details?.advisory || details?.truncation?.firstLineExceedsLimit) {
                 text.setText(`\n${theme.fg("warning", output)}`);
                 return text;
             }
-            const utf8Notice =
-                details?.hadUtf8DecodeErrors && output.endsWith(`\n\n${UTF8_WARNING}`) ? UTF8_WARNING : "";
-            if (utf8Notice) output = output.slice(0, -utf8Notice.length - 2);
-            const noticeIndex = details?.nextOffset !== undefined ? output.lastIndexOf("\n\n[Showing lines ") : -1;
-            const notice = noticeIndex < 0 ? "" : output.slice(noticeIndex + 2);
-            const body = noticeIndex < 0 ? output : output.slice(0, noticeIndex);
+            const lines = output.split("\n");
+            while (lines.at(-1) === "") lines.pop();
+            const noticeCount = Math.min(details?.noticeCount ?? 0, lines.length);
+            const notices = noticeCount ? lines.splice(-noticeCount) : [];
+            if (noticeCount && lines.at(-1) === "") lines.pop();
+            const styledNotices = notices.map((notice, index) => {
+                const continuation = index === 0 && details?.nextOffset !== undefined;
+                return theme.fg(continuation && !details?.truncation?.truncated ? "muted" : "warning", notice);
+            });
             text.setText(
-                formatReadResultText(body, lang, theme) +
-                    (notice ? `\n\n${theme.fg(details?.truncation?.truncated ? "warning" : "muted", notice)}` : "") +
-                    (utf8Notice ? `\n\n${theme.fg("warning", utf8Notice)}` : ""),
+                formatReadResultText(lines.join("\n"), lang, theme) +
+                    (styledNotices.length ? `\n\n${styledNotices.join("\n")}` : ""),
             );
             return text;
         },

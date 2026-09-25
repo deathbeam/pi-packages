@@ -339,7 +339,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
             const typed = result as {
                 content?: Array<{ type: string; text?: string }>;
-                details?: { highlights?: Array<{ line: number; ranges: MatchRanges }>; noticeCount?: number };
+                details?: { highlights?: Array<{ line: number; ranges: MatchRanges }>; noticeCount?: number; warningLines?: number[] };
             };
             const rawLines = stripHashlinePrefixes(
                 (typed.content ?? [])
@@ -357,6 +357,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             for (const entry of typed.details?.highlights ?? []) {
                 highlights.set(entry.line, entry.ranges);
             }
+            const warningLines = new Set(typed.details?.warningLines ?? []);
 
             const maxLines = expanded ? lines.length : 15;
             const shown = lines.slice(0, maxLines).map((line, index) => {
@@ -377,9 +378,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                                   );
                     return highlightMatchRanges(line, adjusted, theme);
                 }
-                return /^\[Line \d+ cannot fit as a complete hashline line \((match|context)\)/.test(line)
-                    ? theme.fg("warning", line)
-                    : theme.fg("toolOutput", line);
+                return warningLines.has(index) ? theme.fg("warning", line) : theme.fg("toolOutput", line);
             });
             let rendered = `\n${shown.join("\n")}`;
             const remaining = lines.length - maxLines;
@@ -431,6 +430,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
 
             const outputParts: string[] = [];
             const highlights: Array<{ line: number; ranges: MatchRanges }> = [];
+            const warningLines: number[] = [];
             let outputLineIndex = 0;
             let fileCount = 0;
             let shownMatches = 0;
@@ -501,8 +501,10 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                             ? `[Line ${lineNum} cannot fit as a complete hashline line (${matchRangesByLine.has(lineNum) ? "match" : "context"}) within ${formatSize(DEFAULT_MAX_BYTES)} of grep output. Use read or bash to inspect it.]`
                             : `${prefix}${computeLineHash(fileLines, lineNum - 1)}:${line}`;
                         if (!addLine(displayed)) break fileLoop;
-                        if (omitted) omittedLines++;
-                        else {
+                        if (omitted) {
+                            omittedLines++;
+                            warningLines.push(outputLineIndex - 1);
+                        } else {
                             const rangesForLine = matchRangesByLine.get(lineNum);
                             if (rangesForLine?.length)
                                 highlights.push({ line: outputLineIndex - 1, ranges: rangesForLine });
@@ -554,6 +556,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     truncated: truncated || outputCapped || warning !== undefined || omittedLines > 0,
                     ...(notices.length ? { noticeCount: notices.length } : {}),
                     ...(highlights.length ? { highlights } : {}),
+                    ...(warningLines.length ? { warningLines } : {}),
                 },
             };
         },

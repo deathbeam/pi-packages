@@ -689,6 +689,27 @@ async function run(tool, params) {
     if (!cappedDisplay.includes("«warning»[Showing lines ")) {
         throw new Error("read truncation note was syntax highlighted instead of warned");
     }
+    // noticeCount splices by count, not format: a body line that merely
+    // looks like a notice must stay in the body while the real trailing
+    // notice is still styled.
+    const lookalikeFile = join(dir, "lookalike.ts");
+    writeFileSync(lookalikeFile, "const a = 1;\n[Showing lines 9-9 of 99. Use offset=100 to continue.]\nconst c = 3;\n");
+    const lookalikeRead = await run(byName.read, { path: lookalikeFile, limit: 2 });
+    const lookalikeDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(lookalikeRead, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: lookalikeFile, limit: 2 },
+            }),
+        ),
+    );
+    if (
+        !lookalikeDisplay.includes("[Showing lines 9-9 of 99") ||
+        /«(muted|warning)»\[Showing lines 9-9/.test(lookalikeDisplay) ||
+        !lookalikeDisplay.includes("«muted»[Showing lines 1-2 of 3")
+    ) {
+        throw new Error("notice lookalike in file content was mistaken for a notice: " + JSON.stringify(lookalikeDisplay));
+    }
     const emptyFile = join(dir, "empty.ts");
     writeFileSync(emptyFile, "");
     const emptyResult = await run(byName.read, { path: emptyFile });
