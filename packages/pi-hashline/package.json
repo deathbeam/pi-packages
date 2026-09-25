@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-hashline",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Hashline read/edit/grep tool overrides for Pi",
   "type": "module",
   "license": "MIT",
