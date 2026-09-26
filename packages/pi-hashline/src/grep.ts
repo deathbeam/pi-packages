@@ -339,7 +339,11 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
             const typed = result as {
                 content?: Array<{ type: string; text?: string }>;
-                details?: { highlights?: Array<{ line: number; ranges: MatchRanges }>; noticeCount?: number; warningLines?: number[] };
+                details?: {
+                    highlights?: Array<{ line: number; ranges: MatchRanges }>;
+                    noticeCount?: number;
+                    warningLines?: number[];
+                };
             };
             const rawLines = stripHashlinePrefixes(
                 (typed.content ?? [])

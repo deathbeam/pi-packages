@@ -693,7 +693,10 @@ async function run(tool, params) {
     // looks like a notice must stay in the body while the real trailing
     // notice is still styled.
     const lookalikeFile = join(dir, "lookalike.ts");
-    writeFileSync(lookalikeFile, "const a = 1;\n[Showing lines 9-9 of 99. Use offset=100 to continue.]\nconst c = 3;\n");
+    writeFileSync(
+        lookalikeFile,
+        "const a = 1;\n[Showing lines 9-9 of 99. Use offset=100 to continue.]\nconst c = 3;\n",
+    );
     const lookalikeRead = await run(byName.read, { path: lookalikeFile, limit: 2 });
     const lookalikeDisplay = stripAnsi(
         renderToString(
@@ -708,7 +711,9 @@ async function run(tool, params) {
         /«(muted|warning)»\[Showing lines 9-9/.test(lookalikeDisplay) ||
         !lookalikeDisplay.includes("«muted»[Showing lines 1-2 of 3")
     ) {
-        throw new Error("notice lookalike in file content was mistaken for a notice: " + JSON.stringify(lookalikeDisplay));
+        throw new Error(
+            "notice lookalike in file content was mistaken for a notice: " + JSON.stringify(lookalikeDisplay),
+        );
     }
     const emptyFile = join(dir, "empty.ts");
     writeFileSync(emptyFile, "");
@@ -793,6 +798,20 @@ async function run(tool, params) {
     const rawColors = new Set((rawLine ?? "").match(/\u001b\[38;2;[0-9;]+m/g) ?? []);
     if (rawColors.size < 2) {
         throw new Error("raw read not highlighted: " + JSON.stringify(rawLine));
+    }
+    const literalAnchorFile = join(dir, "literal-anchor.ts");
+    writeFileSync(literalAnchorFile, "1#TPK:literal file content\n");
+    const literalRaw = await run(byName.read, { path: literalAnchorFile, raw: true });
+    const literalDisplay = stripAnsi(
+        renderToString(
+            byName.read.renderResult(literalRaw, { expanded: true, isPartial: false }, fakeTheme, {
+                ...readCtx,
+                args: { path: literalAnchorFile, raw: true },
+            }),
+        ),
+    );
+    if (!literalDisplay.includes("1#TPK:literal file content")) {
+        throw new Error("raw read renderer stripped literal file content resembling an anchor");
     }
     console.log("--- read renderer: raw mode highlighted OK ---");
 

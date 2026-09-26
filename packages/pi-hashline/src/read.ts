@@ -176,8 +176,13 @@ function getRenderText(result: unknown, showImages: boolean): string {
 }
 
 /** Strip anchors only in the TUI: highlighting treats `#ABC:` as a comment. */
-function formatReadResultText(output: string, lang: string | undefined, theme: Pick<Theme, "fg">): string {
-    const lines = stripHashlinePrefixes(output).replace(/\t/g, "   ").split("\n");
+function formatReadResultText(
+    output: string,
+    lang: string | undefined,
+    theme: Pick<Theme, "fg">,
+    raw: boolean,
+): string {
+    const lines = (raw ? output : stripHashlinePrefixes(output)).replace(/\t/g, "   ").split("\n");
     while (lines.length > 0 && lines[lines.length - 1] === "") {
         lines.pop();
     }
@@ -338,8 +343,12 @@ export function registerReadTool(pi: ExtensionAPI): void {
                 return theme.fg(continuation && !details?.truncation?.truncated ? "muted" : "warning", notice);
             });
             text.setText(
-                formatReadResultText(lines.join("\n"), lang, theme) +
-                    (styledNotices.length ? `\n\n${styledNotices.join("\n")}` : ""),
+                formatReadResultText(
+                    lines.join("\n"),
+                    lang,
+                    theme,
+                    (context.args as { raw?: unknown } | undefined)?.raw === true,
+                ) + (styledNotices.length ? `\n\n${styledNotices.join("\n")}` : ""),
             );
             return text;
         },
