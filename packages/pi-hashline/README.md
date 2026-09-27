@@ -2,6 +2,7 @@
 
 Override Pi's read, edit, and grep with hash-anchored operations. Grep requires `rg`.
 Fork of [pi-hashline-edit](https://www.npmjs.com/package/pi-hashline-edit) with cleanup, bugfixes and native tool output UI.
+See [this blog post](https://stencil.so/blog/the-harness-problem) for the motivation behind this package.
 
 ## Installation
 
