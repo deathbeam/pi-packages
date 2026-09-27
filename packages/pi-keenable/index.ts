@@ -57,7 +57,7 @@ export default function (pi: ExtensionAPI) {
             const text = ((r.results as any[]) ?? [])
                 .map(
                     (x) =>
-                        `## ${x.title}\nURL: ${x.url}${x.description ? `\n${x.description}` : ""}${x.snippet ? `\n\n${x.snippet}` : ""}`,
+                        `## ${x.title}\nURL: ${x.url}${x.description ? `\n${x.description}` : ""}${x.published_at ? `\nPublished: ${x.published_at}` : ""}${x.snippet ? `\n\n${x.snippet}` : ""}`,
                 )
                 .join("\n\n");
             return { content: [{ type: "text", text: text || "No results." }], details: undefined };
@@ -91,8 +91,8 @@ export default function (pi: ExtensionAPI) {
             if (p.live) q.set("live", "true");
             if (p.prompt) q.set("prompt", p.prompt);
             const r = await keen(`/v1/fetch?${q}`, {}, signal);
-            const text = `# ${r.title ?? p.url}\n${r.url}\n\n${r.content ?? ""}`;
-            return { content: [{ type: "text", text: text.slice(0, p.max_chars ?? 50000) }], details: undefined };
+            const text = `# ${r.title ?? p.url}\n${r.url}\n\n${(r.content ?? "").slice(0, p.max_chars ?? 50000)}`;
+            return { content: [{ type: "text", text }], details: undefined };
         },
     });
 }

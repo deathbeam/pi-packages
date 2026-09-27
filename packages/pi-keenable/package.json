@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-keenable",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Keenable web_search and web_fetch tools for Pi",
   "type": "module",
   "license": "MIT",

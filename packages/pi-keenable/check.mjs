@@ -19,7 +19,12 @@ try {
     // Keyless fetch: /public belongs on the pathname, the query must survive intact.
     delete process.env.KEENABLE_API_KEY;
     stub({ title: "T", url: "u", content: "body" });
-    await tools.web_fetch.execute("1", { url: "https://example.com/a?b=1", max_chars: 10, live: true, prompt: "hi" });
+    const fetched = await tools.web_fetch.execute("1", {
+        url: "https://example.com/a?b=1",
+        max_chars: 10,
+        live: true,
+        prompt: "hi",
+    });
     assert.equal(last().pathname, "/v1/fetch/public");
     assert.equal(last().searchParams.get("url"), "https://example.com/a?b=1");
     assert.equal(last().searchParams.get("maxChars"), "10");
@@ -27,12 +32,17 @@ try {
     assert.equal(last().searchParams.get("prompt"), "hi");
     assert.equal(calls.at(-1).init.headers["X-Keenable-Title"], "pi-keenable");
     assert.equal(calls.at(-1).init.headers["X-API-Key"], undefined);
+    assert.equal(fetched.content[0].text, "# T\nu\n\nbody");
+    const short = await tools.web_fetch.execute("1b", { url: "https://example.com/", max_chars: 2 });
+    assert.equal(short.content[0].text, "# T\nu\n\nbo");
 
     // Keyless search stays on the public tier.
     stub({ results: [] });
     await tools.web_search.execute("2", { query: "hi", site: undefined });
     assert.equal(last().pathname, "/v1/search/public");
     assert.deepEqual(JSON.parse(calls.at(-1).init.body), { query: "hi" });
+    stub({ results: [{ title: "Doc", url: "https://example.com/", published_at: "2026-09-27", snippet: "fact" }] });
+    assert.match((await tools.web_search.execute("2b", { query: "hi" })).content[0].text, /Published: 2026-09-27/);
 
     // Keyed calls skip the public tier and keep the query untouched.
     process.env.KEENABLE_API_KEY = "secret";
