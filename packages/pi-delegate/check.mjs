@@ -394,9 +394,12 @@ const tui = {
 let screens = 0;
 let showViewer;
 const viewerReady = new Promise((resolve) => (showViewer = resolve));
+let widgetLines;
 const ui = {
     theme,
-    setWidget() {},
+    setWidget(_key, lines) {
+        widgetLines = lines;
+    },
     async custom(factory, options) {
         assert.equal(options?.overlay, true);
         assert.deepEqual(options.overlayOptions, { width: "100%", maxHeight: "100%", row: 0, col: 0 });
@@ -431,6 +434,7 @@ try {
         () => {},
         { ...ctx, mode: "tui", hasUI: true, ui },
     );
+    assert.match(widgetLines.join("\n"), /1 running · 1 total/);
     const steer = registered.find((tool) => tool.name === "delegate_steer");
     await steer.execute("call", { id: first.details.id, message: "first" });
     await steer.execute("call", { id: first.details.id, message: "second" });
@@ -447,6 +451,7 @@ try {
         () => {},
         { ...ctx, mode: "tui", hasUI: true, ui },
     );
+    assert.match(widgetLines.join("\n"), /1 running · 2 total/);
     const observing = inspect.handler("", { mode: "tui", ui });
     const view = await Promise.race([viewerReady, timeout]);
     const rows = view.render(80);
@@ -502,6 +507,25 @@ try {
     view.handleInput("\x1b");
     await observing;
     assert.equal(screens, 1);
+    const cancel = registered.find((tool) => tool.name === "delegate_cancel");
+    const tuiCtx = { ...ctx, mode: "tui", hasUI: true, ui };
+    const cancelled = await delegate.execute(
+        "call",
+        { agent: "explore", description: "cancelled run", task: "trace it" },
+        undefined,
+        () => {},
+        tuiCtx,
+    );
+    await cancel.execute("call", { id: cancelled.details.id }, undefined, () => {}, tuiCtx);
+    const remaining = await delegate.execute(
+        "call",
+        { agent: "explore", description: "remaining run", task: "trace it" },
+        undefined,
+        () => {},
+        tuiCtx,
+    );
+    assert.match(widgetLines.join("\n"), /1 running · 4 total/);
+    await cancel.execute("call", { id: remaining.details.id }, undefined, () => {}, tuiCtx);
 } finally {
     clearTimeout(timer);
     process.argv = argv;

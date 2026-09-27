@@ -191,7 +191,6 @@ export default function (pi: ExtensionAPI) {
     const running = new Map<string, DelegateJob>();
     const recent: InspectJob[] = [];
     let viewing: (() => void) | undefined;
-    let finished = 0;
     let ticker: ReturnType<typeof setInterval> | undefined;
 
     const addActivity = (job: DelegateJob, activity: ChildActivity) => {
@@ -226,10 +225,8 @@ export default function (pi: ExtensionAPI) {
         const now = Date.now();
         const { shown, hidden, detail } = widgetJobs([...running.values()]);
         const lines: string[] = [];
-        if (running.size > 1 || finished > 0) {
-            const counts = `${running.size} running${finished ? ` · ${finished} done` : ""}`;
-            lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
-        }
+        const counts = `${running.size} running · ${running.size + recent.length} total`;
+        lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
         for (const job of shown) {
             lines.push(
                 `${statusText(theme, "running", now)} ${theme.fg("toolTitle", theme.bold(job.agent))} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`,
@@ -255,7 +252,6 @@ export default function (pi: ExtensionAPI) {
         if (job.controller.signal.aborted) return;
         running.delete(job.id);
         remember(job, error ? "failed" : "done", error ? `Error: ${error}` : undefined);
-        finished += 1;
         if (running.size === 0) stopTicker();
         refreshWidget(ctx);
         const report: DelegateReport = {
@@ -284,7 +280,6 @@ export default function (pi: ExtensionAPI) {
         running.clear();
         recent.length = 0;
         viewing = undefined;
-        finished = 0;
     });
 
     pi.on("before_agent_start", (event, ctx) => {

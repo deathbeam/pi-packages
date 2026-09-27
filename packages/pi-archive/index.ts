@@ -198,13 +198,22 @@ export async function searchSessions(
     offset?: number;
 }> {
     const terms = parseTerms(query);
-    if (opts.limit !== undefined && (!Number.isSafeInteger(opts.limit) || opts.limit < 1 || opts.limit > MAX_SEARCH_LIMIT)) {
+    if (
+        opts.limit !== undefined &&
+        (!Number.isSafeInteger(opts.limit) || opts.limit < 1 || opts.limit > MAX_SEARCH_LIMIT)
+    ) {
         throw new RangeError(`limit must be an integer from 1 to ${MAX_SEARCH_LIMIT}`);
     }
-    if (opts.perSession !== undefined && (!Number.isSafeInteger(opts.perSession) || opts.perSession < 1 || opts.perSession > MAX_PER_SESSION)) {
+    if (
+        opts.perSession !== undefined &&
+        (!Number.isSafeInteger(opts.perSession) || opts.perSession < 1 || opts.perSession > MAX_PER_SESSION)
+    ) {
         throw new RangeError(`perSession must be an integer from 1 to ${MAX_PER_SESSION}`);
     }
-    if (opts.offset !== undefined && (!Number.isSafeInteger(opts.offset) || opts.offset < 0 || opts.offset > MAX_OFFSET)) {
+    if (
+        opts.offset !== undefined &&
+        (!Number.isSafeInteger(opts.offset) || opts.offset < 0 || opts.offset > MAX_OFFSET)
+    ) {
         throw new RangeError(`offset must be an integer from 0 to ${MAX_OFFSET}`);
     }
     if (terms.length === 0) return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: false };
@@ -309,7 +318,16 @@ export async function searchSessions(
             break;
         }
     }
-    return { matches, bytesScanned: bytes, filesScanned, truncated: scanIncomplete || limitReached, limitReached, scanIncomplete, perSession, offset };
+    return {
+        matches,
+        bytesScanned: bytes,
+        filesScanned,
+        truncated: scanIncomplete || limitReached,
+        limitReached,
+        scanIncomplete,
+        perSession,
+        offset,
+    };
 }
 
 export async function firstUserTitle(file: string, maxLen = 120): Promise<string | null> {
@@ -364,7 +382,9 @@ export function formatResults(query: string, result: Awaited<ReturnType<typeof s
     let lastFile = "";
     for (const m of result.matches) {
         if (m.file !== lastFile) {
-            blocks.push(`${m.file}\n[${m.currentSession ? "this session" : m.sameProject ? "other session in this project" : m.project} | ${m.date}]`);
+            blocks.push(
+                `${m.file}\n[${m.currentSession ? "this session" : m.sameProject ? "other session in this project" : m.project} | ${m.date}]`,
+            );
             lastFile = m.file;
         }
         blocks[blocks.length - 1] += `\n- ${m.role}: ${m.excerpt.replace(/\s+/g, " ")}`;

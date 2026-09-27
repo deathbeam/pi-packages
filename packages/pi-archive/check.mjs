@@ -87,7 +87,10 @@ fs.writeFileSync(
             line({ type: "message", message: { role: "user", content: `signal intent ${i}` } }),
         ),
         ...Array.from({ length: 5 }, (_u, i) =>
-            line({ type: "message", message: { role: "toolResult", content: [{ type: "text", text: `signal noise ${i}` }] } }),
+            line({
+                type: "message",
+                message: { role: "toolResult", content: [{ type: "text", text: `signal noise ${i}` }] },
+            }),
         ),
         "",
     ].join("\n"),
@@ -133,7 +136,10 @@ assert.equal(entryText({ type: "model_change" }), null);
 assert.equal(entryText({ type: "message", message: { role: "user", content: "plain string" } })?.text, "plain string");
 assert.equal(entryText({ type: "message", message: { role: "system", content: "not searchable" } }), null);
 assert.equal(
-    entryText({ type: "message", message: { role: "toolResult", toolName: "search_archive", content: [{ type: "text", text: "derived hit" }] } }),
+    entryText({
+        type: "message",
+        message: { role: "toolResult", toolName: "search_archive", content: [{ type: "text", text: "derived hit" }] },
+    }),
     null,
     "archive search results should not match themselves",
 );
@@ -161,8 +167,14 @@ assert.match(formatResults("jwt", res), /\[this session \|/);
 assert.match(formatResults("jwt", res), /\[other session in this project \|/);
 assert.equal(formatResults("jwt", res).split(res.matches[1].file).length - 1, 1);
 const favored = await searchSessions(root, "signal", { currentFile, currentDir: projA });
-assert.deepEqual(favored.matches.map((m) => m.role), ["user", "user", "toolResult"]);
-assert.deepEqual(favored.matches.map((m) => m.excerpt), ["signal intent 1", "signal intent 0", "signal noise 4"]);
+assert.deepEqual(
+    favored.matches.map((m) => m.role),
+    ["user", "user", "toolResult"],
+);
+assert.deepEqual(
+    favored.matches.map((m) => m.excerpt),
+    ["signal intent 1", "signal intent 0", "signal noise 4"],
+);
 
 // AND across terms finds nothing in projB
 const none = await searchSessions(root, "jwt renderer", {});
@@ -193,17 +205,35 @@ await assert.rejects(searchSessions(root, "", { limit: 0 }), /limit must be an i
 
 const capped = await searchSessions(root, "capmark", {});
 assert.equal(capped.matches.length, 3);
-assert.deepEqual(capped.matches.map((m) => m.excerpt), [5, 4, 3].map((i) => `capmark hit number ${i}`));
+assert.deepEqual(
+    capped.matches.map((m) => m.excerpt),
+    [5, 4, 3].map((i) => `capmark hit number ${i}`),
+);
 assert.match(formatResults("capmark", capped), /at most 3 per session file/);
 assert.equal(formatResults("capmark", capped).split(capped.matches[0].file).length - 1, 1);
 const page1 = await searchSessions(root, "capmark", { perSession: 6, limit: 2 });
 const page2 = await searchSessions(root, "capmark", { perSession: 6, limit: 2, offset: 2 });
-assert.deepEqual(page1.matches.map((m) => m.excerpt), ["capmark hit number 5", "capmark hit number 4"]);
-assert.deepEqual(page2.matches.map((m) => m.excerpt), ["capmark hit number 3", "capmark hit number 2"]);
+assert.deepEqual(
+    page1.matches.map((m) => m.excerpt),
+    ["capmark hit number 5", "capmark hit number 4"],
+);
+assert.deepEqual(
+    page2.matches.map((m) => m.excerpt),
+    ["capmark hit number 3", "capmark hit number 2"],
+);
 assert.match(formatResults("capmark", page2), /at offset 2 — at most 6 per session file/);
-assert.match(formatResults("capmark", await searchSessions(root, "capmark", { perSession: 6, offset: 6 })), /No matches.*after offset 6/);
-assert.equal((await searchSessions(root, "signal", { currentFile, currentDir: projA, perSession: 1 })).matches[0].role, "user");
-assert.equal((await searchSessions(root, "jwt", { currentFile, currentDir: projA, offset: 1, limit: 1 })).matches[0].sameProject, true);
+assert.match(
+    formatResults("capmark", await searchSessions(root, "capmark", { perSession: 6, offset: 6 })),
+    /No matches.*after offset 6/,
+);
+assert.equal(
+    (await searchSessions(root, "signal", { currentFile, currentDir: projA, perSession: 1 })).matches[0].role,
+    "user",
+);
+assert.equal(
+    (await searchSessions(root, "jwt", { currentFile, currentDir: projA, offset: 1, limit: 1 })).matches[0].sameProject,
+    true,
+);
 for (const perSession of [0, -1, 1.5, Infinity, 1001]) {
     await assert.rejects(searchSessions(root, "", { perSession }), /perSession must be an integer/);
 }
