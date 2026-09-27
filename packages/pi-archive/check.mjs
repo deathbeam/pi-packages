@@ -83,6 +83,12 @@ fs.writeFileSync(
             parentId: null,
             message: { role: "user", content: [{ type: "text", text: "jwt again but this session is the live one" }] },
         }),
+        ...Array.from({ length: 2 }, (_u, i) =>
+            line({ type: "message", message: { role: "user", content: `signal intent ${i}` } }),
+        ),
+        ...Array.from({ length: 5 }, (_u, i) =>
+            line({ type: "message", message: { role: "toolResult", content: [{ type: "text", text: `signal noise ${i}` }] } }),
+        ),
         "",
     ].join("\n"),
 );
@@ -126,6 +132,11 @@ assert.equal(entryText({ type: "compaction", summary: "sum" })?.role, "summary")
 assert.equal(entryText({ type: "model_change" }), null);
 assert.equal(entryText({ type: "message", message: { role: "user", content: "plain string" } })?.text, "plain string");
 assert.equal(entryText({ type: "message", message: { role: "system", content: "not searchable" } }), null);
+assert.equal(
+    entryText({ type: "message", message: { role: "toolResult", toolName: "search_archive", content: [{ type: "text", text: "derived hit" }] } }),
+    null,
+    "archive search results should not match themselves",
+);
 
 assert.ok(matchesAll("Fix The JWT Bug", ["jwt", "bug"]));
 assert.ok(!matchesAll("Fix The JWT Bug", ["jwt", "renderer"]));
@@ -148,6 +159,10 @@ assert.ok(res.matches.some((m) => m.role === "toolResult" && m.excerpt.includes(
 assert.ok(res.matches.some((m) => m.excerpt.includes("30")));
 assert.match(formatResults("jwt", res), /\[this session \|/);
 assert.match(formatResults("jwt", res), /\[other session in this project \|/);
+assert.equal(formatResults("jwt", res).split(res.matches[1].file).length - 1, 1);
+const favored = await searchSessions(root, "signal", { currentFile, currentDir: projA });
+assert.deepEqual(favored.matches.map((m) => m.role), ["user", "user", "toolResult"]);
+assert.deepEqual(favored.matches.map((m) => m.excerpt), ["signal intent 1", "signal intent 0", "signal noise 4"]);
 
 // AND across terms finds nothing in projB
 const none = await searchSessions(root, "jwt renderer", {});
@@ -165,7 +180,12 @@ assert.equal(large.truncated, true);
 assert.equal(await firstUserTitle(largeFile), "late title");
 
 // limit
-assert.equal((await searchSessions(root, "jwt", { limit: 1 })).matches.length, 1);
+const limited = await searchSessions(root, "jwt", { currentFile, currentDir: projA, limit: 1 });
+assert.equal(limited.matches.length, 1);
+assert.equal(limited.limitReached, true);
+assert.equal(limited.scanIncomplete, false);
+assert.match(formatResults("jwt", limited), /Result limit reached/);
+assert.doesNotMatch(formatResults("jwt", limited), /Search incomplete/);
 for (const limit of [0, -1, 1.5, Infinity, 101]) {
     await assert.rejects(searchSessions(root, "jwt", { limit }), /limit must be an integer/);
 }
@@ -173,7 +193,23 @@ await assert.rejects(searchSessions(root, "", { limit: 0 }), /limit must be an i
 
 const capped = await searchSessions(root, "capmark", {});
 assert.equal(capped.matches.length, 3);
+assert.deepEqual(capped.matches.map((m) => m.excerpt), [5, 4, 3].map((i) => `capmark hit number ${i}`));
 assert.match(formatResults("capmark", capped), /at most 3 per session file/);
+assert.equal(formatResults("capmark", capped).split(capped.matches[0].file).length - 1, 1);
+const page1 = await searchSessions(root, "capmark", { perSession: 6, limit: 2 });
+const page2 = await searchSessions(root, "capmark", { perSession: 6, limit: 2, offset: 2 });
+assert.deepEqual(page1.matches.map((m) => m.excerpt), ["capmark hit number 5", "capmark hit number 4"]);
+assert.deepEqual(page2.matches.map((m) => m.excerpt), ["capmark hit number 3", "capmark hit number 2"]);
+assert.match(formatResults("capmark", page2), /at offset 2 — at most 6 per session file/);
+assert.match(formatResults("capmark", await searchSessions(root, "capmark", { perSession: 6, offset: 6 })), /No matches.*after offset 6/);
+assert.equal((await searchSessions(root, "signal", { currentFile, currentDir: projA, perSession: 1 })).matches[0].role, "user");
+assert.equal((await searchSessions(root, "jwt", { currentFile, currentDir: projA, offset: 1, limit: 1 })).matches[0].sameProject, true);
+for (const perSession of [0, -1, 1.5, Infinity, 1001]) {
+    await assert.rejects(searchSessions(root, "", { perSession }), /perSession must be an integer/);
+}
+for (const offset of [-1, 1.5, Infinity, 10001]) {
+    await assert.rejects(searchSessions(root, "", { offset }), /offset must be an integer/);
+}
 
 // Missing archives are normal; permission errors are not clean misses.
 assert.deepEqual(await searchSessions(path.join(root, "no-such-root"), "jwt", {}), {
