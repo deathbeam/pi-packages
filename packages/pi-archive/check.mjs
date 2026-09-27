@@ -146,6 +146,8 @@ assert.equal(res.matches[1].date, "2026-09-01");
 assert.ok(res.matches.some((m) => m.role === "summary"));
 assert.ok(res.matches.some((m) => m.role === "toolResult" && m.excerpt.includes("EACCES")));
 assert.ok(res.matches.some((m) => m.excerpt.includes("30")));
+assert.match(formatResults("jwt", res), /\[this session \|/);
+assert.match(formatResults("jwt", res), /\[other session in this project \|/);
 
 // AND across terms finds nothing in projB
 const none = await searchSessions(root, "jwt renderer", {});

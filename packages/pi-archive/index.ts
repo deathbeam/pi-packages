@@ -319,7 +319,7 @@ export function formatResults(query: string, result: Awaited<ReturnType<typeof s
     }
     const lines = result.matches.map(
         (m) =>
-            `${m.file}\n[${m.currentSession ? "this session" : m.sameProject ? "this project" : m.project} | ${m.date} | ${m.role}] ${m.excerpt.replace(/\s+/g, " ")}`,
+            `${m.file}\n[${m.currentSession ? "this session" : m.sameProject ? "other session in this project" : m.project} | ${m.date} | ${m.role}] ${m.excerpt.replace(/\s+/g, " ")}`,
     );
     return `Found ${result.matches.length} match(es) for "${query}" — at most ${MAX_PER_FILE} per session file (read or grep the file for more):\n\n${lines.join("\n\n")}${note}`;
 }
@@ -332,9 +332,9 @@ export default async function piArchive(pi: ExtensionAPI) {
         name: "search_archive",
         label: "Search archive",
         description:
-            "Search the full transcript archive of past and current pi sessions — including content that was compacted away. " +
-            "Use when the current context is missing a detail: exact code, command output, error messages, or decisions from " +
-            "earlier in this session (before compaction) or from previous sessions in this or other projects.",
+            "Search raw Pi transcripts from this session and older sessions, including messages compacted away. " +
+            "If a compaction summary lacks a detail needed for the current task (exact code, output, error, or decision), search here instead of guessing. " +
+            "Results identify this session, another session in this project, or another project; old hits may be stale, so verify against current context or files.",
         parameters: Type.Object({
             query: Type.String({ description: "Search terms; all must appear (case-insensitive)" }),
             session: Type.Optional(
