@@ -451,7 +451,9 @@ try {
     const view = await Promise.race([viewerReady, timeout]);
     const rows = view.render(80);
     const opened = rows.join("\n");
-    assert.match(opened, /Jobs \(2\)/);
+    assert.match(rows[0], /\[Jobs\]  Activity · 1 running · 2 total/);
+    assert.doesNotMatch(rows[0], /Jobs \(/);
+    assert.doesNotMatch(rows[0], /Delegates/);
     assert.match(opened, /second run/);
     assert.match(opened, /signal\./);
     assert.ok(
@@ -483,6 +485,8 @@ try {
     await steer.execute("call", { id: second.details.id, message: "first" });
     assert.ok(renders > before, "live activity did not redraw the observer");
     view.handleInput("\t");
+    assert.match(view.render(80)[0], /\[Activity\]/);
+    assert.doesNotMatch(view.render(80)[0], /\[Jobs/);
     assert.match(view.render(80).join("\n"), /read src\/104.ts/);
     assert.match(view.render(80).join("\n"), /210\/210/);
     assert.ok(colors.includes("toolTitle") && colors.includes("accent") && colors.includes("text"));

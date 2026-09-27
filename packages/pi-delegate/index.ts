@@ -355,7 +355,7 @@ export default function (pi: ExtensionAPI) {
                     const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
                         const row = (text: string) =>
                             truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│");
-                        const visible = Math.max(1, Math.floor((bodyHeight() - 3) / 2));
+                        const visible = Math.max(1, Math.floor((bodyHeight() - 1) / 2));
                         const start = Math.max(
                             0,
                             Math.min(selectedIndex - Math.floor(visible / 2), items.length - visible),
@@ -365,18 +365,15 @@ export default function (pi: ExtensionAPI) {
                             .flatMap((item, index) => [
                                 row(
                                     theme.fg(
-                                        start + index === selectedIndex ? "accent" : "text",
+                                        start + index === selectedIndex && focus === "list" ? "accent" : "text",
                                         `${start + index === selectedIndex ? "›" : " "} ${statusText(theme, item.status)} ${item.agent} ${item.id}`,
                                     ),
                                 ),
                                 row(theme.fg("muted", `    ${item.description}`)),
                             ]);
-                        const heading = row(theme.fg(focus === "list" ? "accent" : "muted", `Jobs (${items.length})`));
                         return [
-                            heading,
-                            row(theme.fg("borderMuted", "─".repeat(Math.max(0, width - 1)))),
                             ...lines,
-                            ...Array(Math.max(0, bodyHeight() - 3 - lines.length)).fill(row("")),
+                            ...Array(Math.max(0, bodyHeight() - 1 - lines.length)).fill(row("")),
                             row(theme.fg("dim", ` ${selectedIndex + 1}/${items.length}`)),
                         ].slice(0, bodyHeight());
                     };
@@ -447,10 +444,9 @@ export default function (pi: ExtensionAPI) {
                             );
                             const selected = items[selectedIndex];
                             const title = truncateToWidth(
-                                theme.fg(
-                                    "accent",
-                                    theme.bold(`Delegates · ${running.size} running · ${recent.length} recent`),
-                                ),
+                                `${theme.fg(focus === "list" ? "accent" : "muted", focus === "list" ? "[Jobs]" : "Jobs")}  ` +
+                                    `${theme.fg(focus === "history" ? "accent" : "muted", focus === "history" ? "[Activity]" : "Activity")}` +
+                                    theme.fg("dim", ` · ${running.size} running · ${items.length} total`),
                                 width,
                             );
                             const footer = truncateToWidth(
