@@ -7,6 +7,7 @@ import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import {
     formatDuration,
     formatTokens,
@@ -18,11 +19,17 @@ import {
     reportText,
     resultPreview,
     SPINNER_FRAMES,
+    SPINNER_INTERVAL_MS,
+    STATUS_COLORS,
+    STATUS_ICONS,
+    statusIcon,
     toolCallDetail,
     widgetJobs,
     WIDGET_MAX_LINES,
 } from "./format.ts";
 import { runChild } from "./child.ts";
+
+initTheme("dark");
 
 const root = new URL("./", import.meta.url);
 const index = readFileSync(new URL("index.ts", root), "utf8");
@@ -41,6 +48,7 @@ try {
 // Tripwires for wiring the compiled-file check cannot see: the child protocol, the delivery path,
 // and the prompt sections. Display text and formatting are deliberately not asserted.
 assert.match(index, /name: "delegate"/);
+assert.match(index, /registerCommand\("delegate"/);
 assert.match(index, /name: "delegate_list"/);
 assert.match(index, /name: "delegate_steer"/);
 assert.match(index, /name: "delegate_cancel"/);
@@ -66,6 +74,8 @@ assert.match(index, /pi\.sendMessage\(/);
 assert.match(index, /background: ctx\.hasUI/);
 assert.match(index, /deliverAs: "steer"/);
 assert.match(index, /setWidget\(WIDGET_KEY/);
+// One status vocabulary; a glyph written into a view drifts out of sync with the others.
+assert.doesNotMatch(index, /[✓✗●○]/);
 
 const expected = ["explore", "general", "researcher", "reviewer"];
 const agentFiles = readdirSync(new URL("agents/", root))
@@ -81,6 +91,11 @@ for (const { file, text } of agentFiles) {
 }
 
 assert.ok(SPINNER_FRAMES.length > 1);
+assert.deepEqual(Object.keys(STATUS_ICONS).sort(), ["cancelled", "done", "failed"]);
+assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "failed", "running"]);
+assert.equal(statusIcon("running", 0), SPINNER_FRAMES[0]);
+assert.equal(statusIcon("running", SPINNER_INTERVAL_MS), SPINNER_FRAMES[1]);
+assert.equal(statusIcon("done", SPINNER_INTERVAL_MS), STATUS_ICONS.done);
 assert.equal(
     launchDetails({ task: "do it", model: "x/y", tools: ["read", "ls"] }).join("\n"),
     "   Model: x/y\n   Tools: read, ls\n   Task: do it",
@@ -193,11 +208,49 @@ fake.stdin.on("data", (chunk) => {
         }
     }
 });
-const run = runChild(fake, "task", undefined);
+const activity = [];
+const run = runChild(fake, "task", undefined, (update) => {
+    if (update.activity) activity.push(update.activity);
+});
 assert.equal(fake.stdout.readableEncoding, "utf8");
 await assert.rejects(run.steer("steer"), /steer rejected/);
+fake.stdout.write(
+    `${JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { file_path: "src/a.ts" } })}\n`,
+);
+fake.stdout.write(
+    `${JSON.stringify({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "file loaded\nmore" }] } })}\n`,
+);
+fake.stdout.write(
+    `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "é" }] } })}\n`,
+);
 fake.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
 assert.equal(await run.done, "é");
+assert.deepEqual(activity, [
+    { kind: "tool", text: "read", detail: "src/a.ts" },
+    { kind: "result", text: "↳ read: file loaded" },
+    { kind: "assistant", text: "é" },
+]);
+
+// Inspectable assistant text must not be cut at the old 8 KiB ceiling.
+const longText = "é" + "x".repeat(9000);
+const longMessage = fakeChild();
+let captured;
+longMessage.stdin.on("data", (chunk) => {
+    const command = JSON.parse(chunk.toString());
+    if (command.type !== "prompt") return;
+    longMessage.stdout.write(
+        `${JSON.stringify({ type: "response", id: command.id, command: "prompt", success: true })}\n`,
+    );
+    longMessage.stdout.write(
+        `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: longText }] } })}\n`,
+    );
+    longMessage.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
+});
+const longRun = runChild(longMessage, "task", undefined, (update) => {
+    if (update.activity?.kind === "assistant") captured = update.activity.text;
+});
+assert.equal(await longRun.done, longText);
+assert.equal(captured, longText);
 
 const rejected = fakeChild();
 let killed = false;
@@ -241,18 +294,31 @@ await assert.rejects(active.done, /aborted/);
 assert.equal(abortRequested, true);
 assert.equal(stopping.stdin.writableEnded, true);
 
-// Missing CLI argv must fail before spawning a child.
+// The command is TUI-only; an empty session should explain why there is no view.
 const { default: extension } = await import(new URL("index.ts", root).href);
 const registered = [];
+let inspect;
+const deliveries = [];
+const delivered = new Promise((resolve) => deliveries.push(resolve));
+const deliveredSecond = new Promise((resolve) => deliveries.push(resolve));
 extension({
     on() {},
-    sendMessage() {},
+    sendMessage(message) {
+        deliveries.shift()?.(message);
+    },
     registerMessageRenderer() {},
+    registerCommand(name, command) {
+        if (name === "delegate") inspect = command;
+    },
     registerTool(tool) {
         registered.push(tool);
     },
     getActiveTools: () => ["read"],
 });
+let notice;
+await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = message) } });
+assert.match(notice, /No delegates/);
+// Missing CLI argv must fail before spawning a child.
 const delegate = registered.find((tool) => tool.name === "delegate");
 const ctx = {
     cwd: fileURLToPath(root),
@@ -276,6 +342,166 @@ try {
     );
 } finally {
     process.argv = argv;
+}
+
+// A real RPC child populates recent jobs; a second stays live in the two-column observer.
+const fakeCliDir = mkdtempSync(join(tmpdir(), "pi-delegate-fake-cli-"));
+const fakeCli = join(fakeCliDir, "pi.mjs");
+writeFileSync(
+    fakeCli,
+    `
+let stage = 0;
+const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+process.stdin.on("data", (data) => {
+    for (const line of data.toString().trim().split("\\n")) {
+        const command = JSON.parse(line);
+        if (command.type === "prompt") {
+            send({ type: "response", command: "prompt", id: command.id, success: true });
+        } else if (command.type === "steer") {
+            if (++stage === 1) {
+                for (let i = 0; i < 105; i++) {
+                    send({ type: "tool_execution_start", toolName: "read", args: { path: "src/" + i + ".ts" } });
+                    send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
+                }
+            } else {
+                send({ type: "tool_execution_start", toolName: "read", args: { path: "src/end.ts" } });
+                send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
+                send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "## Done\\n\\n| Path | Count |\\n| --- | ---: |\\n| a.ts | 2 |" }] } });
+            }
+            send({ type: "response", command: "steer", id: command.id, success: true });
+            if (stage === 2) send({ type: "agent_settled" });
+        }
+    }
+});
+setTimeout(() => process.exit(1), 5000).unref();
+`,
+);
+const colors = [];
+const theme = {
+    fg: (color, text) => {
+        colors.push(color);
+        return text;
+    },
+    bold: (text) => text,
+};
+let renders = 0;
+const tui = {
+    terminal: { rows: 24 },
+    requestRender() {
+        renders++;
+    },
+};
+let screens = 0;
+let showViewer;
+const viewerReady = new Promise((resolve) => (showViewer = resolve));
+const ui = {
+    theme,
+    setWidget() {},
+    async custom(factory, options) {
+        assert.equal(options?.overlay, true);
+        assert.deepEqual(options.overlayOptions, { width: "100%", maxHeight: "100%", row: 0, col: 0 });
+        let done;
+        const result = new Promise((resolve) => (done = resolve));
+        const view = factory(
+            tui,
+            theme,
+            {
+                matches: (data, action) =>
+                    ({ "tui.select.cancel": "\x1b", "tui.select.up": "up", "tui.select.down": "down" })[action] ===
+                    data,
+            },
+            done,
+        );
+        assert.equal(view.render(80).length, tui.terminal.rows);
+        screens++;
+        showViewer(view);
+        return result;
+    },
+};
+process.argv = [argv[0], fakeCli];
+let timer;
+const timeout = new Promise(
+    (_, reject) => (timer = setTimeout(() => reject(new Error("delegate check timed out")), 5000)),
+);
+try {
+    const first = await delegate.execute(
+        "call",
+        { agent: "explore", description: "first run", task: "trace it" },
+        undefined,
+        () => {},
+        { ...ctx, mode: "tui", hasUI: true, ui },
+    );
+    const steer = registered.find((tool) => tool.name === "delegate_steer");
+    await steer.execute("call", { id: first.details.id, message: "first" });
+    await steer.execute("call", { id: first.details.id, message: "second" });
+    assert.equal((await Promise.race([delivered, timeout])).details.error, undefined);
+
+    const second = await delegate.execute(
+        "call",
+        {
+            agent: "explore",
+            description: "second run",
+            task: "Trace delegates and collect their activity across the workspace.\nReport a detailed note after every step, including all found paths and why they matter. Finish with a final regression signal.",
+        },
+        undefined,
+        () => {},
+        { ...ctx, mode: "tui", hasUI: true, ui },
+    );
+    const observing = inspect.handler("", { mode: "tui", ui });
+    const view = await Promise.race([viewerReady, timeout]);
+    const rows = view.render(80);
+    const opened = rows.join("\n");
+    assert.match(opened, /Jobs \(2\)/);
+    assert.match(opened, /second run/);
+    assert.match(opened, /signal\./);
+    assert.ok(
+        rows.findIndex((row) => row.includes("anthropic/m")) < rows.findIndex((row) => row.includes("Trace delegates")),
+    );
+    assert.match(opened, /✓ explore/);
+    // The list pane already draws a border; the task text carries none of its own.
+    assert.match(opened, /Trace delegates/);
+    assert.doesNotMatch(opened, /│\s*Trace/);
+    assert.doesNotMatch(opened, /Model:|Task:/);
+    const originalNow = Date.now;
+    try {
+        Date.now = () => 0;
+        const frame = () => SPINNER_FRAMES.find((icon) => view.render(80)[2]?.includes(icon));
+        const firstFrame = frame();
+        Date.now = () => SPINNER_INTERVAL_MS;
+        assert.notEqual(frame(), firstFrame, "running status spinner stayed frozen");
+    } finally {
+        Date.now = originalNow;
+    }
+    view.handleInput("down");
+    assert.match(view.render(80).join("\n"), /first run/);
+    assert.match(view.render(80).join("\n"), /Count/);
+    assert.match(view.render(80).join("\n"), /a\.ts/);
+    view.handleInput("up");
+    assert.match(view.render(80).join("\n"), /second run/);
+
+    const before = renders;
+    await steer.execute("call", { id: second.details.id, message: "first" });
+    assert.ok(renders > before, "live activity did not redraw the observer");
+    view.handleInput("\t");
+    assert.match(view.render(80).join("\n"), /read src\/104.ts/);
+    assert.match(view.render(80).join("\n"), /210\/210/);
+    assert.ok(colors.includes("toolTitle") && colors.includes("accent") && colors.includes("text"));
+    for (let i = 0; i < 3; i++) view.handleInput("up");
+    const scrolledLine = view.render(80)[6];
+    await steer.execute("call", { id: second.details.id, message: "second" });
+    assert.equal(view.render(80)[6], scrolledLine, "new events moved the scrolled-back history");
+    assert.equal((await Promise.race([deliveredSecond, timeout])).details.error, undefined);
+    for (let i = 0; i < 30; i++) view.handleInput("down");
+    assert.match(view.render(80).join("\n"), /Count/);
+    view.invalidate();
+    assert.match(view.render(80).join("\n"), /a\.ts/);
+    view.handleInput("\x1b");
+    await observing;
+    assert.equal(screens, 1);
+} finally {
+    clearTimeout(timer);
+    process.argv = argv;
+    rmSync(fakeCliDir, { recursive: true, force: true });
 }
 
 console.log("pi-delegate check passed");

@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
     CONFIG_DIR_NAME,
     getAgentDir,
@@ -12,21 +12,31 @@ import {
     keyHint,
     parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Text } from "@earendil-works/pi-tui";
+import {
+    Container,
+    HStack,
+    Markdown,
+    Text,
+    matchesKey,
+    truncateToWidth,
+    wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
     COLLAPSED_OUTPUT_LINES,
     type DelegateReport,
     jobLine,
+    type JobStatus,
     launchDetails,
     outputPreview,
     progressStats,
     reportText,
-    SPINNER_FRAMES,
+    statusIcon,
     SPINNER_INTERVAL_MS,
+    STATUS_COLORS,
     widgetJobs,
 } from "./format.ts";
-import { runChild } from "./child.ts";
+import { type ChildActivity, runChild } from "./child.ts";
 
 type AgentFile = {
     name: string;
@@ -50,12 +60,17 @@ type SteerDetails = Pick<
     elapsedMs: number;
 };
 
-type DelegateJob = {
+type InspectJob = {
     id: string;
     agent: string;
     description: string;
     task: string;
     model: string;
+    status: JobStatus;
+    activity: ChildActivity[];
+};
+
+type DelegateJob = InspectJob & {
     tools: string[];
     toolCalls: number;
     lastTool?: string;
@@ -81,6 +96,10 @@ const DELEGATION_TOOLS = new Set(["delegate", "delegate_list", "delegate_steer",
 const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
+
+/** Glyph + color for a job status, identical in the widget, the transcript, and the observer. */
+const statusText = (theme: Theme, status: JobStatus, now = Date.now()) =>
+    theme.fg(STATUS_COLORS[status], statusIcon(status, now));
 
 function expandPath(value: string, cwd: string): string {
     return resolve(cwd, value.replace(/^~(?=\/|$)/, homedir()));
@@ -170,8 +189,32 @@ function contextWindowFor(ctx: ExtensionContext, model: string | undefined): num
 
 export default function (pi: ExtensionAPI) {
     const running = new Map<string, DelegateJob>();
+    const recent: InspectJob[] = [];
+    let viewing: (() => void) | undefined;
     let finished = 0;
     let ticker: ReturnType<typeof setInterval> | undefined;
+
+    const addActivity = (job: DelegateJob, activity: ChildActivity) => {
+        const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+        job.activity.push(
+            activity.kind === "assistant"
+                ? activity
+                : {
+                      ...activity,
+                      text: normalize(activity.text),
+                      detail: activity.detail && normalize(activity.detail),
+                  },
+        );
+        viewing?.();
+    };
+
+    // Status words are gone; only a failure detail is worth a log line.
+    const remember = (job: DelegateJob, status: JobStatus, detail?: string) => {
+        job.status = status;
+        if (detail) addActivity(job, { kind: "status", text: detail });
+        const { id, agent, description, task, model, activity } = job;
+        recent.unshift({ id, agent, description, task, model, status, activity });
+    };
 
     const refreshWidget = (ctx: ExtensionContext) => {
         if (!ctx.hasUI) return;
@@ -181,16 +224,15 @@ export default function (pi: ExtensionAPI) {
         }
         const theme = ctx.ui.theme;
         const now = Date.now();
-        const frame = SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]!;
         const { shown, hidden, detail } = widgetJobs([...running.values()]);
         const lines: string[] = [];
         if (running.size > 1 || finished > 0) {
             const counts = `${running.size} running${finished ? ` · ${finished} done` : ""}`;
-            lines.push(`${theme.fg("warning", frame)} ${theme.fg("muted", counts)}`);
+            lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
         }
         for (const job of shown) {
             lines.push(
-                `${theme.fg("warning", frame)} ${theme.fg("toolTitle", theme.bold(job.agent))} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`,
+                `${statusText(theme, "running", now)} ${theme.fg("toolTitle", theme.bold(job.agent))} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`,
             );
             if (!detail) continue;
             if (job.lastTool)
@@ -212,6 +254,7 @@ export default function (pi: ExtensionAPI) {
         // Cancellation was already acknowledged; shutdown has no UI to report into.
         if (job.controller.signal.aborted) return;
         running.delete(job.id);
+        remember(job, error ? "failed" : "done", error ? `Error: ${error}` : undefined);
         finished += 1;
         if (running.size === 0) stopTicker();
         refreshWidget(ctx);
@@ -239,6 +282,8 @@ export default function (pi: ExtensionAPI) {
         stopTicker();
         for (const job of running.values()) job.controller.abort();
         running.clear();
+        recent.length = 0;
+        viewing = undefined;
         finished = 0;
     });
 
@@ -255,7 +300,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded }, theme) => {
         const report = message.details as DelegateReport | undefined;
         if (!report?.agent) return undefined;
-        const icon = report.error ? theme.fg("error", "✗") : theme.fg("success", "✓");
+        const icon = statusText(theme, report.error ? "failed" : "done");
         const container = new Container();
         container.addChild(
             new Text(
@@ -278,6 +323,227 @@ export default function (pi: ExtensionAPI) {
                 );
         }
         return container;
+    });
+
+    pi.registerCommand("delegate", {
+        description: "Inspect live and recent delegate activity",
+        handler: async (_args, ctx) => {
+            if (ctx.mode !== "tui") return;
+            if (!running.size && !recent.length) {
+                ctx.ui.notify("No delegates in this session yet.", "info");
+                return;
+            }
+            const screen = {
+                overlay: true,
+                overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0 },
+            } as const;
+            try {
+                await ctx.ui.custom((tui, theme, keys, done) => {
+                    let selectedId = running.keys().next().value ?? recent[0]!.id;
+                    let focus: "list" | "history" = "list";
+                    let top: number | undefined;
+                    let historyWidth = 1;
+                    let markdown = new WeakMap<ChildActivity, Markdown>();
+                    const jobs = () => [...running.values(), ...recent];
+                    const bodyHeight = () => Math.max(0, tui.terminal.rows - 3);
+                    // The list pane already draws a border, and the muted model line sets the task apart.
+                    const taskLines = (job: InspectJob, width: number) =>
+                        wrapTextWithAnsi(job.task.trim(), Math.max(1, width)).map((line) => theme.fg("text", line));
+                    const historyHeight = (job: InspectJob, width: number) =>
+                        Math.max(0, bodyHeight() - 6 - taskLines(job, width).length);
+                    // ScrollView needs fullscreen layout; window the history in regular TUI too.
+                    const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
+                        const row = (text: string) =>
+                            truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│");
+                        const visible = Math.max(1, Math.floor((bodyHeight() - 3) / 2));
+                        const start = Math.max(
+                            0,
+                            Math.min(selectedIndex - Math.floor(visible / 2), items.length - visible),
+                        );
+                        const lines = items
+                            .slice(start, start + visible)
+                            .flatMap((item, index) => [
+                                row(
+                                    theme.fg(
+                                        start + index === selectedIndex ? "accent" : "text",
+                                        `${start + index === selectedIndex ? "›" : " "} ${statusText(theme, item.status)} ${item.agent} ${item.id}`,
+                                    ),
+                                ),
+                                row(theme.fg("muted", `    ${item.description}`)),
+                            ]);
+                        const heading = row(theme.fg(focus === "list" ? "accent" : "muted", `Jobs (${items.length})`));
+                        return [
+                            heading,
+                            row(theme.fg("borderMuted", "─".repeat(Math.max(0, width - 1)))),
+                            ...lines,
+                            ...Array(Math.max(0, bodyHeight() - 3 - lines.length)).fill(row("")),
+                            row(theme.fg("dim", ` ${selectedIndex + 1}/${items.length}`)),
+                        ].slice(0, bodyHeight());
+                    };
+                    const renderEntry = (entry: ChildActivity, width: number): string[] => {
+                        if (entry.kind === "assistant") {
+                            let md = markdown.get(entry);
+                            if (!md) {
+                                md = new Markdown(entry.text, 0, 0, getMarkdownTheme());
+                                markdown.set(entry, md);
+                            }
+                            return [theme.fg("accent", "assistant"), ...md.render(width), ""];
+                        }
+                        if (entry.kind === "tool")
+                            return [
+                                truncateToWidth(
+                                    theme.fg("toolTitle", entry.text) +
+                                        (entry.detail ? ` ${theme.fg("accent", entry.detail)}` : ""),
+                                    width,
+                                ),
+                            ];
+                        if (entry.kind === "result") return [truncateToWidth(theme.fg("text", entry.text), width)];
+                        // Only failure detail still says anything; the header icon carries the status.
+                        if (!entry.text) return [];
+                        return [truncateToWidth(theme.fg(STATUS_COLORS.failed, entry.text), width)];
+                    };
+                    const renderHistory = (width: number, job: InspectJob): string[] => {
+                        historyWidth = width;
+                        const task = taskLines(job, width);
+                        const height = Math.max(0, bodyHeight() - 6 - task.length);
+                        const history = job.activity.flatMap((entry) => renderEntry(entry, width));
+                        const maxTop = Math.max(0, history.length - height);
+                        const start = Math.min(top ?? maxTop, maxTop);
+                        const visible = history.slice(start, start + height);
+                        const shown = visible.length
+                            ? visible
+                            : height
+                              ? [theme.fg("muted", "Waiting for activity…")]
+                              : [];
+                        return [
+                            truncateToWidth(
+                                theme.fg(focus === "history" ? "accent" : "toolTitle", theme.bold(job.agent)) +
+                                    ` ${theme.fg("dim", job.id)} ${statusText(theme, job.status)}`,
+                                width,
+                            ),
+                            truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
+                            truncateToWidth(theme.fg("dim", job.model), width),
+                            "",
+                            ...task,
+                            theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
+                            ...shown,
+                            ...Array(Math.max(0, height - shown.length)).fill(""),
+                            truncateToWidth(
+                                theme.fg(
+                                    "dim",
+                                    `${visible.length ? `${start + 1}–${start + visible.length}` : "0"}/${history.length}`,
+                                ),
+                                width,
+                            ),
+                        ].slice(0, bodyHeight());
+                    };
+                    viewing = () => tui.requestRender();
+                    return {
+                        render(width: number) {
+                            const items = jobs();
+                            const selectedIndex = Math.max(
+                                0,
+                                items.findIndex((item) => item.id === selectedId),
+                            );
+                            const selected = items[selectedIndex];
+                            const title = truncateToWidth(
+                                theme.fg(
+                                    "accent",
+                                    theme.bold(`Delegates · ${running.size} running · ${recent.length} recent`),
+                                ),
+                                width,
+                            );
+                            const footer = truncateToWidth(
+                                theme.fg(
+                                    "dim",
+                                    `${keyHint("tui.select.up", "previous")} · ${keyHint("tui.select.down", "next")} · Tab switch pane · ${keyHint("tui.select.cancel", "close")}`,
+                                ),
+                                width,
+                            );
+                            if (!selected)
+                                return [
+                                    title,
+                                    theme.fg("muted", "No delegates in this session."),
+                                    ...Array(Math.max(0, tui.terminal.rows - 3)).fill(""),
+                                    footer,
+                                ].slice(0, tui.terminal.rows);
+                            const sidebarWidth = Math.min(
+                                40,
+                                Math.max(16, Math.floor(width * 0.35)),
+                                Math.max(1, width - 2),
+                            );
+                            const body = new HStack(
+                                [
+                                    {
+                                        component: {
+                                            render: (w) => renderJobs(w, items, selectedIndex),
+                                            invalidate() {},
+                                        },
+                                        basis: sidebarWidth,
+                                        shrink: 0,
+                                    },
+                                    {
+                                        component: { render: (w) => renderHistory(w, selected), invalidate() {} },
+                                        basis: 0,
+                                        grow: 1,
+                                    },
+                                ],
+                                { gap: 1 },
+                            ).render(width);
+                            return [
+                                title,
+                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
+                                ...body,
+                                footer,
+                            ].slice(0, tui.terminal.rows);
+                        },
+                        invalidate() {
+                            markdown = new WeakMap();
+                        },
+                        handleInput(data: string) {
+                            if (keys.matches(data, "tui.select.cancel")) done(undefined);
+                            else if (matchesKey(data, "tab")) focus = focus === "list" ? "history" : "list";
+                            else if (matchesKey(data, "left")) focus = "list";
+                            else if (
+                                matchesKey(data, "right") ||
+                                (focus === "list" && keys.matches(data, "tui.select.confirm"))
+                            )
+                                focus = "history";
+                            else if (keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down")) {
+                                const up = keys.matches(data, "tui.select.up");
+                                const items = jobs();
+                                if (focus === "list") {
+                                    const index = Math.max(
+                                        0,
+                                        items.findIndex((item) => item.id === selectedId),
+                                    );
+                                    selectedId =
+                                        items[Math.max(0, Math.min(items.length - 1, index + (up ? -1 : 1)))]?.id ??
+                                        selectedId;
+                                    top = undefined;
+                                } else {
+                                    const selected = items.find((item) => item.id === selectedId) ?? items[0];
+                                    const length =
+                                        selected?.activity.reduce(
+                                            (sum, entry) => sum + renderEntry(entry, historyWidth).length,
+                                            0,
+                                        ) ?? 0;
+                                    const maxTop = Math.max(
+                                        0,
+                                        length - (selected ? historyHeight(selected, historyWidth) : 0),
+                                    );
+                                    const position = Math.max(0, Math.min(maxTop, top ?? maxTop) + (up ? -1 : 1));
+                                    top = position >= maxTop ? undefined : position;
+                                }
+                            }
+                            tui.requestRender();
+                        },
+                    };
+                }, screen);
+            } finally {
+                viewing = undefined;
+            }
+        },
     });
 
     pi.registerTool({
@@ -319,6 +585,8 @@ export default function (pi: ExtensionAPI) {
                 description: params.description.trim(),
                 task: params.task,
                 model,
+                status: "running",
+                activity: [],
                 tools,
                 toolCalls: 0,
                 startedAt: Date.now(),
@@ -347,9 +615,12 @@ export default function (pi: ExtensionAPI) {
                 stdio: "pipe",
             });
             const run = runChild(child, params.task, details.background ? job.controller.signal : signal, (update) => {
-                for (const [key, value] of Object.entries(update)) {
+                if (job.status !== "running") return;
+                const { activity, ...progress } = update;
+                for (const [key, value] of Object.entries(progress)) {
                     if (value !== undefined) (job as Record<string, unknown>)[key] = value;
                 }
+                if (activity && details.background) addActivity(job, activity);
             });
             job.steer = run.steer;
 
@@ -395,7 +666,7 @@ export default function (pi: ExtensionAPI) {
             const body = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
             if (!details?.agent) return new Text(body || "(no output)", 0, 0);
 
-            const icon = context.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+            const icon = statusText(theme, context.isError ? "failed" : "done");
             const status = details.background ? "started in background" : "completed";
             const container = new Container();
             container.addChild(
@@ -472,7 +743,7 @@ export default function (pi: ExtensionAPI) {
             const details = result.details as SteerDetails | undefined;
             const body = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
             if (!details?.agent) return new Text(body || "(no output)", 0, 0);
-            const icon = context.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+            const icon = statusText(theme, context.isError ? "failed" : "done");
             const container = new Container();
             container.addChild(
                 new Text(
@@ -500,6 +771,7 @@ export default function (pi: ExtensionAPI) {
             const job = running.get(id);
             if (!job) throw new Error(`No running delegate job "${id}".`);
             running.delete(id);
+            remember(job, "cancelled");
             job.controller.abort();
             if (running.size === 0) stopTicker();
             refreshWidget(ctx);

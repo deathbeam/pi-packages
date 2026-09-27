@@ -2,6 +2,28 @@
 
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const SPINNER_INTERVAL_MS = 100;
+
+export type JobStatus = "running" | "done" | "failed" | "cancelled";
+
+/** Terminal statuses have static icons; running jobs use statusIcon's clock-driven frame. */
+export const STATUS_ICONS = {
+    done: "✓",
+    failed: "✗",
+    cancelled: "✗",
+} as const satisfies Record<Exclude<JobStatus, "running">, string>;
+
+export function statusIcon(status: JobStatus, now = Date.now()): string {
+    return status === "running"
+        ? SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]!
+        : STATUS_ICONS[status];
+}
+
+export const STATUS_COLORS = {
+    running: "warning",
+    done: "success",
+    failed: "error",
+    cancelled: "muted",
+} as const satisfies Record<JobStatus, string>;
 /** pi slices extension widgets at ten lines and appends its own truncation note. */
 export const WIDGET_MAX_LINES = 10;
 /** Only a few jobs still fit with their tool-call and tool-result lines: 1 tally + 3*3 lines. */

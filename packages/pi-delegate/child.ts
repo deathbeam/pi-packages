@@ -9,12 +9,14 @@ function usageTokens(usage: any): number | undefined {
     return tokens > 0 ? tokens : undefined;
 }
 
+export type ChildActivity = { kind: "tool" | "result" | "assistant" | "status"; text: string; detail?: string };
 export type ChildUpdate = {
     toolCalls?: number;
     lastTool?: string;
     lastDetail?: string;
     lastResult?: string;
     contextTokens?: number;
+    activity?: ChildActivity;
 };
 export type ChildUpdateHandler = (update: ChildUpdate) => void;
 
@@ -112,18 +114,29 @@ export function runChild(
                     return;
                 }
                 switch (event.type) {
-                    case "tool_execution_start":
+                    case "tool_execution_start": {
                         toolCalls += 1;
+                        const detail = toolCallDetail(event.toolName, event.args);
                         onUpdate?.({
                             toolCalls,
                             lastTool: event.toolName,
-                            lastDetail: toolCallDetail(event.toolName, event.args),
+                            lastDetail: detail,
                             lastResult: "",
+                            activity: { kind: "tool", text: event.toolName, detail },
                         });
                         return;
-                    case "tool_execution_end":
-                        onUpdate?.({ lastResult: resultPreview(event.result) });
+                    }
+                    case "tool_execution_end": {
+                        const preview = resultPreview(event.result);
+                        onUpdate?.({
+                            lastResult: preview,
+                            activity: {
+                                kind: "result",
+                                text: `↳ ${event.toolName}${event.isError ? " ✗" : ""}: ${preview ?? "(no text output)"}`,
+                            },
+                        });
                         return;
+                    }
                     case "message_update": {
                         const contextTokens = usageTokens(event.usage);
                         const delta =
@@ -144,7 +157,10 @@ export function runChild(
                                 .join("") ?? "";
                         if (text) {
                             liveText = text;
-                            onUpdate?.({ contextTokens: usageTokens(event.message.usage) });
+                            onUpdate?.({
+                                contextTokens: usageTokens(event.message.usage),
+                                activity: { kind: "assistant", text },
+                            });
                         }
                         return;
                     }
