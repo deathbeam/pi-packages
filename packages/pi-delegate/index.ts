@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
     CONFIG_DIR_NAME,
     getAgentDir,
@@ -25,15 +25,17 @@ import { Type } from "typebox";
 import {
     COLLAPSED_OUTPUT_LINES,
     type DelegateReport,
+    formatTools,
+    jobIdentity,
     jobLine,
     type JobStatus,
     launchDetails,
     outputPreview,
-    progressStats,
     reportText,
-    statusIcon,
     SPINNER_INTERVAL_MS,
     STATUS_COLORS,
+    statusText,
+    usageStats,
     widgetJobs,
 } from "./format.ts";
 import { type ChildActivity, runChild } from "./child.ts";
@@ -48,7 +50,6 @@ type AgentFile = {
 };
 
 type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "description" | "task" | "model" | "tools"> & {
-    /** True when the child keeps running after the tool returns and reports back as a follow-up message. */
     background: boolean;
 };
 
@@ -66,21 +67,21 @@ type InspectJob = {
     description: string;
     task: string;
     model: string;
+    tools: string[];
+    toolCalls: number;
+    contextTokens?: number;
+    contextWindow?: number;
+    startedAt: number;
+    endedAt?: number;
     status: JobStatus;
     activity: ChildActivity[];
 };
 
 type DelegateJob = InspectJob & {
-    tools: string[];
-    toolCalls: number;
     lastTool?: string;
     lastDetail?: string;
     lastResult?: string;
-    contextTokens?: number;
-    contextWindow?: number;
-    startedAt: number;
     controller: AbortController;
-    /** Set once the child is running; rejects when the child exits or rejects the command. */
     steer?: (message: string) => Promise<void>;
 };
 
@@ -91,15 +92,10 @@ type DelegateConfig = {
 
 const DEFAULT_AGENT_DIR = "~/.agents/agents";
 const BUNDLED_AGENT_DIR = fileURLToPath(new URL("./agents", import.meta.url));
-/** Exclude our own tools from children to prevent recursive delegation. */
 const DELEGATION_TOOLS = new Set(["delegate", "delegate_list", "delegate_steer", "delegate_cancel"]);
 const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
-
-/** Glyph + color for a job status, identical in the widget, the transcript, and the observer. */
-const statusText = (theme: Theme, status: JobStatus, now = Date.now()) =>
-    theme.fg(STATUS_COLORS[status], statusIcon(status, now));
 
 function expandPath(value: string, cwd: string): string {
     return resolve(cwd, value.replace(/^~(?=\/|$)/, homedir()));
@@ -183,7 +179,6 @@ function resolveModel(
 function contextWindowFor(ctx: ExtensionContext, model: string | undefined): number | undefined {
     const separator = model?.indexOf("/") ?? -1;
     if (!model || separator < 0) return undefined;
-    // Model ids may contain "/" themselves, so only the first one separates provider from id.
     return ctx.modelRegistry.find(model.slice(0, separator), model.slice(separator + 1))?.contextWindow;
 }
 
@@ -211,12 +206,13 @@ export default function (pi: ExtensionAPI) {
     const remember = (job: DelegateJob, status: JobStatus, detail?: string) => {
         job.status = status;
         if (detail) addActivity(job, { kind: "status", text: detail });
-        const { id, agent, description, task, model, activity } = job;
-        recent.unshift({ id, agent, description, task, model, status, activity });
+        const { controller, steer, lastTool, lastDetail, lastResult, ...snapshot } = job;
+        recent.unshift({ ...snapshot, endedAt: Date.now() });
     };
 
     const refreshWidget = (ctx: ExtensionContext) => {
         if (!ctx.hasUI) return;
+        viewing?.();
         if (running.size === 0) {
             ctx.ui.setWidget(WIDGET_KEY, undefined);
             return;
@@ -229,7 +225,7 @@ export default function (pi: ExtensionAPI) {
         lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
         for (const job of shown) {
             lines.push(
-                `${statusText(theme, "running", now)} ${theme.fg("toolTitle", theme.bold(job.agent))} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`,
+                `${statusText(theme, "running", now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`,
             );
             if (!detail) continue;
             if (job.lastTool)
@@ -299,7 +295,7 @@ export default function (pi: ExtensionAPI) {
         const container = new Container();
         container.addChild(
             new Text(
-                `${icon} ${theme.fg("toolTitle", theme.bold(report.agent))} ${theme.fg("muted", report.description)} ${theme.fg("dim", report.id)} ${theme.fg("muted", progressStats(report, report.elapsedMs))}`,
+                `${icon} ${jobIdentity(theme, report)} ${theme.fg("muted", report.description)} ${theme.fg("muted", usageStats(report, report.elapsedMs))}`,
                 0,
                 0,
             ),
@@ -344,13 +340,17 @@ export default function (pi: ExtensionAPI) {
                     // The list pane already draws a border, and the muted model line sets the task apart.
                     const taskLines = (job: InspectJob, width: number) =>
                         wrapTextWithAnsi(job.task.trim(), Math.max(1, width)).map((line) => theme.fg("text", line));
+                    const toolsLines = (job: InspectJob, width: number) =>
+                        wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
+                            theme.fg("dim", line),
+                        );
                     const historyHeight = (job: InspectJob, width: number) =>
-                        Math.max(0, bodyHeight() - 6 - taskLines(job, width).length);
+                        Math.max(0, bodyHeight() - 6 - taskLines(job, width).length - toolsLines(job, width).length);
                     // ScrollView needs fullscreen layout; window the history in regular TUI too.
                     const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
                         const row = (text: string) =>
                             truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│");
-                        const visible = Math.max(1, Math.floor((bodyHeight() - 1) / 2));
+                        const visible = Math.max(1, Math.floor((bodyHeight() - 1) / 3));
                         const start = Math.max(
                             0,
                             Math.min(selectedIndex - Math.floor(visible / 2), items.length - visible),
@@ -359,12 +359,15 @@ export default function (pi: ExtensionAPI) {
                             .slice(start, start + visible)
                             .flatMap((item, index) => [
                                 row(
-                                    theme.fg(
-                                        start + index === selectedIndex && focus === "list" ? "accent" : "text",
-                                        `${start + index === selectedIndex ? "›" : " "} ${statusText(theme, item.status)} ${item.agent} ${item.id}`,
-                                    ),
+                                    `${theme.fg(start + index === selectedIndex && focus === "list" ? "accent" : "text", start + index === selectedIndex ? "›" : " ")} ${statusText(theme, item.status)} ${jobIdentity(theme, item)}`,
                                 ),
                                 row(theme.fg("muted", `    ${item.description}`)),
+                                row(
+                                    theme.fg(
+                                        "dim",
+                                        `    ${usageStats(item, (item.endedAt ?? Date.now()) - item.startedAt)}`,
+                                    ),
+                                ),
                             ]);
                         return [
                             ...lines,
@@ -397,7 +400,8 @@ export default function (pi: ExtensionAPI) {
                     const renderHistory = (width: number, job: InspectJob): string[] => {
                         historyWidth = width;
                         const task = taskLines(job, width);
-                        const height = Math.max(0, bodyHeight() - 6 - task.length);
+                        const tools = toolsLines(job, width);
+                        const height = historyHeight(job, width);
                         const history = job.activity.flatMap((entry) => renderEntry(entry, width));
                         const maxTop = Math.max(0, history.length - height);
                         const start = Math.min(top ?? maxTop, maxTop);
@@ -408,14 +412,11 @@ export default function (pi: ExtensionAPI) {
                               ? [theme.fg("muted", "Waiting for activity…")]
                               : [];
                         return [
-                            truncateToWidth(
-                                theme.fg(focus === "history" ? "accent" : "toolTitle", theme.bold(job.agent)) +
-                                    ` ${theme.fg("dim", job.id)} ${statusText(theme, job.status)}`,
-                                width,
-                            ),
-                            truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
+                            truncateToWidth(`${statusText(theme, job.status)} ${jobIdentity(theme, job)}`, width),
                             truncateToWidth(theme.fg("dim", job.model), width),
-                            "",
+                            ...tools,
+                            theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
+                            truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
                             ...task,
                             theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
                             ...shown,
@@ -662,7 +663,7 @@ export default function (pi: ExtensionAPI) {
             const container = new Container();
             container.addChild(
                 new Text(
-                    `${icon} ${theme.fg("toolTitle", theme.bold(details.agent))} ${theme.fg("muted", details.description)} ${theme.fg("dim", details.id)} ${theme.fg("dim", status)}`,
+                    `${icon} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("dim", status)}`,
                     0,
                     0,
                 ),
@@ -738,7 +739,7 @@ export default function (pi: ExtensionAPI) {
             const container = new Container();
             container.addChild(
                 new Text(
-                    `${icon} ${theme.fg("toolTitle", theme.bold(details.agent))} ${theme.fg("muted", details.description)} ${theme.fg("dim", details.id)} ${theme.fg("muted", progressStats(details, details.elapsedMs))}`,
+                    `${icon} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("muted", usageStats(details, details.elapsedMs))}`,
                     0,
                     0,
                 ),

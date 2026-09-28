@@ -15,7 +15,6 @@ import {
     launchDetails,
     limitOutput,
     outputPreview,
-    progressStats,
     reportText,
     resultPreview,
     SPINNER_FRAMES,
@@ -24,6 +23,7 @@ import {
     STATUS_ICONS,
     statusIcon,
     toolCallDetail,
+    usageStats,
     widgetJobs,
     WIDGET_MAX_LINES,
 } from "./format.ts";
@@ -98,16 +98,16 @@ assert.equal(statusIcon("running", SPINNER_INTERVAL_MS), SPINNER_FRAMES[1]);
 assert.equal(statusIcon("done", SPINNER_INTERVAL_MS), STATUS_ICONS.done);
 assert.equal(
     launchDetails({ task: "do it", model: "x/y", tools: ["read", "ls"] }).join("\n"),
-    "   Model: x/y\n   Tools: read, ls\n   Task: do it",
+    "  Model: x/y\n  Tools: read, ls\n  Task: do it",
 );
-assert.deepEqual(launchDetails({ tools: [] }), ["   Model: default", "   Tools: all"]);
+assert.deepEqual(launchDetails({ tools: [] }), ["  Model: default", "  Tools: none"]);
 assert.deepEqual(launchDetails({ task: "first\nsecond", tools: ["read"] }), [
-    "   Model: default",
-    "   Tools: read",
-    "   Task: first",
-    "         second",
+    "  Model: default",
+    "  Tools: read",
+    "  Task: first",
+    "        second",
 ]);
-assert.deepEqual(launchDetails({ task: "  \n ", tools: ["read"] }), ["   Model: default", "   Tools: read"]);
+assert.deepEqual(launchDetails({ task: "  \n ", tools: ["read"] }), ["  Model: default", "  Tools: read"]);
 assert.deepEqual(outputPreview("a\nb", 5), { shown: ["a", "b"], hidden: 0 });
 assert.deepEqual(outputPreview("a\nb\nc", 2), { shown: ["a", "b"], hidden: 1 });
 assert.deepEqual(outputPreview("```\ncode\nmore", 2), { shown: ["```", "code", "```"], hidden: 1 });
@@ -118,12 +118,9 @@ assert.equal(formatTokens(200000), "200k");
 assert.equal(formatDuration(42000), "42s");
 assert.equal(formatDuration(65000), "1m 05s");
 assert.equal(formatDuration(3720000), "1h 02m");
-assert.equal(progressStats({}, 0), "0s");
-assert.equal(
-    progressStats({ toolCalls: 1, contextTokens: 2400, contextWindow: 200000 }, 42000),
-    "1 tool call · 2.4k/200k · 42s",
-);
-assert.equal(progressStats({ toolCalls: 3, contextTokens: 2400 }, 1000), "3 tool calls · 2.4k · 1s");
+assert.equal(usageStats({}, 0), "0s");
+assert.equal(usageStats({ toolCalls: 3, contextTokens: 2400, contextWindow: 200000 }, 42000), "2.4k/200k · 42s");
+assert.equal(usageStats({ contextTokens: 2400 }, 1000), "2.4k · 1s");
 assert.equal(toolCallDetail("bash", { command: "npm test\nsecond" }), "npm test");
 assert.equal(toolCallDetail("read", { file_path: "src/a.ts" }), "src/a.ts");
 assert.equal(toolCallDetail("edit", { path: "src/a.ts" }), "src/a.ts");
@@ -142,7 +139,7 @@ assert.equal(
         elapsedMs: 65000,
         output: "done",
     }),
-    'Delegated agent "explore" (job a1b2c3d4) finished after 2 tool calls.\n\ndone',
+    'Delegated agent "explore" (job a1b2c3d4) finished.\n\ndone',
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 0, elapsedMs: 1000 }),
@@ -150,10 +147,11 @@ assert.equal(
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 1, elapsedMs: 1000, error: "boom" }),
-    'Delegated agent "explore" (job a1b2c3d4) failed after 1 tool call: boom',
+    'Delegated agent "explore" (job a1b2c3d4) failed: boom',
 );
 assert.equal(jobLine({ description: "find callers" }, 42000), "find callers · 42s");
 assert.equal(jobLine({}, 0), "0s");
+assert.equal(jobLine({ description: "x", toolCalls: 3, contextTokens: 2400 }, 42000), "x · 2.4k · 42s");
 // A burst of delegations must never reach pi's ten-line widget cut, which chops mid-list.
 for (let count = 1; count <= 40; count += 1) {
     const { shown, hidden, detail } = widgetJobs(Array.from({ length: count }, (_, i) => i));
@@ -298,6 +296,7 @@ assert.equal(stopping.stdin.writableEnded, true);
 const { default: extension } = await import(new URL("index.ts", root).href);
 const registered = [];
 let inspect;
+let renderReport;
 const deliveries = [];
 const delivered = new Promise((resolve) => deliveries.push(resolve));
 const deliveredSecond = new Promise((resolve) => deliveries.push(resolve));
@@ -306,7 +305,9 @@ extension({
     sendMessage(message) {
         deliveries.shift()?.(message);
     },
-    registerMessageRenderer() {},
+    registerMessageRenderer(type, renderer) {
+        if (type === "delegate-result") renderReport = renderer;
+    },
     registerCommand(name, command) {
         if (name === "delegate") inspect = command;
     },
@@ -324,7 +325,7 @@ const ctx = {
     cwd: fileURLToPath(root),
     hasUI: false,
     model: { provider: "anthropic", id: "m" },
-    modelRegistry: { find: () => undefined },
+    modelRegistry: { find: () => ({ contextWindow: 1000000 }) },
     thinkingLevel: "off",
 };
 const argv = process.argv;
@@ -363,10 +364,11 @@ process.stdin.on("data", (data) => {
                     send({ type: "tool_execution_start", toolName: "read", args: { path: "src/" + i + ".ts" } });
                     send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
                 }
+                send({ type: "message_update", usage: { totalTokens: 37000 } });
             } else {
                 send({ type: "tool_execution_start", toolName: "read", args: { path: "src/end.ts" } });
                 send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
-                send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "## Done\\n\\n| Path | Count |\\n| --- | ---: |\\n| a.ts | 2 |" }] } });
+                send({ type: "message_end", message: { role: "assistant", usage: { totalTokens: 37000 }, content: [{ type: "text", text: "## Done\\n\\n| Path | Count |\\n| --- | ---: |\\n| a.ts | 2 |" }] } });
             }
             send({ type: "response", command: "steer", id: command.id, success: true });
             if (stage === 2) send({ type: "agent_settled" });
@@ -377,18 +379,23 @@ setTimeout(() => process.exit(1), 5000).unref();
 `,
 );
 const colors = [];
+const colored = [];
 const theme = {
     fg: (color, text) => {
         colors.push(color);
+        colored.push([color, text]);
         return text;
     },
     bold: (text) => text,
 };
 let renders = 0;
+let onRender;
 const tui = {
     terminal: { rows: 24 },
     requestRender() {
         renders++;
+        onRender?.();
+        onRender = undefined;
     },
 };
 let screens = 0;
@@ -435,10 +442,22 @@ try {
         { ...ctx, mode: "tui", hasUI: true, ui },
     );
     assert.match(widgetLines.join("\n"), /1 running · 1 total/);
+    assert.match(widgetLines.join("\n"), new RegExp(`${first.details.id} explore first run`));
+    assert.match(
+        delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
+        new RegExp(`✓ ${first.details.id} explore first run`),
+    );
     const steer = registered.find((tool) => tool.name === "delegate_steer");
     await steer.execute("call", { id: first.details.id, message: "first" });
     await steer.execute("call", { id: first.details.id, message: "second" });
-    assert.equal((await Promise.race([delivered, timeout])).details.error, undefined);
+    const firstReport = await Promise.race([delivered, timeout]);
+    assert.equal(firstReport.details.error, undefined);
+    assert.equal(firstReport.details.toolCalls, 106);
+    assert.doesNotMatch(firstReport.content, /\b\d+ tool calls?\b/);
+    assert.match(
+        renderReport(firstReport, { expanded: false }, theme).render(120).join("\n"),
+        new RegExp(`✓ ${first.details.id} explore first run`),
+    );
 
     const second = await delegate.execute(
         "call",
@@ -452,8 +471,13 @@ try {
         { ...ctx, mode: "tui", hasUI: true, ui },
     );
     assert.match(widgetLines.join("\n"), /1 running · 2 total/);
+    assert.match(widgetLines.join("\n"), new RegExp(`${second.details.id} explore second run`));
     const observing = inspect.handler("", { mode: "tui", ui });
     const view = await Promise.race([viewerReady, timeout]);
+    const renderCount = renders;
+    await Promise.race([new Promise((resolve) => (onRender = resolve)), timeout]);
+    assert.ok(renders > renderCount, "ticker did not redraw the observer");
+    colored.length = 0;
     const rows = view.render(80);
     const opened = rows.join("\n");
     assert.match(rows[0], /\[Jobs\]  Activity · 1 running · 2 total/);
@@ -461,10 +485,28 @@ try {
     assert.doesNotMatch(rows[0], /Delegates/);
     assert.match(opened, /second run/);
     assert.match(opened, /signal\./);
+    assert.ok(rows.some((row) => row.includes(second.details.model)));
     assert.ok(
-        rows.findIndex((row) => row.includes("anthropic/m")) < rows.findIndex((row) => row.includes("Trace delegates")),
+        rows.findIndex((row) => row.includes(second.details.model)) <
+            rows.findIndex((row) => row.includes("Trace delegates")),
     );
-    assert.match(opened, /✓ explore/);
+    assert.match(opened, new RegExp(`✓ ${first.details.id} explore`));
+    assert.match(opened, new RegExp(`${second.details.id} explore`));
+    assert.match(rows[2].split("│")[0], new RegExp(`${second.details.id} explore`));
+    assert.match(rows[2].split("│")[1], new RegExp(`${second.details.id} explore`));
+    assert.ok(colored.some(([color, text]) => color === "muted" && text === second.details.id));
+    assert.ok(colored.some(([color, text]) => color === "toolTitle" && text === "explore"));
+    const toolsRow = rows.findIndex((row) => row.includes("read, grep, find, ls"));
+    const titleRow = rows.findIndex((row) => row.split("│")[1]?.includes("second run"));
+    assert.ok(rows.findIndex((row) => row.includes(second.details.model)) < toolsRow);
+    assert.match(rows[toolsRow + 1].split("│")[1], /─{20}/);
+    assert.equal(titleRow, toolsRow + 2);
+    assert.ok(titleRow < rows.findIndex((row) => row.includes("Trace delegates")));
+    assert.doesNotMatch(rows[toolsRow].split("│")[1], /Tools:/);
+    const narrow = view.render(32).join("\n");
+    assert.match(narrow, /read, grep/);
+    assert.match(narrow, /find, ls/);
+    assert.match(rows[4].split("│")[0], /\d+s/);
     // The list pane already draws a border; the task text carries none of its own.
     assert.match(opened, /Trace delegates/);
     assert.doesNotMatch(opened, /│\s*Trace/);
@@ -483,23 +525,57 @@ try {
     assert.match(view.render(80).join("\n"), /first run/);
     assert.match(view.render(80).join("\n"), /Count/);
     assert.match(view.render(80).join("\n"), /a\.ts/);
+    assert.match(view.render(80).join("\n"), /read, grep, find, ls/);
+    const recentRows = view.render(80);
+    const recentStats = recentRows[7].split("│")[0].match(/37k\/1\.0M · \d+s/)?.[0];
+    assert.ok(recentStats, "finished job tokens and time missing from list");
+    assert.doesNotMatch(recentRows.join("\n"), /\b\d+ tool calls?\b/);
+    const now = Date.now;
+    try {
+        Date.now = () => now() + 60000;
+        assert.ok(view.render(80).join("\n").includes(recentStats), "finished job elapsed time kept ticking");
+    } finally {
+        Date.now = now;
+    }
     view.handleInput("up");
     assert.match(view.render(80).join("\n"), /second run/);
 
     const before = renders;
-    await steer.execute("call", { id: second.details.id, message: "first" });
+    const steered = await steer.execute("call", { id: second.details.id, message: "first" });
+    assert.equal(steered.details.toolCalls, 105);
+    assert.match(
+        steer.renderResult(steered, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
+        new RegExp(`✓ ${second.details.id} explore second run`),
+    );
     assert.ok(renders > before, "live activity did not redraw the observer");
+    await Promise.race([new Promise((resolve) => (onRender = resolve)), timeout]);
+    assert.match(widgetLines.join("\n"), /37k\/1\.0M/);
+    assert.doesNotMatch(widgetLines.join("\n"), /\b\d+ tool calls?\b/);
     view.handleInput("\t");
     assert.match(view.render(80)[0], /\[Activity\]/);
     assert.doesNotMatch(view.render(80)[0], /\[Jobs/);
     assert.match(view.render(80).join("\n"), /read src\/104.ts/);
     assert.match(view.render(80).join("\n"), /210\/210/);
+    assert.match(view.render(80)[4].split("│")[0], /    37k\/1\.0M · \d+s/);
+    assert.doesNotMatch(view.render(80).join("\n"), /\b\d+ tool calls?\b/);
+    const listed = await registered.find((tool) => tool.name === "delegate_list").execute();
+    assert.doesNotMatch(listed.content[0].text, /\b\d+ tool calls?\b/);
     assert.ok(colors.includes("toolTitle") && colors.includes("accent") && colors.includes("text"));
     for (let i = 0; i < 3; i++) view.handleInput("up");
-    const scrolledLine = view.render(80)[6];
+    const scrolledRows = view.render(80);
+    const taskRow = scrolledRows.findIndex((row) => row.split("│")[1]?.includes("Trace delegates"));
+    const historyRow =
+        scrolledRows.findIndex((row, index) => index > taskRow && row.split("│")[1]?.includes("─".repeat(20))) + 1;
+    assert.ok(taskRow > titleRow && historyRow > taskRow + 1, "history separator missing");
+    const scrolledLine = scrolledRows[historyRow];
     await steer.execute("call", { id: second.details.id, message: "second" });
-    assert.equal(view.render(80)[6], scrolledLine, "new events moved the scrolled-back history");
-    assert.equal((await Promise.race([deliveredSecond, timeout])).details.error, undefined);
+    assert.equal(view.render(80)[historyRow], scrolledLine, "new events moved the scrolled-back history");
+    const secondReport = await Promise.race([deliveredSecond, timeout]);
+    assert.equal(secondReport.details.error, undefined);
+    assert.match(
+        renderReport(secondReport, { expanded: false }, theme).render(120).join("\n"),
+        new RegExp(`✓ ${second.details.id} explore second run`),
+    );
     for (let i = 0; i < 30; i++) view.handleInput("down");
     assert.match(view.render(80).join("\n"), /Count/);
     view.invalidate();
