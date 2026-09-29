@@ -83,6 +83,10 @@ const agentFiles = readdirSync(new URL("agents/", root))
     .map((file) => ({ file, text: readFileSync(new URL(`agents/${file}`, root), "utf8") }));
 const names = agentFiles.map(({ text }) => text.match(/^name:\s*(.+)$/m)?.[1]).sort();
 assert.deepEqual(names, expected);
+assert.match(
+    agentFiles.find(({ file }) => file === "reviewer.md").text,
+    /caused or made reachable by the assigned change/,
+);
 // An invalid level makes every delegate of that agent fail at child launch, not at load.
 const thinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 for (const { file, text } of agentFiles) {
@@ -321,6 +325,8 @@ await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = me
 assert.match(notice, /No delegates/);
 // Missing CLI argv must fail before spawning a child.
 const delegate = registered.find((tool) => tool.name === "delegate");
+assert.match(delegate.promptGuidelines.join("\n"), /independent work that advances the task/);
+assert.match(delegate.promptGuidelines.join("\n"), /required delegate report before claiming the task is done/);
 const ctx = {
     cwd: fileURLToPath(root),
     hasUI: false,

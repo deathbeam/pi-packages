@@ -545,8 +545,8 @@ export default function (pi: ExtensionAPI) {
             "Delegate one focused task to a background Pi agent using a named Markdown agent definition. Returns immediately; the agent's result arrives later as a follow-up message. `description` labels the delegation in the transcript; `task` is the full instruction the child receives.",
         promptSnippet: "Delegate a focused task to a background agent; the result arrives later as a follow-up message",
         promptGuidelines: [
-            "Delegations run in the background and can run in parallel: call `delegate` and keep working instead of waiting for the result.",
-            "Never sleep or poll to wait for a delegate: its completion reaches you on its own. End your turn when your next step needs a result; use delegate_list only for a one-shot status, never as a wait loop.",
+            "While delegates run, do only independent work that advances the task. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
+            "Read every required delegate report before claiming the task is done. Never sleep or poll for a report. Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
             agent: Type.String({ description: "Agent name, one of the agents listed in the <agents> prompt section." }),
