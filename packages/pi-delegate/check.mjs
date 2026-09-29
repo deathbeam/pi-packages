@@ -304,8 +304,11 @@ let renderReport;
 const deliveries = [];
 const delivered = new Promise((resolve) => deliveries.push(resolve));
 const deliveredSecond = new Promise((resolve) => deliveries.push(resolve));
+let beforeAgentStart;
 extension({
-    on() {},
+    on(event, handler) {
+        if (event === "before_agent_start") beforeAgentStart = handler;
+    },
     sendMessage(message) {
         deliveries.shift()?.(message);
     },
@@ -320,12 +323,15 @@ extension({
     },
     getActiveTools: () => ["read"],
 });
+const promptEvent = { systemPromptOptions: { sections: {} } };
+beforeAgentStart(promptEvent, { cwd: fileURLToPath(root) });
+assert.match(promptEvent.systemPromptOptions.sections.agents, /identify independent scopes and delegate them in parallel/);
 let notice;
 await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = message) } });
 assert.match(notice, /No delegates/);
 // Missing CLI argv must fail before spawning a child.
 const delegate = registered.find((tool) => tool.name === "delegate");
-assert.match(delegate.promptGuidelines.join("\n"), /independent work that advances the task/);
+assert.match(delegate.promptGuidelines.join("\n"), /delegate any new context-heavy investigation before tracing it yourself/);
 assert.match(delegate.promptGuidelines.join("\n"), /required delegate report before claiming the task is done/);
 const ctx = {
     cwd: fileURLToPath(root),

@@ -284,7 +284,7 @@ export default function (pi: ExtensionAPI) {
         event.systemPromptOptions.sections.agents = [
             "Available agents:",
             ...agents.map((agent) => `- ${agent.name}: ${agent.description}`),
-            "Delegation is authorized here: prefer these agents over doing context-heavy work yourself; they run in parallel with isolated contexts and report back as follow-up messages.",
+            "Delegation is authorized here. Before context-heavy work, identify independent scopes and delegate them in parallel. Keep brief checks, decisions, and synthesis in the parent; agents work in isolated contexts and return follow-up reports.",
         ].join("\n");
     });
 
@@ -545,7 +545,7 @@ export default function (pi: ExtensionAPI) {
             "Delegate one focused task to a background Pi agent using a named Markdown agent definition. Returns immediately; the agent's result arrives later as a follow-up message. `description` labels the delegation in the transcript; `task` is the full instruction the child receives.",
         promptSnippet: "Delegate a focused task to a background agent; the result arrives later as a follow-up message",
         promptGuidelines: [
-            "While delegates run, do only independent work that advances the task. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
+            "While delegates run, stay outside their scopes; delegate any new context-heavy investigation before tracing it yourself. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
             "Read every required delegate report before claiming the task is done. Never sleep or poll for a report. Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
