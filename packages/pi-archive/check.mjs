@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { Readable } from "node:stream";
 import {
+    default as piArchive,
     searchSessions,
     entryText,
     matchesAll,
@@ -327,6 +328,38 @@ assert.equal(
 const recent = recentSessions(projA, currentFile, 5);
 assert.equal(recent.length, 1);
 assert.equal(recent[0].name, "2026-09-01T00-00-00-000Z_aaaa.jsonl");
+
+// Keep the retrieval rule in both the system guidelines and the tool schema (used with custom SYSTEM.md).
+let registeredTool;
+let beforeAgentStart;
+await piArchive({
+    registerTool: (tool) => (registeredTool = tool),
+    on: (event, handler) => {
+        if (event === "before_agent_start") beforeAgentStart = handler;
+    },
+});
+assert.match(registeredTool.promptGuidelines?.join("\n") ?? "", /compaction.*search_archive/is);
+assert.match(registeredTool.description, /compaction.*search_archive/is);
+const archiveCtx = (entries, file = currentFile) => ({
+    sessionManager: {
+        getEntries: () => entries,
+        getSessionDir: () => projA,
+        getSessionFile: () => file,
+    },
+});
+assert.equal(await beforeAgentStart({}, archiveCtx([{ type: "message" }])), undefined);
+assert.equal(
+    await beforeAgentStart({}, archiveCtx([{ type: "custom_message", customType: "archive-memory" }])),
+    undefined,
+);
+const hint = (await beforeAgentStart({}, archiveCtx([])))?.message?.content;
+assert.match(hint ?? "", /^Recent sessions in this project/);
+assert.doesNotMatch(hint, /\[pi-archive\]/);
+assert.match(hint, /fix the jwt auth refresh bug/);
+assert.ok(
+    (await beforeAgentStart({}, archiveCtx([], path.join(projA, "new-session.jsonl"))))?.message,
+    "new sessions receive their own titles",
+);
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log("pi-archive: all checks passed");

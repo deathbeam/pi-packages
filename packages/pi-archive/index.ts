@@ -401,8 +401,11 @@ export default async function piArchive(pi: ExtensionAPI) {
         label: "Search archive",
         description:
             "Search raw Pi transcripts from this session and older sessions, including messages compacted away. " +
-            "If a compaction summary lacks a detail needed for the current task (exact code, output, error, or decision), search here instead of guessing. " +
+            "After compaction, if the summary lacks a detail needed for the task, use search_archive before guessing. " +
             "Results identify this session, another session in this project, or another project; old hits may be stale, so verify against current context or files.",
+        promptGuidelines: [
+            "After compaction, if the summary lacks a detail needed for the current task (exact code, output, error, or decision), use search_archive before guessing; verify old hits against current files.",
+        ],
         parameters: Type.Object({
             query: Type.String({ description: "Search terms; all must appear (case-insensitive)" }),
             session: Type.Optional(
@@ -464,12 +467,13 @@ export default async function piArchive(pi: ExtensionAPI) {
     pi.registerTool(searchArchive);
 
     // Inject titles only; search_archive retrieves transcript details on demand.
-    let memoryInjected = false;
     pi.on("before_agent_start", async (_event, ctx) => {
-        if (memoryInjected) return;
-        memoryInjected = true;
-        const hasConversation = ctx.sessionManager.getEntries().some((e: any) => e.type === "message");
-        if (hasConversation) return;
+        if (
+            ctx.sessionManager
+                .getEntries()
+                .some((e) => e.type === "message" || (e.type === "custom_message" && e.customType === "archive-memory"))
+        )
+            return;
         const sessionDir = ctx.sessionManager.getSessionDir();
         const current = ctx.sessionManager.getSessionFile();
         const recent = recentSessions(sessionDir, current, 5);
@@ -479,7 +483,7 @@ export default async function piArchive(pi: ExtensionAPI) {
         return {
             message: {
                 customType: "archive-memory",
-                content: `[pi-archive] Recent past sessions in this project (retrievable in full via the search_archive tool):\n${lines.join("\n")}`,
+                content: `Recent sessions in this project (first user messages; use search_archive for full transcripts):\n${lines.join("\n")}`,
                 display: false,
             },
         };
