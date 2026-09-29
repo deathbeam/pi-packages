@@ -546,7 +546,7 @@ export default function (pi: ExtensionAPI) {
         promptSnippet: "Delegate a focused task to a background agent; the result arrives later as a follow-up message",
         promptGuidelines: [
             "While delegates run, stay outside their scopes; delegate any new context-heavy investigation before tracing it yourself. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
-            "Read every required delegate report before claiming the task is done. Never sleep or poll for a report. Use delegate_list only for a one-time status check.",
+            "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
             agent: Type.String({ description: "Agent name, one of the agents listed in the <agents> prompt section." }),
@@ -636,7 +636,7 @@ export default function (pi: ExtensionAPI) {
                 content: [
                     {
                         type: "text",
-                        text: `Started agent "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not sleep or poll: its report arrives automatically unless cancelled.`,
+                        text: `Started agent "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
                     },
                 ],
                 details,

@@ -339,6 +339,7 @@ assert.match(
     /delegate any new context-heavy investigation before tracing it yourself/,
 );
 assert.match(delegate.promptGuidelines.join("\n"), /required delegate report before claiming the task is done/);
+assert.match(delegate.promptGuidelines.join("\n"), /call any tool solely to wait/);
 const ctx = {
     cwd: fileURLToPath(root),
     hasUI: false,
@@ -459,6 +460,7 @@ try {
         () => {},
         { ...ctx, mode: "tui", hasUI: true, ui },
     );
+    assert.match(first.content[0].text, /no-op bash commands.*end your turn/);
     assert.match(widgetLines.join("\n"), /1 running · 1 total/);
     assert.match(widgetLines.join("\n"), new RegExp(`${first.details.id} explore first run`));
     assert.match(
