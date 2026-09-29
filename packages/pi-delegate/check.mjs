@@ -325,13 +325,19 @@ extension({
 });
 const promptEvent = { systemPromptOptions: { sections: {} } };
 beforeAgentStart(promptEvent, { cwd: fileURLToPath(root) });
-assert.match(promptEvent.systemPromptOptions.sections.agents, /identify independent scopes and delegate them in parallel/);
+assert.match(
+    promptEvent.systemPromptOptions.sections.agents,
+    /identify independent scopes and delegate them in parallel/,
+);
 let notice;
 await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = message) } });
 assert.match(notice, /No delegates/);
 // Missing CLI argv must fail before spawning a child.
 const delegate = registered.find((tool) => tool.name === "delegate");
-assert.match(delegate.promptGuidelines.join("\n"), /delegate any new context-heavy investigation before tracing it yourself/);
+assert.match(
+    delegate.promptGuidelines.join("\n"),
+    /delegate any new context-heavy investigation before tracing it yourself/,
+);
 assert.match(delegate.promptGuidelines.join("\n"), /required delegate report before claiming the task is done/);
 const ctx = {
     cwd: fileURLToPath(root),
