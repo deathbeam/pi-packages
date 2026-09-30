@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
     CONFIG_DIR_NAME,
     getAgentDir,
@@ -13,10 +13,13 @@ import {
     parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
 import {
+    type Component,
     Container,
     HStack,
     Markdown,
+    Spacer,
     Text,
+    TruncatedText,
     matchesKey,
     truncateToWidth,
     wrapTextWithAnsi,
@@ -182,6 +185,60 @@ function contextWindowFor(ctx: ExtensionContext, model: string | undefined): num
     return ctx.modelRegistry.find(model.slice(0, separator), model.slice(separator + 1))?.contextWindow;
 }
 
+function argText(value: unknown): string {
+    return typeof value === "string" ? value : "";
+}
+
+function jobId(value: unknown): string {
+    return argText(value)
+        .trim()
+        .replace(/^job\s+/i, "");
+}
+
+function resultText(result: { content: readonly { type: string; text?: string }[] }): string {
+    return result.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
+}
+
+function resultFallback(body: string, theme: Theme, isError: boolean): Text {
+    return new Text(`\n${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
+}
+
+/** Shared tool layout: an optional identity header, then a width-aware payload preview. */
+function toolLayout(toolName: string, identity: string, payload: string, theme: Theme, expanded: boolean): Component {
+    const container = new Container();
+    if (toolName)
+        container.addChild(
+            new TruncatedText(`${theme.fg("toolTitle", theme.bold(toolName))}${identity ? ` ${identity}` : ""}`),
+        );
+    if (!payload.trim()) return container;
+    const body = new Text(
+        payload
+            .split("\n")
+            .map((line) => theme.fg("toolOutput", line))
+            .join("\n"),
+        0,
+        0,
+    );
+    if (toolName) container.addChild(new Spacer(1));
+    container.addChild({
+        render: (width) => {
+            // Wrapping turns one long line into many, so the cap counts rendered rows, not source lines.
+            const lines = body.render(width);
+            if (expanded || lines.length <= COLLAPSED_OUTPUT_LINES) return lines;
+            return [
+                ...lines.slice(0, COLLAPSED_OUTPUT_LINES),
+                truncateToWidth(
+                    theme.fg("muted", `… ${lines.length - COLLAPSED_OUTPUT_LINES} more lines, `) +
+                        keyHint("app.tools.expand", "to expand"),
+                    width,
+                ),
+            ];
+        },
+        invalidate: () => body.invalidate(),
+    });
+    return container;
+}
+
 export default function (pi: ExtensionAPI) {
     const running = new Map<string, DelegateJob>();
     const recent: InspectJob[] = [];
@@ -202,12 +259,26 @@ export default function (pi: ExtensionAPI) {
         viewing?.();
     };
 
-    // Status words are gone; only a failure detail is worth a log line.
     const remember = (job: DelegateJob, status: JobStatus, detail?: string) => {
         job.status = status;
         if (detail) addActivity(job, { kind: "status", text: detail });
         const { controller, steer, lastTool, lastDetail, lastResult, ...snapshot } = job;
         recent.unshift({ ...snapshot, endedAt: Date.now() });
+    };
+
+    const jobSnapshot = (job: DelegateJob) => ({
+        id: job.id,
+        agent: job.agent,
+        description: job.description,
+        contextTokens: job.contextTokens,
+        contextWindow: job.contextWindow,
+        startedAt: job.startedAt,
+    });
+
+    const jobTarget = (rawId: unknown, theme: Theme): string => {
+        const id = jobId(rawId);
+        const job = running.get(id) ?? recent.find((item) => item.id === id);
+        return job ? jobIdentity(theme, job) : theme.fg("muted", id || "…");
     };
 
     const refreshWidget = (ctx: ExtensionContext) => {
@@ -644,31 +715,45 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            const summary = args.description?.trim() || args.task?.split("\n")[0]?.trim() || "";
-            const hint = `${theme.fg("muted", "(")}${keyHint("app.tools.expand", context.expanded ? "to collapse" : "to expand")}${theme.fg("muted", ")")}`;
-            return new Text(
-                `${theme.fg("toolTitle", theme.bold("delegate "))}${theme.fg("accent", summary)} ${hint}`,
-                0,
-                0,
+            const agent = argText(args?.agent).trim();
+            const description = argText(args?.description).trim();
+            const identity = [
+                agent ? theme.fg("toolTitle", theme.bold(agent)) : "",
+                description ? theme.fg("accent", description) : "",
+            ]
+                .filter(Boolean)
+                .join(" ");
+            return toolLayout(
+                "delegate",
+                identity || theme.fg("muted", "…"),
+                argText(args?.task),
+                theme,
+                context.expanded,
             );
         },
 
         renderResult(result, { expanded }, theme, context) {
             const details = result.details as DelegateDetails | undefined;
-            const body = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
-            if (!details?.agent) return new Text(body || "(no output)", 0, 0);
-
-            const icon = statusText(theme, context.isError ? "failed" : "done");
+            const body = resultText(result);
+            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
             const status = details.background ? "started in background" : "completed";
             const container = new Container();
             container.addChild(
                 new Text(
-                    `${icon} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("dim", status)}`,
+                    `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("dim", status)}`,
                     0,
                     0,
                 ),
             );
-            if (expanded) container.addChild(new Text(theme.fg("dim", launchDetails(details).join("\n")), 0, 0));
+            // The call body already carries the task; only the launch metadata is new here.
+            if (expanded)
+                container.addChild(
+                    new Text(
+                        theme.fg("dim", launchDetails({ model: details.model, tools: details.tools }).join("\n")),
+                        0,
+                        0,
+                    ),
+                );
             // Background results arrive as their own message; headless runs still show the output here.
             if (!details.background && body) {
                 const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
@@ -699,7 +784,7 @@ export default function (pi: ExtensionAPI) {
             message: Type.String({ description: "The guidance to deliver to the running child." }),
         }),
         async execute(_toolCallId, params) {
-            const id = params.id.trim().replace(/^job\s+/i, "");
+            const id = jobId(params.id);
             const job = running.get(id);
             if (!job?.steer) throw new Error(`No running delegate job "${id}".`);
             await job.steer(params.message);
@@ -722,30 +807,24 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            const message = args.message?.split("\n")[0]?.trim() ?? "";
-            const hint = `${theme.fg("muted", "(")}${keyHint("app.tools.expand", context.expanded ? "to collapse" : "to expand")}${theme.fg("muted", ")")}`;
-            return new Text(
-                `${theme.fg("toolTitle", theme.bold("delegate_steer "))}${theme.fg("accent", message)} ${hint}`,
-                0,
-                0,
+            return toolLayout(
+                "delegate_steer",
+                jobTarget(args?.id, theme),
+                argText(args?.message),
+                theme,
+                context.expanded,
             );
         },
 
-        renderResult(result, { expanded }, theme, context) {
+        renderResult(result, _options, theme, context) {
             const details = result.details as SteerDetails | undefined;
-            const body = result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
-            if (!details?.agent) return new Text(body || "(no output)", 0, 0);
-            const icon = statusText(theme, context.isError ? "failed" : "done");
-            const container = new Container();
-            container.addChild(
-                new Text(
-                    `${icon} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("muted", usageStats(details, details.elapsedMs))}`,
-                    0,
-                    0,
-                ),
+            const body = resultText(result);
+            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
+            return new Text(
+                `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("muted", usageStats(details, details.elapsedMs))}`,
+                0,
+                0,
             );
-            if (expanded) container.addChild(new Text(theme.fg("dim", details.message), 0, 0));
-            return container;
         },
     });
 
@@ -759,7 +838,7 @@ export default function (pi: ExtensionAPI) {
             id: Type.String({ description: "Job id from delegate or delegate_list." }),
         }),
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const id = params.id.trim().replace(/^job\s+/i, "");
+            const id = jobId(params.id);
             const job = running.get(id);
             if (!job) throw new Error(`No running delegate job "${id}".`);
             running.delete(id);
@@ -773,6 +852,21 @@ export default function (pi: ExtensionAPI) {
                 ],
                 details: { id: job.id, agent: job.agent },
             };
+        },
+
+        renderCall(args, theme, context) {
+            return toolLayout("delegate_cancel", jobTarget(args?.id, theme), "", theme, context.expanded);
+        },
+
+        renderResult(result, _options, theme, context) {
+            const details = result.details as { id: string; agent: string } | undefined;
+            const body = resultText(result);
+            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
+            return new Text(
+                `\n${statusText(theme, "cancelled")} ${jobIdentity(theme, details)} ${theme.fg("muted", "cancellation requested")}`,
+                0,
+                0,
+            );
         },
     });
 
@@ -795,8 +889,20 @@ export default function (pi: ExtensionAPI) {
             );
             return {
                 content: [{ type: "text", text: `${jobs.length} running:\n${lines.join("\n")}` }],
-                details: undefined,
+                details: { jobs: jobs.map(jobSnapshot) },
             };
+        },
+        renderResult(result, _options, theme, context) {
+            const jobs = (result.details as { jobs?: ReturnType<typeof jobSnapshot>[] } | undefined)?.jobs;
+            if (!jobs?.length || context.isError) return resultFallback(resultText(result), theme, context.isError);
+            const now = Date.now();
+            return new Text(
+                `\n${jobs
+                    .map((job) => `${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`)
+                    .join("\n")}`,
+                0,
+                0,
+            );
         },
     });
 }

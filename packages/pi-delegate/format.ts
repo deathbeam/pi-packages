@@ -41,7 +41,6 @@ const WIDGET_MAX_JOBS = 8;
 export const COLLAPSED_OUTPUT_LINES = 10;
 export const MAX_OUTPUT_BYTES = 50 * 1024;
 const EXPANDED_PAD = "  ";
-const TASK_LABEL = "Task: ";
 
 /** Terminal statuses have static icons; running jobs use statusIcon's clock-driven frame. */
 export function statusIcon(status: JobStatus, now = Date.now()): string {
@@ -110,21 +109,9 @@ export function toolCallDetail(toolName: string, args: unknown): string {
     }
 }
 
-/** Align multi-line task details under the Task label. */
-export function launchDetails(info: { task?: string; model?: string; tools: string[] }): string[] {
-    const lines = [
-        `${EXPANDED_PAD}Model: ${info.model ?? "default"}`,
-        `${EXPANDED_PAD}Tools: ${formatTools(info.tools)}`,
-    ];
-    const task = (info.task ?? "").trim();
-    if (task) {
-        lines.push(
-            ...task
-                .split("\n")
-                .map((line, index) => `${EXPANDED_PAD}${index ? " ".repeat(TASK_LABEL.length) : TASK_LABEL}${line}`),
-        );
-    }
-    return lines;
+/** Expanded launch metadata; the call renderer shows the task. */
+export function launchDetails(info: { model?: string; tools: string[] }): string[] {
+    return [`${EXPANDED_PAD}Model: ${info.model ?? "default"}`, `${EXPANDED_PAD}Tools: ${formatTools(info.tools)}`];
 }
 
 /** Close dangling Markdown fences so collapsed previews render correctly. */

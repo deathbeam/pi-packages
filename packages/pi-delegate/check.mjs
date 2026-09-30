@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { join } from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
+    COLLAPSED_OUTPUT_LINES,
     formatDuration,
     formatTokens,
     jobLine,
@@ -47,7 +49,7 @@ try {
 }
 
 // Tripwires for wiring the compiled-file check cannot see: the child protocol, the delivery path,
-// and the prompt sections. Display text and formatting are deliberately not asserted.
+// and the prompt sections. Renderer behavior is exercised below, not matched against source text.
 assert.match(index, /name: "delegate"/);
 assert.match(index, /registerCommand\("delegate"/);
 assert.match(index, /name: "delegate_list"/);
@@ -101,18 +103,8 @@ assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "faile
 assert.equal(statusIcon("running", 0), SPINNER_FRAMES[0]);
 assert.equal(statusIcon("running", SPINNER_INTERVAL_MS), SPINNER_FRAMES[1]);
 assert.equal(statusIcon("done", SPINNER_INTERVAL_MS), STATUS_ICONS.done);
-assert.equal(
-    launchDetails({ task: "do it", model: "x/y", tools: ["read", "ls"] }).join("\n"),
-    "  Model: x/y\n  Tools: read, ls\n  Task: do it",
-);
+assert.equal(launchDetails({ model: "x/y", tools: ["read", "ls"] }).join("\n"), "  Model: x/y\n  Tools: read, ls");
 assert.deepEqual(launchDetails({ tools: [] }), ["  Model: default", "  Tools: none"]);
-assert.deepEqual(launchDetails({ task: "first\nsecond", tools: ["read"] }), [
-    "  Model: default",
-    "  Tools: read",
-    "  Task: first",
-    "        second",
-]);
-assert.deepEqual(launchDetails({ task: "  \n ", tools: ["read"] }), ["  Model: default", "  Tools: read"]);
 assert.deepEqual(outputPreview("a\nb", 5), { shown: ["a", "b"], hidden: 0 });
 assert.deepEqual(outputPreview("a\nb\nc", 2), { shown: ["a", "b"], hidden: 1 });
 assert.deepEqual(outputPreview("```\ncode\nmore", 2), { shown: ["```", "code", "```"], hidden: 1 });
@@ -431,6 +423,81 @@ const theme = {
     },
     bold: (text) => text,
 };
+// delegate_list intentionally keeps Pi's default rendering; the rest use compact call headers and keep failures visible.
+for (const tool of registered.filter((entry) => entry.name !== "delegate_list")) {
+    assert.equal(typeof tool.renderCall, "function", `${tool.name} has no call renderer`);
+    assert.equal(typeof tool.renderResult, "function", `${tool.name} has no result renderer`);
+    const partial = tool.renderCall({}, theme, { expanded: false, argsComplete: false }).render(80);
+    assert.ok(stripVTControlCharacters(partial[0]).trim().startsWith(tool.name));
+    assert.doesNotMatch(partial.join("\n"), /undefined/);
+    colored.length = 0;
+    const failure = tool.renderResult(
+        { content: [{ type: "text", text: "Specific failure" }], details: undefined },
+        { expanded: false },
+        theme,
+        { isError: true },
+    );
+    assert.match(failure.render(80).join("\n"), /Specific failure/);
+    assert.ok(colored.some(([color, text]) => color === "error" && text.includes("Specific failure")));
+    colored.length = 0;
+    const fallback = tool.renderResult(
+        { content: [{ type: "text", text: "Plain result" }], details: undefined },
+        { expanded: false },
+        theme,
+        { isError: false },
+    );
+    assert.match(fallback.render(80).join("\n"), /Plain result/);
+    assert.ok(colored.some(([color, text]) => color === "toolOutput" && text.includes("Plain result")));
+}
+// Collapse after wrapping: a long single-line message must not become an unbounded tool card.
+const longPayload = "START-OF-PAYLOAD " + "漢🙂 words ".repeat(600) + " END-OF-PAYLOAD";
+for (const name of ["delegate", "delegate_steer"]) {
+    const tool = registered.find((entry) => entry.name === name);
+    const args = {
+        agent: "general",
+        id: "deadbeef",
+        description: "Short description",
+        task: longPayload,
+        message: longPayload,
+    };
+    const collapsed = tool.renderCall(args, theme, { expanded: false });
+    for (const width of [32, 80, 120]) {
+        const rows = collapsed.render(width);
+        const plain = rows.map(stripVTControlCharacters);
+        assert.ok(rows.length <= COLLAPSED_OUTPUT_LINES + 3, `${name} preview grew past its visual line cap`);
+        assert.ok(
+            rows.every((row) => visibleWidth(row) <= width),
+            `${name} overflowed ${width} columns`,
+        );
+        assert.match(plain[0], new RegExp(name === "delegate" ? "^delegate general" : "^delegate_steer deadbeef"));
+        assert.doesNotMatch(plain[0], /START-OF-PAYLOAD/);
+        if (name === "delegate" && width === 120)
+            assert.match(plain[0], /Short description/, "launch summary missing from header");
+        assert.equal(plain[1].trim(), "", "payload needs a separator below the header");
+        assert.match(plain.join("\n"), /START-OF-PAYLOAD/);
+        assert.doesNotMatch(plain.join("\n"), /END-OF-PAYLOAD/);
+    }
+    assert.match(collapsed.render(120).join("\n"), /more lines.*to expand/);
+    collapsed.invalidate();
+    const expanded = tool.renderCall(args, theme, { expanded: true }).render(80);
+    assert.match(expanded.join("\n"), /END-OF-PAYLOAD/);
+    assert.ok(expanded.length > COLLAPSED_OUTPUT_LINES + 3);
+    assert.ok(expanded.every((row) => visibleWidth(row) <= 80));
+    assert.doesNotMatch(expanded.join("\n"), /more lines.*to expand/);
+    const indented = "    keep indentation";
+    const preserved = tool
+        .renderCall({ ...args, description: "", task: indented, message: indented }, theme, { expanded: true })
+        .render(80);
+    assert.ok(
+        preserved.some((row) => stripVTControlCharacters(row).startsWith(indented)),
+        `${name} trimmed payload indentation`,
+    );
+    const blank = tool
+        .renderCall({ ...args, description: "", task: " \n ", message: " \n " }, theme, { expanded: true })
+        .render(80);
+    assert.equal(blank.length, 1, `${name} rendered blank payload rows`);
+}
+// delegate_list relies on Pi's default 10-line capped result fallback, so there is nothing custom to assert.
 let renders = 0;
 let onRender;
 const tui = {
@@ -489,15 +556,50 @@ try {
     assert.match(widgetLines.join("\n"), new RegExp(`${first.details.id} explore first run`));
     assert.match(
         delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
-        new RegExp(`✓ ${first.details.id} explore first run`),
+        new RegExp(`✓ ${first.details.id} explore started in background`),
     );
     const steer = registered.find((tool) => tool.name === "delegate_steer");
-    await steer.execute("call", { id: first.details.id, message: "first" });
+    const steerArgs = { id: `job ${first.details.id}`, message: guidance };
+    const call = steer.renderCall(steerArgs, theme, { expanded: true });
+    const callRows = call.render(120).map((row) => stripVTControlCharacters(row).trimEnd());
+    assert.match(callRows[0], new RegExp(`^delegate_steer ${first.details.id} explore`));
+    assert.doesNotMatch(callRows[0], /Parent guidance/);
+    assert.match(callRows.slice(1).join("\n"), /Parent guidance\n\s*\nKeep both paragraphs\./);
+    const firstSteer = await steer.execute("call", { id: first.details.id, message: guidance });
+    const steerResult = steer.renderResult(firstSteer, { expanded: true }, theme, { isError: false }).render(120);
+    const steerCard = [...callRows, ...steerResult].join("\n");
+    assert.equal(steerCard.match(/Parent guidance/g)?.length, 1);
+    const launchArgs = { agent: "explore", description: "first run", task: "trace it" };
+    const launch = delegate.renderCall(launchArgs, theme, { expanded: true }).render(120).join("\n");
+    const launchResult = delegate
+        .renderResult(first, { expanded: true }, theme, { isError: false })
+        .render(120)
+        .join("\n");
+    assert.match(launchResult, /Model:[\s\S]*Tools:/);
+    assert.equal(launch.concat(launchResult).match(/trace it/g)?.length, 1, "launch task shown twice");
+    assert.equal(launch.concat(launchResult).match(/first run/g)?.length, 1, "launch description shown twice");
+    assert.match(
+        delegate
+            .renderResult(
+                { ...first, content: [{ type: "text", text: "Launch failed" }] },
+                { expanded: false },
+                theme,
+                { isError: true },
+            )
+            .render(120)
+            .join("\n"),
+        /Launch failed/,
+    );
     await steer.execute("call", { id: first.details.id, message: "second" });
     const firstReport = await Promise.race([delivered, timeout]);
     assert.equal(firstReport.details.error, undefined);
     assert.equal(firstReport.details.toolCalls, 106);
     assert.doesNotMatch(firstReport.content, /\b\d+ tool calls?\b/);
+    assert.match(
+        stripVTControlCharacters(steer.renderCall(steerArgs, theme, { expanded: false }).render(120)[0]),
+        new RegExp(`^delegate_steer ${first.details.id} explore`),
+        "finished delegate identity lost from call header",
+    );
     assert.match(
         renderReport(firstReport, { expanded: false }, theme).render(120).join("\n"),
         new RegExp(`✓ ${first.details.id} explore first run`),
@@ -619,8 +721,37 @@ try {
     );
     assert.match(view.render(80)[4].split("│")[0], /    37k\/1\.0M · \d+s/);
     assert.doesNotMatch(view.render(80).join("\n"), /\b\d+ tool calls?\b/);
-    const listed = await registered.find((tool) => tool.name === "delegate_list").execute();
+    const list = registered.find((tool) => tool.name === "delegate_list");
+    const listed = await list.execute();
     assert.doesNotMatch(listed.content[0].text, /\b\d+ tool calls?\b/);
+    // The list result renders job identity rows from details, not the model-facing text.
+    assert.equal(typeof list.renderCall, "undefined");
+    assert.ok(
+        listed.details.jobs.some((job) => job.id === second.details.id && job.agent === "explore"),
+        "running job missing from list details",
+    );
+    const listCard = list
+        .renderResult(listed, { expanded: false }, theme, { isError: false })
+        .render(120)
+        .map(stripVTControlCharacters);
+    assert.equal(listCard[0].trim(), "", "list rows missing their footer separator");
+    assert.match(
+        listCard.slice(1).join("\n"),
+        new RegExp(`${second.details.id} explore second run · 37k/1\\.0M · \\d+s`),
+    );
+    assert.ok(colored.some(([color, text]) => color === "toolTitle" && text === "explore"));
+    assert.match(
+        list
+            .renderResult(
+                { content: [{ type: "text", text: "No delegates are running." }], details: undefined },
+                { expanded: false },
+                theme,
+                { isError: false },
+            )
+            .render(80)
+            .join("\n"),
+        /No delegates are running\./,
+    );
     assert.ok(colors.includes("toolTitle") && colors.includes("accent") && colors.includes("text"));
     for (let i = 0; i < 3; i++) view.handleInput("up");
     const scrolledRows = view.render(80);
@@ -667,7 +798,27 @@ try {
         () => {},
         tuiCtx,
     );
-    await cancel.execute("call", { id: cancelled.details.id }, undefined, () => {}, tuiCtx);
+    const cancellation = await cancel.execute("call", { id: cancelled.details.id }, undefined, () => {}, tuiCtx);
+    assert.match(
+        stripVTControlCharacters(
+            cancel.renderCall({ id: cancelled.details.id }, theme, { expanded: false }).render(120)[0],
+        ),
+        new RegExp(`^delegate_cancel ${cancelled.details.id} explore`),
+        "cancelled delegate identity lost from call header",
+    );
+    colored.length = 0;
+    const cancelledResult = cancel
+        .renderResult(cancellation, { expanded: false }, theme, { isError: false })
+        .render(120)
+        .join("\n");
+    assert.match(
+        cancelledResult,
+        new RegExp(`${STATUS_ICONS.cancelled} ${cancelled.details.id} explore cancellation requested`),
+    );
+    assert.ok(
+        colored.some(([color, text]) => color === STATUS_COLORS.cancelled && text === STATUS_ICONS.cancelled),
+        "cancellation icon must be muted, not an error",
+    );
     const remaining = await delegate.execute(
         "call",
         { agent: "explore", description: "remaining run", task: "trace it" },
