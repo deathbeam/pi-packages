@@ -191,7 +191,7 @@ export default function (pi: ExtensionAPI) {
     const addActivity = (job: DelegateJob, activity: ChildActivity) => {
         const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
         job.activity.push(
-            activity.kind === "assistant"
+            activity.kind === "assistant" || activity.kind === "user"
                 ? activity
                 : {
                       ...activity,
@@ -376,13 +376,13 @@ export default function (pi: ExtensionAPI) {
                         ].slice(0, bodyHeight());
                     };
                     const renderEntry = (entry: ChildActivity, width: number): string[] => {
-                        if (entry.kind === "assistant") {
+                        if (entry.kind === "assistant" || entry.kind === "user") {
                             let md = markdown.get(entry);
                             if (!md) {
                                 md = new Markdown(entry.text, 0, 0, getMarkdownTheme());
                                 markdown.set(entry, md);
                             }
-                            return [theme.fg("accent", "assistant"), ...md.render(width), ""];
+                            return [theme.fg("accent", entry.kind), ...md.render(width), ""];
                         }
                         if (entry.kind === "tool")
                             return [

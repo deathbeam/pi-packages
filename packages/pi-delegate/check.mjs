@@ -6,6 +6,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { join } from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import {
@@ -216,6 +217,7 @@ const run = runChild(fake, "task", undefined, (update) => {
 });
 assert.equal(fake.stdout.readableEncoding, "utf8");
 await assert.rejects(run.steer("steer"), /steer rejected/);
+assert.deepEqual(activity, [], "rejected steering should not appear in activity");
 fake.stdout.write(
     `${JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { file_path: "src/a.ts" } })}\n`,
 );
@@ -225,12 +227,30 @@ fake.stdout.write(
 fake.stdout.write(
     `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "é" }] } })}\n`,
 );
+// Consumed user messages preserve prose, ignore images, and never replace the final assistant output.
+const guidance = "Parent guidance\n\nKeep both paragraphs.";
+fake.stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "user", content: guidance } })}\n`);
+fake.stdout.write(
+    `${JSON.stringify({
+        type: "message_end",
+        message: {
+            role: "user",
+            content: [
+                { type: "text", text: "block one\n" },
+                { type: "image", data: "x", mimeType: "image/png" },
+                { type: "text", text: "block two" },
+            ],
+        },
+    })}\n`,
+);
 fake.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
 assert.equal(await run.done, "é");
 assert.deepEqual(activity, [
     { kind: "tool", text: "read", detail: "src/a.ts" },
     { kind: "result", text: "↳ read: file loaded" },
     { kind: "assistant", text: "é" },
+    { kind: "user", text: guidance },
+    { kind: "user", text: "block one\nblock two" },
 ]);
 
 // Inspectable assistant text must not be cut at the old 8 KiB ceiling.
@@ -377,6 +397,7 @@ process.stdin.on("data", (data) => {
         const command = JSON.parse(line);
         if (command.type === "prompt") {
             send({ type: "response", command: "prompt", id: command.id, success: true });
+            send({ type: "message_end", message: { role: "user", content: [{ type: "text", text: command.message }], timestamp: Date.now() } });
         } else if (command.type === "steer") {
             if (++stage === 1) {
                 for (let i = 0; i < 105; i++) {
@@ -387,8 +408,11 @@ process.stdin.on("data", (data) => {
             } else {
                 send({ type: "tool_execution_start", toolName: "read", args: { path: "src/end.ts" } });
                 send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
-                send({ type: "message_end", message: { role: "assistant", usage: { totalTokens: 37000 }, content: [{ type: "text", text: "## Done\\n\\n| Path | Count |\\n| --- | ---: |\\n| a.ts | 2 |" }] } });
             }
+            const message = { role: "user", content: stage === 1 ? command.message : [{ type: "text", text: command.message }], timestamp: Date.now() };
+            send({ type: "message_start", message });
+            send({ type: "message_end", message });
+            if (stage === 2) send({ type: "message_end", message: { role: "assistant", usage: { totalTokens: 37000 }, content: [{ type: "text", text: "## Done\\n\\n| Path | Count |\\n| --- | ---: |\\n| a.ts | 2 |" }] } });
             send({ type: "response", command: "steer", id: command.id, success: true });
             if (stage === 2) send({ type: "agent_settled" });
         }
@@ -500,6 +524,10 @@ try {
     colored.length = 0;
     const rows = view.render(80);
     const opened = rows.join("\n");
+    assert.ok(
+        rows.some((row) => stripVTControlCharacters(row).split("│")[1]?.trim() === "user"),
+        "initial user message missing from inspector",
+    );
     assert.match(rows[0], /\[Jobs\]  Activity · 1 running · 2 total/);
     assert.doesNotMatch(rows[0], /Jobs \(/);
     assert.doesNotMatch(rows[0], /Delegates/);
@@ -561,7 +589,7 @@ try {
     assert.match(view.render(80).join("\n"), /second run/);
 
     const before = renders;
-    const steered = await steer.execute("call", { id: second.details.id, message: "first" });
+    const steered = await steer.execute("call", { id: second.details.id, message: guidance });
     assert.equal(steered.details.toolCalls, 105);
     assert.match(
         steer.renderResult(steered, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
@@ -575,7 +603,20 @@ try {
     assert.match(view.render(80)[0], /\[Activity\]/);
     assert.doesNotMatch(view.render(80)[0], /\[Jobs/);
     assert.match(view.render(80).join("\n"), /read src\/104.ts/);
-    assert.match(view.render(80).join("\n"), /210\/210/);
+    const liveRows = view.render(80).map(stripVTControlCharacters);
+    assert.ok(
+        liveRows.some((row) => row.split("│")[1]?.trim() === "user"),
+        "steer role label missing",
+    );
+    const guidanceRow = liveRows.findIndex((row) => row.includes("Parent guidance"));
+    assert.ok(guidanceRow >= 0, "steer text missing from live inspector");
+    assert.equal(liveRows[guidanceRow + 1]?.split("│")[1]?.trim(), "", "steer paragraph break lost");
+    assert.match(liveRows[guidanceRow + 2], /Keep both paragraphs\./);
+    assert.match(
+        liveRows.at(-2)?.split("│")[1] ?? "",
+        /\b(\d+)\/\1\b/,
+        "history stopped following the latest activity",
+    );
     assert.match(view.render(80)[4].split("│")[0], /    37k\/1\.0M · \d+s/);
     assert.doesNotMatch(view.render(80).join("\n"), /\b\d+ tool calls?\b/);
     const listed = await registered.find((tool) => tool.name === "delegate_list").execute();
@@ -588,7 +629,7 @@ try {
         scrolledRows.findIndex((row, index) => index > taskRow && row.split("│")[1]?.includes("─".repeat(20))) + 1;
     assert.ok(taskRow > titleRow && historyRow > taskRow + 1, "history separator missing");
     const scrolledLine = scrolledRows[historyRow];
-    await steer.execute("call", { id: second.details.id, message: "second" });
+    await steer.execute("call", { id: second.details.id, message: "Final parent guidance" });
     assert.equal(view.render(80)[historyRow], scrolledLine, "new events moved the scrolled-back history");
     const secondReport = await Promise.race([deliveredSecond, timeout]);
     assert.equal(secondReport.details.error, undefined);
@@ -603,6 +644,20 @@ try {
     view.handleInput("\x1b");
     await observing;
     assert.equal(screens, 1);
+    // A fresh inspector must retain both steer messages after the job finishes.
+    tui.terminal.rows = 40;
+    const reopenedReady = new Promise((resolve) => (showViewer = resolve));
+    const reopening = inspect.handler("", { mode: "tui", ui });
+    const reopened = await Promise.race([reopenedReady, timeout]);
+    const reopenedText = reopened.render(80).join("\n");
+    assert.match(reopenedText, /Parent guidance/);
+    assert.match(reopenedText, /Keep both paragraphs\./);
+    assert.match(reopenedText, /Final parent guidance/);
+    assert.match(reopenedText, /Count/);
+    reopened.handleInput("\x1b");
+    await reopening;
+    tui.terminal.rows = 24;
+    assert.equal(screens, 2);
     const cancel = registered.find((tool) => tool.name === "delegate_cancel");
     const tuiCtx = { ...ctx, mode: "tui", hasUI: true, ui };
     const cancelled = await delegate.execute(

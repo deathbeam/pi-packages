@@ -9,7 +9,11 @@ function usageTokens(usage: any): number | undefined {
     return tokens > 0 ? tokens : undefined;
 }
 
-export type ChildActivity = { kind: "tool" | "result" | "assistant" | "status"; text: string; detail?: string };
+export type ChildActivity = {
+    kind: "tool" | "result" | "assistant" | "user" | "status";
+    text: string;
+    detail?: string;
+};
 export type ChildUpdate = {
     toolCalls?: number;
     lastTool?: string;
@@ -138,30 +142,34 @@ export function runChild(
                         return;
                     }
                     case "message_update": {
-                        const contextTokens = usageTokens(event.usage);
                         const delta =
                             event.assistantMessageEvent?.type === "text_delta"
                                 ? (event.assistantMessageEvent.delta ?? "")
                                 : "";
                         if (delta) liveText += delta;
-                        if (contextTokens !== undefined) onUpdate?.({ contextTokens });
+                        onUpdate?.({ contextTokens: usageTokens(event.usage) });
                         return;
                     }
                     case "message_end": {
-                        if (event.message?.role !== "assistant") return;
-                        childError = event.message.errorMessage;
+                        const role = event.message?.role;
+                        if (role !== "assistant" && role !== "user") return;
+                        const content = event.message.content;
                         const text =
-                            event.message.content
-                                ?.filter((part: any) => part.type === "text")
-                                .map((part: any) => part.text ?? "")
-                                .join("") ?? "";
-                        if (text) {
-                            liveText = text;
+                            typeof content === "string"
+                                ? content
+                                : (content
+                                      ?.filter((part: any) => part.type === "text")
+                                      .map((part: any) => part.text ?? "")
+                                      .join("") ?? "");
+                        if (role === "assistant") {
+                            childError = event.message.errorMessage;
+                            if (text) liveText = text;
+                        }
+                        if (text)
                             onUpdate?.({
                                 contextTokens: usageTokens(event.message.usage),
-                                activity: { kind: "assistant", text },
+                                activity: { kind: role, text },
                             });
-                        }
                         return;
                     }
                     case "agent_settled":
