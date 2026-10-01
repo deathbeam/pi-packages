@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
 const DEFAULT_PER_SESSION = 3;
@@ -392,17 +393,16 @@ export function formatResults(query: string, result: Awaited<ReturnType<typeof s
     return `Found ${result.matches.length} match(es) for "${query}"${result.offset ? ` at offset ${result.offset}` : ""} — at most ${result.perSession ?? DEFAULT_PER_SESSION} per session file (read or grep the file for more):\n\n${blocks.join("\n\n")}${note}`;
 }
 
-export default async function piArchive(pi: ExtensionAPI) {
-    const { defineTool } = await import("@earendil-works/pi-coding-agent");
-    const { Type } = await import("@earendil-works/pi-ai");
-
-    const searchArchive = defineTool({
+export default function (pi: ExtensionAPI) {
+    pi.registerTool({
         name: "search_archive",
         label: "Search archive",
         description:
             "Search raw Pi transcripts from this session and older sessions, including messages compacted away. " +
             "After compaction, if the summary lacks a detail needed for the task, use search_archive before guessing. " +
             "Results identify this session, another session in this project, or another project; old hits may be stale, so verify against current context or files.",
+        promptSnippet:
+            "Search raw Pi transcripts from this and older sessions, including messages compacted away",
         promptGuidelines: [
             "After compaction, if the summary lacks a detail needed for the current task (exact code, output, error, or decision), use search_archive before guessing; verify old hits against current files.",
         ],
@@ -464,9 +464,7 @@ export default async function piArchive(pi: ExtensionAPI) {
             };
         },
     });
-    pi.registerTool(searchArchive);
 
-    // Inject titles only; search_archive retrieves transcript details on demand.
     pi.on("before_agent_start", async (_event, ctx) => {
         if (
             ctx.sessionManager
