@@ -99,6 +99,7 @@ const DELEGATION_TOOLS = new Set(["delegate", "delegate_list", "delegate_steer",
 const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
+const TASK_PREVIEW_LINES = 5;
 
 function expandPath(value: string, cwd: string): string {
     return resolve(cwd, value.replace(/^~(?=\/|$)/, homedir()));
@@ -409,8 +410,16 @@ export default function (pi: ExtensionAPI) {
                     const jobs = () => [...running.values(), ...recent];
                     const bodyHeight = () => Math.max(0, tui.terminal.rows - 3);
                     // The list pane already draws a border, and the muted model line sets the task apart.
-                    const taskLines = (job: InspectJob, width: number) =>
-                        wrapTextWithAnsi(job.task.trim(), Math.max(1, width)).map((line) => theme.fg("text", line));
+                    const taskLines = (job: InspectJob, width: number) => {
+                        const lines = wrapTextWithAnsi(job.task.trim(), Math.max(1, width)).map((line) =>
+                            theme.fg("text", line),
+                        );
+                        if (lines.length <= TASK_PREVIEW_LINES) return lines;
+                        return [
+                            ...lines.slice(0, TASK_PREVIEW_LINES),
+                            theme.fg("muted", `… ${lines.length - TASK_PREVIEW_LINES} more lines`),
+                        ];
+                    };
                     const toolsLines = (job: InspectJob, width: number) =>
                         wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
                             theme.fg("dim", line),

@@ -656,6 +656,7 @@ try {
     const narrow = view.render(32).join("\n");
     assert.match(narrow, /read, grep/);
     assert.match(narrow, /find, ls/);
+    assert.match(narrow, /… \d+ more lines/, "long task preview must be capped");
     assert.match(rows[4].split("│")[0], /\d+s/);
     // The list pane already draws a border; the task text carries none of its own.
     assert.match(opened, /Trace delegates/);
