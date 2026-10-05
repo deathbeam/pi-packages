@@ -8,7 +8,7 @@ Without a key, requests use Keenable's rate-limited `/public` endpoints. Request
 ```sh
 # Choose one:
 pi install npm:@deathbeam/pi-keenable            # this package
-pi install git:github.com/deathbeam/pi-packages  # all five packages
+pi install git:github.com/deathbeam/pi-packages  # all my packages
 ```
 
 ## Development

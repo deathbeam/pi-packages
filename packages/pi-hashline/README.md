@@ -9,7 +9,7 @@ See [this blog post](https://stencil.so/blog/the-harness-problem) for the motiva
 ```sh
 # Choose one:
 pi install npm:@deathbeam/pi-hashline            # this package
-pi install git:github.com/deathbeam/pi-packages  # all five packages
+pi install git:github.com/deathbeam/pi-packages  # all my packages
 ```
 
 ## Development
