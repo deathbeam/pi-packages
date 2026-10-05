@@ -401,8 +401,7 @@ export default function (pi: ExtensionAPI) {
             "Search raw Pi transcripts from this session and older sessions, including messages compacted away. " +
             "After compaction, if the summary lacks a detail needed for the task, use search_archive before guessing. " +
             "Results identify this session, another session in this project, or another project; old hits may be stale, so verify against current context or files.",
-        promptSnippet:
-            "Search raw Pi transcripts from this and older sessions, including messages compacted away",
+        promptSnippet: "Search raw Pi transcripts from this and older sessions, including messages compacted away",
         promptGuidelines: [
             "After compaction, if the summary lacks a detail needed for the current task (exact code, output, error, or decision), use search_archive before guessing; verify old hits against current files.",
         ],

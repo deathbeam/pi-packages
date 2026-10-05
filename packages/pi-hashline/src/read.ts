@@ -40,8 +40,9 @@ const READ_PROMPT_SNIPPET = loadPrompt(new URL("../prompts/read-snippet.md", imp
 
 const READ_PROMPT_GUIDELINES = loadPromptGuidelines(new URL("../prompts/read-guidelines.md", import.meta.url));
 
-function normalizePositiveInteger(value: number | undefined, name: "offset" | "limit"): number | undefined {
-    if (value === undefined) {
+function normalizePositiveInteger(value: number | null | undefined, name: "offset" | "limit"): number | undefined {
+    // Strict tool schemas make models send null for omitted optional fields; treat it as omitted.
+    if (value == null) {
         return undefined;
     }
 
@@ -198,6 +199,8 @@ export function registerReadTool(pi: ExtensionAPI): void {
         description: READ_DESC,
         promptSnippet: READ_PROMPT_SNIPPET,
         promptGuidelines: READ_PROMPT_GUIDELINES,
+        // Match pi's built-in read.
+        constrainedSampling: { type: "json_schema", strict: "prefer" },
         parameters: Type.Object({
             path: Type.String({
                 description: "Path to the file to read (relative or absolute)",

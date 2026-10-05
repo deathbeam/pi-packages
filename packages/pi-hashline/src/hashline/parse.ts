@@ -4,6 +4,7 @@
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
 
+import { isRecord } from "../edit-normalize";
 import { NIBBLE_STR, HASH_ALPHABET_RE, HASH_LENGTH } from "./hash";
 
 // --- Types ---
@@ -150,7 +151,7 @@ function hashlineParseText(edit: string[] | undefined): string[] {
  *
  * Backstop validation + anchor parsing. Payloads arriving through pi's
  * agent loop were already validated against the published TypeBox schema
- * (additionalProperties, op union, required fields, types), so most of
+ * (additionalProperties, op enum, required fields, types), so most of
  * these checks are unreachable there; they exist for direct execute()
  * callers, where they keep garbage from crashing parseAnchorRef or
  * silently no-opping unsupported ops.
@@ -177,6 +178,9 @@ function isTextReplaceKey(key: string): boolean {
 }
 
 function assertEditItem(edit: Record<string, unknown>, index: number): void {
+    if (!isRecord(edit)) {
+        throw new Error(`Edit ${index} must be an object with "op", "lines", and anchor fields.`);
+    }
     const unknownKeys = Object.keys(edit).filter((key) => !ITEM_KEYS.has(key));
     if (unknownKeys.length > 0) {
         if (unknownKeys.some(isTextReplaceKey)) {
@@ -189,11 +193,6 @@ function assertEditItem(edit: Record<string, unknown>, index: number): void {
 
     if (typeof edit.op !== "string") {
         throw new Error(`Edit ${index} requires an "op" string.`);
-    }
-    if (edit.op === "replace_text") {
-        throw new Error(
-            `[E_BAD_OP] Edit ${index}: the replace_text op is no longer supported. Re-read the file and use "replace", "append", or "prepend" with LINE#HASH anchors.`,
-        );
     }
     if (edit.op !== "replace" && edit.op !== "append" && edit.op !== "prepend") {
         throw new Error(

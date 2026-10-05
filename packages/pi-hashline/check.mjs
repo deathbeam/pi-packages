@@ -10,6 +10,7 @@ const mod = jiti("./index.ts");
 // renderDiff reads pi's global theme singleton; initialize it headless.
 const { initTheme } = jiti("@earendil-works/pi-coding-agent");
 initTheme();
+const { validateToolArguments } = jiti("@earendil-works/pi-ai");
 
 const registered = [];
 const pi = {
@@ -28,6 +29,12 @@ if (
 ) {
     throw new Error("expected read, edit, grep registered");
 }
+if (byName.read.constrainedSampling?.type !== "json_schema" || byName.read.constrainedSampling.strict !== "prefer") {
+    throw new Error("read must request strict json_schema constrained sampling like pi's built-in read");
+}
+if (byName.edit.constrainedSampling?.type !== "json_schema" || byName.edit.constrainedSampling.strict !== "prefer") {
+    throw new Error("edit must request strict json_schema constrained sampling");
+}
 
 const dir = mkdtempSync(join(tmpdir(), "hashline-smoke-"));
 const file = join(dir, "sample.ts");
@@ -40,6 +47,19 @@ async function run(tool, params) {
     return tool.execute("id", params, undefined, noop, ctx);
 }
 
+// The full model path: prepareArguments, Pi validation, then execute.
+const agentLoopRun = async (tool, args) =>
+    tool.execute(
+        "id",
+        validateToolArguments(
+            { name: tool.name, parameters: tool.parameters },
+            { name: tool.name, arguments: tool.prepareArguments(args) },
+        ),
+        undefined,
+        () => {},
+        ctx,
+    );
+
 (async () => {
     // 1. read: 3-char hashes, LINE#HASH:content, no space after colon
     const readResult = await run(byName.read, { path: file });
@@ -51,6 +71,18 @@ async function run(tool, params) {
     }
     if (readResult.details.snapshotId !== undefined) {
         throw new Error("snapshotId should be gone");
+    }
+    // Strict schemas send null for omitted optionals; null offset/limit must read like a plain head read.
+    const nullParamsRead = await run(byName.read, { path: file, offset: null, limit: null });
+    if (
+        !/^\s*1#[A-Z]{3}:const x = 1;$/m.test(nullParamsRead.content[0].text) ||
+        nullParamsRead.details.nextOffset !== undefined
+    ) {
+        throw new Error("null offset/limit was not treated as omitted");
+    }
+    const nullLimitRead = await run(byName.read, { path: file, offset: null, limit: 2 });
+    if (!/\[Showing lines 1-2 of 3\. Use offset=3 to continue\.\]/.test(nullLimitRead.content[0].text)) {
+        throw new Error("null offset with a real limit misread: " + nullLimitRead.content[0].text);
     }
 
     // Pi path conventions are shared by read, edit and grep.
@@ -148,20 +180,6 @@ async function run(tool, params) {
     }
     console.log("--- mixed-endings warning only on actual write OK ---");
 
-    // 4. replace_text must fail with the teaching error
-    try {
-        await run(byName.edit, {
-            path: file,
-            edits: [{ op: "replace", pos: `2#${m[1]}`, oldText: "const y = 2;", newText: "nope" }],
-        });
-        throw new Error("expected replace_text to fail");
-    } catch (e) {
-        if (!/Text-replace edits are not supported/.test(e.message)) {
-            throw new Error("wrong teaching error: " + e.message);
-        }
-        console.log("--- replace_text teaching error OK ---");
-    }
-
     // 5. top-level oldText/newText fails in prepareArguments (pre-schema), like pi's agent loop
     try {
         byName.edit.prepareArguments({ path: file, oldText: "a", newText: "b" });
@@ -171,6 +189,90 @@ async function run(tool, params) {
             throw new Error("wrong root teaching error: " + e.message);
         }
         console.log("--- top-level oldText teaching error OK (prepareArguments) ---");
+
+        // 5b. strict-schema nulls in edit items: Pi's normalizeOptionalNulls
+        // deletes null pos/end now that the item schema is flat; a null lines
+        // must never become ["null"] via Value.Convert.
+        const nullValidated = validateToolArguments(
+            { name: byName.edit.name, parameters: byName.edit.parameters },
+            {
+                name: byName.edit.name,
+                arguments: byName.edit.prepareArguments({
+                    path: file,
+                    edits: [
+                        { op: "append", pos: null, lines: ["tail"] },
+                        { op: "replace", pos: "1#AAA", end: null, lines: ["x"] },
+                    ],
+                }),
+            },
+        );
+        if (nullValidated.edits[0].pos !== undefined || nullValidated.edits[1].end !== undefined) {
+            throw new Error("pi-ai validation did not delete null pos/end");
+        }
+        let linesNullError = "";
+        try {
+            byName.edit.prepareArguments({ path: file, edits: [{ op: "replace", pos: "1#AAA", lines: null }] });
+        } catch (e) {
+            linesNullError = e.message;
+        }
+        if (!/"lines" is null/.test(linesNullError)) {
+            throw new Error("null lines did not get a teaching error: " + linesNullError);
+        }
+        // End-to-end through the full model path (prepare, validate, execute):
+        // replace with end:null is a single-line replace; append with pos:null is EOF.
+        writeFileSync(file, "const x = 1;\nconst y = 2;\nconst z = 3;\n");
+        const nullRead = await run(byName.read, { path: file });
+        const nullAnchor = nullRead.content[0].text.match(/^\s*1#([A-Z]{3}):/m)[1];
+        await agentLoopRun(byName.edit, {
+            path: file,
+            edits: [{ op: "replace", pos: `1#${nullAnchor}`, end: null, lines: ["const x = 11;"] }],
+        });
+        if (readFileSync(file, "utf8") !== "const x = 11;\nconst y = 2;\nconst z = 3;\n") {
+            throw new Error("end:null not treated as omitted: " + JSON.stringify(readFileSync(file, "utf8")));
+        }
+        await agentLoopRun(byName.edit, { path: file, edits: [{ op: "append", pos: null, lines: ["const w = 4;"] }] });
+        if (readFileSync(file, "utf8") !== "const x = 11;\nconst y = 2;\nconst z = 3;\nconst w = 4;\n") {
+            throw new Error("pos:null not treated as EOF append: " + JSON.stringify(readFileSync(file, "utf8")));
+        }
+        console.log("--- strict-schema null edit fields normalized OK ---");
+
+        // Non-record edit items get a teaching error, not a TypeError.
+        let itemError = "";
+        try {
+            await run(byName.edit, { path: file, edits: [null] });
+        } catch (e) {
+            itemError = e.message;
+        }
+        if (!/Edit 0 must be an object/.test(itemError)) {
+            throw new Error("non-record edit item not rejected cleanly: " + itemError);
+        }
+        console.log("--- non-record edit item teaching error OK ---");
+
+        // Flat item schema: op misuse passes validation and reaches assertEditItem's
+        // teaching errors, instead of the generic anyOf failure the union produced.
+        writeFileSync(file, "const x = 1;\nconst y = 2;\nconst z = 3;\n");
+        let endMisuseError = "";
+        try {
+            await agentLoopRun(byName.edit, {
+                path: file,
+                edits: [{ op: "append", pos: "1#AAA", end: "2#BBB", lines: ["x"] }],
+            });
+        } catch (e) {
+            endMisuseError = e.message;
+        }
+        if (!/does not support "end"/.test(endMisuseError)) {
+            throw new Error("append with end did not get the teaching error: " + endMisuseError);
+        }
+        let missingPosError = "";
+        try {
+            await agentLoopRun(byName.edit, { path: file, edits: [{ op: "replace", lines: ["x"] }] });
+        } catch (e) {
+            missingPosError = e.message;
+        }
+        if (!/requires a "pos" anchor/.test(missingPosError)) {
+            throw new Error("replace without pos did not get the teaching error: " + missingPosError);
+        }
+        console.log("--- flat schema: op misuse reaches teaching errors OK ---");
     }
 
     // Lowercase anchors work; even lowercase numbered display prefixes are rejected.
@@ -879,7 +981,10 @@ async function run(tool, params) {
     const ctxRes = await run(byName.grep, { pattern: "target", path: hlFile, context: 1 });
     const ctxText = stripAnsi(
         renderToString(
-            byName.grep.renderResult(ctxRes, { expanded: true, isPartial: false }, hlTheme, { ...gCtx, expanded: true }),
+            byName.grep.renderResult(ctxRes, { expanded: true, isPartial: false }, hlTheme, {
+                ...gCtx,
+                expanded: true,
+            }),
         ),
     );
     const plainLine = ctxText.split("\n").find((line) => line.includes("const plain = 2;"));
@@ -887,6 +992,35 @@ async function run(tool, params) {
     const hlText = hlLines.join("\n");
     if (/^\s*\d+#[^:]{1,4}:/m.test(hlText)) throw new Error("highlighted render still shows anchor prefixes");
     console.log("--- grep renderer: match highlighting OK ---");
+
+    // raw grep: no anchors minted, literal anchor-like content survives both
+    // the output and the renderer, and highlights stay aligned.
+    const rawGrepFile = join(dir, "raw-grep.txt");
+    writeFileSync(rawGrepFile, "1#TPK:literal anchor-like line\nneedle plain line\n");
+    const rawGrep = await run(byName.grep, { pattern: "literal|needle", path: rawGrepFile, raw: true });
+    const rawGrepText = rawGrep.content[0].text;
+    if (!/^needle plain line$/m.test(rawGrepText)) {
+        throw new Error("raw grep still minted anchors: " + rawGrepText);
+    }
+    if (!rawGrepText.includes("1#TPK:literal anchor-like line")) {
+        throw new Error("raw grep lost literal anchor-like content: " + rawGrepText);
+    }
+    const rawGrepDisplay = stripAnsi(
+        renderToString(
+            byName.grep.renderResult(rawGrep, { expanded: true, isPartial: false }, fakeTheme, {
+                ...gCtx,
+                expanded: true,
+                args: { raw: true },
+            }),
+        ),
+    );
+    if (!rawGrepDisplay.includes("1#TPK:«accent»literal")) {
+        throw new Error("raw grep renderer stripped literal anchor-like content");
+    }
+    if (!rawGrepDisplay.includes("«accent»literal")) {
+        throw new Error("raw grep renderer lost the match highlight");
+    }
+    console.log("--- grep raw mode OK ---");
 
     // 12. file-kind: text / binary (null bytes) / image (pi's detector) / directory
     const fk = jiti("./src/file-kind.ts");

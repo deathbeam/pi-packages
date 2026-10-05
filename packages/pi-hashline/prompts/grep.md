@@ -4,4 +4,6 @@ The `pattern` is a regular expression unless `literal: true`. Results include hi
 
 Set `context` to include lines before and after each match (default 0). Set `limit` to cap matched lines (default 50, max 200).
 
+Set `raw: true` to return matched lines without `LINE#HASH` prefixes; use it when searching for context only, since `edit` needs anchors.
+
 When results are too broad, narrow in this order: read the match count first, then scope with `path`/`glob`, then tighten `pattern`, and only add `context` once the set is small. Result lines are capped at {{DEFAULT_MAX_BYTES}}/{{DEFAULT_MAX_LINES}} whole lines; the summary and notices follow outside that cap. When truncated, narrow the search and rerun.

@@ -332,6 +332,12 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     description: `Maximum matched lines to return (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`,
                 }),
             ),
+            raw: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Return matched lines without LINE#HASH prefixes. Use when searching for context only; edit needs anchors.",
+                }),
+            ),
         }),
 
         // Pi retains its built-in call renderer; strip anchors only in the result view.
@@ -345,12 +351,14 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     warningLines?: number[];
                 };
             };
-            const rawLines = stripHashlinePrefixes(
-                (typed.content ?? [])
-                    .filter((entry) => entry.type === "text")
-                    .map((entry) => entry.text ?? "")
-                    .join("\n"),
-            ).split("\n");
+            const grepText = (typed.content ?? [])
+                .filter((entry) => entry.type === "text")
+                .map((entry) => entry.text ?? "")
+                .join("\n");
+            // Raw output has no prefixes; stripping it would eat literal
+            // anchor-like file content.
+            const isRawGrep = (context.args as { raw?: unknown } | undefined)?.raw === true;
+            const rawLines = (isRawGrep ? grepText : stripHashlinePrefixes(grepText)).split("\n");
             while (rawLines.at(-1) === "") rawLines.pop();
             const noticeCount = Math.min(typed.details?.noticeCount ?? 0, rawLines.length);
             const notices = noticeCount ? rawLines.splice(-noticeCount) : [];
@@ -402,6 +410,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
 
             const limit = params.limit ?? DEFAULT_LIMIT;
             const contextLines = params.context ?? 0;
+            const raw = params.raw === true;
 
             // Search dotfiles but not .git metadata; ripgrep still honors .gitignore.
             const rgArgs: string[] = ["--json", "--hidden", "--glob", "!.git"];
@@ -466,9 +475,12 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     const normalized = normalizeToLF(stripBom(loaded.text).text);
                     fileLines = splitVisibleLines(normalized);
 
-                    // Grep anchors need the same snapshot recovery as read anchors.
-                    const canonicalWritePath = await resolveMutationTargetPath(filePath);
-                    rememberReadSnapshot(canonicalWritePath, normalized);
+                    // Anchored grep output needs the same snapshot recovery
+                    // as read anchors; raw grep mints none, so skip it.
+                    if (!raw) {
+                        const canonicalWritePath = await resolveMutationTargetPath(filePath);
+                        rememberReadSnapshot(canonicalWritePath, normalized);
+                    }
                 } catch {
                     continue;
                 }
@@ -499,11 +511,13 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     for (let lineNum = range.start; lineNum <= range.end; lineNum++) {
                         const line = fileLines[lineNum - 1]!;
                         const prefix = `${String(lineNum).padStart(lineNumberWidth, " ")}#`;
-                        const bytes = Buffer.byteLength(line, "utf8") + prefix.length + HASH_LENGTH + 1;
+                        const bytes = Buffer.byteLength(line, "utf8") + (raw ? 1 : prefix.length + HASH_LENGTH + 1);
                         const omitted = outputBytes + bytes + 1 > DEFAULT_MAX_BYTES;
                         const displayed = omitted
-                            ? `[Line ${lineNum} cannot fit as a complete hashline line (${matchRangesByLine.has(lineNum) ? "match" : "context"}) within ${formatSize(DEFAULT_MAX_BYTES)} of grep output. Use read or bash to inspect it.]`
-                            : `${prefix}${computeLineHash(fileLines, lineNum - 1)}:${line}`;
+                            ? `[Line ${lineNum} cannot fit as a complete ${raw ? "raw" : "hashline"} line (${matchRangesByLine.has(lineNum) ? "match" : "context"}) within ${formatSize(DEFAULT_MAX_BYTES)} of grep output. Use read or bash to inspect it.]`
+                            : raw
+                              ? line
+                              : `${prefix}${computeLineHash(fileLines, lineNum - 1)}:${line}`;
                         if (!addLine(displayed)) break fileLoop;
                         if (omitted) {
                             omittedLines++;

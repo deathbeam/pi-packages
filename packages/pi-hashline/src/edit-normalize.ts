@@ -1,20 +1,38 @@
 /** prepareArguments runs before Pi validation: accept file_path and JSON-string edits,
- * but leave text-replace payloads for the anchor-guidance error. */
+ * reject null "lines" payloads, but leave text-replace payloads for the anchor-guidance error. */
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Parse JSON-string edits, then reject null "lines" payloads: Value.Convert
+ * turns null into ["null"], which passes validation and would write the
+ * literal text "null" into the file. Null pos/end need no handling: Pi's
+ * normalizeOptionalNulls deletes them now that the item schema is flat.
+ */
 function coerceEditsArray(edits: unknown): unknown {
-    if (typeof edits !== "string") {
-        return edits;
+    let parsed: unknown = edits;
+    if (typeof parsed === "string") {
+        try {
+            const json: unknown = JSON.parse(parsed);
+            if (Array.isArray(json)) {
+                parsed = json;
+            }
+        } catch {
+            // Leave malformed input intact for validation's more precise error.
+        }
     }
-    try {
-        const parsed: unknown = JSON.parse(edits);
-        return Array.isArray(parsed) ? parsed : edits;
-    } catch {
-        return edits;
+    if (Array.isArray(parsed)) {
+        for (const [index, edit] of parsed.entries()) {
+            if (isRecord(edit) && edit.lines === null) {
+                throw new Error(
+                    `Edit ${index}: "lines" is null. "lines" is required content; provide an array of lines.`,
+                );
+            }
+        }
     }
+    return parsed;
 }
 
 /** Leave malformed input intact for validation's more precise error. */

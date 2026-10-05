@@ -30,8 +30,7 @@ export default function (pi: ExtensionAPI) {
         label: "Web search",
         description:
             "Search the web and return ranked results with URLs, titles, descriptions, and text snippets. Use for finding pages when you don't know the URL.",
-        promptSnippet:
-            "Search the web for ranked results with URLs and snippets; use when you don't know the URL",
+        promptSnippet: "Search the web for ranked results with URLs and snippets; use when you don't know the URL",
         parameters: Type.Object({
             query: Type.String({ description: "The search query." }),
             site: Type.Optional(
@@ -71,8 +70,7 @@ export default function (pi: ExtensionAPI) {
         label: "Web fetch",
         description:
             "Fetch a URL and return its content as clean markdown. By default only indexed URLs are supported; pass live=true to fetch any URL directly from the source. Pass prompt to have an LLM extract only that from the page.",
-        promptSnippet:
-            "Fetch a URL as clean markdown; pass live=true to fetch any URL directly from the source",
+        promptSnippet: "Fetch a URL as clean markdown; pass live=true to fetch any URL directly from the source",
         parameters: Type.Object({
             url: Type.String({ description: "The URL to fetch." }),
             max_chars: Type.Optional(

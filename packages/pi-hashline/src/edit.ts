@@ -23,28 +23,32 @@ import { isDuplicateAppliedPayload, recordAppliedEdit, recordNoopEdit } from "./
 import { getReadSnapshot, getReadSnapshotVersions, rememberReadSnapshot } from "./read-snapshot";
 import { threeWayMerge } from "./merge";
 
-function literalStringSchema<const Value extends string>(value: Value, options: { description: string }) {
-    return Type.Unsafe<Value>({
-        type: "string",
-        enum: [value],
-        description: options.description,
-    });
-}
+const hashlineEditOpSchema = Type.Unsafe<"replace" | "append" | "prepend">({
+    type: "string",
+    enum: ["replace", "append", "prepend"],
+    description:
+        '"replace" replaces the line at pos, or an inclusive pos..end range, with lines. "append" inserts lines after pos, or at EOF when pos is omitted. "prepend" inserts lines before pos, or at BOF when pos is omitted.',
+});
 
 const hashlineEditLinesSchema = Type.Array(Type.String(), {
     description: "replacement content, one array entry per line, no LINE#HASH prefix",
 });
 
-const hashlineReplaceEditSchema = Type.Object(
+// Flat on purpose: pi-ai's strict transform and null normalization refuse
+// object unions, and assertEditItem already enforces the per-op rules.
+const hashlineEditItemSchema = Type.Object(
     {
-        op: literalStringSchema("replace", {
-            description: "replace one line at pos, or an inclusive pos..end range, with lines",
-        }),
-        pos: Type.String({ description: "start anchor (LINE#HASH from read)" }),
+        op: hashlineEditOpSchema,
+        pos: Type.Optional(
+            Type.String({
+                description:
+                    "start anchor (LINE#HASH from read). Required for replace. Omit to append at EOF or prepend at BOF.",
+            }),
+        ),
         end: Type.Optional(
             Type.String({
                 description:
-                    "inclusive end anchor (LINE#HASH) of the range to replace; omit to replace only the line at pos",
+                    "inclusive end anchor (LINE#HASH) of the range to replace. Only replace supports end; omit it to replace only the line at pos.",
             }),
         ),
         lines: hashlineEditLinesSchema,
@@ -52,39 +56,6 @@ const hashlineReplaceEditSchema = Type.Object(
     { additionalProperties: false },
 );
 
-const hashlineAppendEditSchema = Type.Object(
-    {
-        op: literalStringSchema("append", {
-            description: "insert lines after pos; omit pos to append at EOF",
-        }),
-        pos: Type.Optional(Type.String({ description: "anchor (LINE#HASH from read) to insert after" })),
-        lines: hashlineEditLinesSchema,
-    },
-    { additionalProperties: false },
-);
-
-const hashlinePrependEditSchema = Type.Object(
-    {
-        op: literalStringSchema("prepend", {
-            description: "insert lines before pos; omit pos to prepend at BOF",
-        }),
-        pos: Type.Optional(
-            Type.String({
-                description: "anchor (LINE#HASH from read) to insert before",
-            }),
-        ),
-        lines: hashlineEditLinesSchema,
-    },
-    { additionalProperties: false },
-);
-
-const hashlineEditItemSchema = Type.Union(
-    [hashlineReplaceEditSchema, hashlineAppendEditSchema, hashlinePrependEditSchema],
-    {
-        description:
-            'discriminated edit item. "replace" uses pos/end/lines; "append" and "prepend" use optional pos + lines.',
-    },
-);
 const hashlineEditToolSchema = Type.Object(
     {
         path: Type.String({ description: "path" }),
@@ -92,6 +63,7 @@ const hashlineEditToolSchema = Type.Object(
     },
     { additionalProperties: false },
 );
+
 type EditRequestParams = {
     path: string;
     edits: HashlineToolEdit[];
@@ -308,8 +280,8 @@ async function executeEditPipeline(
 }
 
 // TParams is intentionally TSchema, not typeof hashlineEditToolSchema. The
-// published `parameters` schema stays strict (discriminated anyOf) for the
-// model, but prepareArguments treats params as unknown and defers per-item
+// published `parameters` schema stays strict (additionalProperties, enum op)
+// for the model, but prepareArguments treats params as unknown and defers
 // validation to resolveEditAnchors during execute; typing it as
 // Static<typeof hashlineEditToolSchema> would claim conformance that
 // prepareArguments does not enforce (assertEditRequest is envelope-only).
@@ -338,6 +310,8 @@ function buildEditToolDefinition(): EditToolDefinition {
         parameters: hashlineEditToolSchema,
         promptSnippet: EDIT_PROMPT_SNIPPET,
         promptGuidelines: EDIT_PROMPT_GUIDELINES,
+        // Match pi's built-in tools.
+        constrainedSampling: { type: "json_schema", strict: "prefer" },
         prepareArguments: (args: unknown) => {
             const normalized = normalizeEditRequest(args);
             assertEditRequest(normalized);
