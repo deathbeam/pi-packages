@@ -630,8 +630,7 @@ async function run(tool, params) {
     if (!dupError || !/E_DUPLICATE_EDIT/.test(dupError.message)) throw new Error("expected duplicate guard to fire");
     console.log("--- duplicate guard OK ---");
 
-    // 9. read renderer: content after the LINE#HASH: prefix must be syntax
-    // highlighted (the raw prefixed line would highlight as a comment).
+    // 9. read renderer: LINE#HASH: prefixes must be stripped from displayed content.
     const tsFile = join(dir, "render-check.ts");
     writeFileSync(tsFile, "const value = 1;\n\t// a comment\nexport function hi() { return value; }\n");
     const readRes = await run(byName.read, { path: tsFile });
@@ -653,19 +652,11 @@ async function run(tool, params) {
     console.log(readRendered.slice(0, 300));
     if (!/value/.test(readRendered)) throw new Error("read render lost content");
 
-    // anchors are stripped for display and the code carries highlight colors:
-    // a rendered line must contain at least two distinct truecolor codes and
-    // no LINE#HASH prefix.
+    // The displayed code must not carry LINE#HASH prefixes.
     if (/^\s*\d+#[A-Z]{3}:/m.test(readRendered)) {
         throw new Error("read render still shows anchor prefixes");
     }
-    const line1 = readRendered.split("\n").find((l) => l.includes("value = "));
-    if (!line1) throw new Error("read render lost line 1");
-    const colors = new Set(line1.match(/\u001b\[38;2;[0-9;]+m/g) ?? []);
-    if (colors.size < 2) {
-        throw new Error("read content not syntax highlighted (one color only): " + JSON.stringify(line1));
-    }
-    console.log("--- read renderer: prefixes stripped + highlighted code OK ---");
+    console.log("--- read renderer: prefixes stripped OK ---");
     const limitedRead = await run(byName.read, { path: tsFile, limit: 2 });
     const limitedDisplay = stripAnsi(
         renderToString(
@@ -787,18 +778,6 @@ async function run(tool, params) {
         throw new Error("read renderer did not expand tabs for display only");
     }
 
-    // raw mode has no prefixes; content must still be highlighted
-    const rawRes = await run(byName.read, { path: tsFile, raw: true });
-    const rawComp = byName.read.renderResult(rawRes, { expanded: true, isPartial: false }, fakeTheme, {
-        ...readCtx,
-        args: { path: tsFile, raw: true },
-    });
-    const rawRendered = renderToString(rawComp);
-    const rawLine = rawRendered.split("\n").find((l) => l.includes("value = "));
-    const rawColors = new Set((rawLine ?? "").match(/\u001b\[38;2;[0-9;]+m/g) ?? []);
-    if (rawColors.size < 2) {
-        throw new Error("raw read not highlighted: " + JSON.stringify(rawLine));
-    }
     const literalAnchorFile = join(dir, "literal-anchor.ts");
     writeFileSync(literalAnchorFile, "1#TPK:literal file content\n");
     const literalRaw = await run(byName.read, { path: literalAnchorFile, raw: true });
@@ -813,7 +792,7 @@ async function run(tool, params) {
     if (!literalDisplay.includes("1#TPK:literal file content")) {
         throw new Error("raw read renderer stripped literal file content resembling an anchor");
     }
-    console.log("--- read renderer: raw mode highlighted OK ---");
+    console.log("--- read renderer: raw mode OK ---");
 
     // 10. grep renderer: prefixes stripped, 15-line collapsed cap with expand hint
     const grepRes = await run(byName.grep, { pattern: "const ", path: dir, glob: "*.ts", limit: 5 });

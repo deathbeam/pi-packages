@@ -14,6 +14,7 @@
       "./packages/pi-archive/index.ts",
       "./packages/pi-delegate/index.ts",
       "./packages/pi-hashline/index.ts",
+      "./packages/pi-inferhub/index.ts",
       "./packages/pi-keenable/index.ts"
     ]
   },
@@ -23,9 +24,9 @@
     "format": "prettier --write ."
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-coding-agent": "1.0.3",
+    "@earendil-works/pi-tui": "1.0.3",
     "@types/node": "^22.0.0",
     "@types/xxhashjs": "^0.2.4",
     "jiti": "^2.7.0",

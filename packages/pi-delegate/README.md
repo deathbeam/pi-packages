@@ -8,7 +8,7 @@ Use `/delegate` command to view and manage jobs in a full-screen TUI.
 ```sh
 # Choose one:
 pi install npm:@deathbeam/pi-delegate            # this package
-pi install git:github.com/deathbeam/pi-packages  # all four packages
+pi install git:github.com/deathbeam/pi-packages  # all five packages
 ```
 
 ## Configuration
