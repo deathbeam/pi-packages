@@ -814,7 +814,7 @@ async function run(tool, params) {
     const cappedGrepDisplay = stripAnsi(
         renderToString(byName.grep.renderResult(cappedResult, { expanded: false, isPartial: false }, fakeTheme, gCtx)),
     );
-    if (!cappedGrepDisplay.includes("«warning»[Truncated") || !cappedGrepDisplay.includes("«searchMatchText»needle")) {
+    if (!cappedGrepDisplay.includes("«warning»[Truncated") || !cappedGrepDisplay.includes("«accent»needle")) {
         throw new Error("grep truncation notice was hidden or not warning-colored");
     }
     const omittedResult = await run(byName.grep, { pattern: "oversized", path: join(dir, "long-match.txt") });
@@ -858,16 +858,33 @@ async function run(tool, params) {
             }
         }
     }
-    const hlTheme = { fg: (n, t) => `\u00ab${n}\u00bb${t}`, bg: (n, t) => `\u00ab${n}\u00bb${t}`, bold: (t) => t };
-    const hlText = stripAnsi(
+    // Real SGR codes so a default-background reset (\u001b[49m) in the highlight shows up:
+    // inside the tool panel that reset would erase the panel bg for the rest of the line.
+    const hlTheme = {
+        fg: (n, t) => `\u001b[38;5;250m«${n}»${t}\u001b[39m`,
+        bg: (_n, t) => `\u001b[48;5;236m${t}\u001b[49m`,
+        bold: (t) => `\u001b[1m${t}\u001b[22m`,
+    };
+    const hlAnsi = renderToString(
+        byName.grep.renderResult(hlRes, { expanded: true, isPartial: false }, hlTheme, { ...gCtx, expanded: true }),
+    );
+    if (hlAnsi.includes("\u001b[49m")) {
+        throw new Error("match highlight resets the terminal background, erasing the tool panel bg");
+    }
+    const hlLines = stripAnsi(hlAnsi).split("\n");
+    if (!hlLines.some((line) => line.includes("«accent»target"))) {
+        throw new Error("match not highlighted: " + JSON.stringify(hlLines.slice(0, 3)));
+    }
+    // Context lines must stay unstyled: grep with context so the middle line is rendered too.
+    const ctxRes = await run(byName.grep, { pattern: "target", path: hlFile, context: 1 });
+    const ctxText = stripAnsi(
         renderToString(
-            byName.grep.renderResult(hlRes, { expanded: true, isPartial: false }, hlTheme, { ...gCtx, expanded: true }),
+            byName.grep.renderResult(ctxRes, { expanded: true, isPartial: false }, hlTheme, { ...gCtx, expanded: true }),
         ),
     );
-    if (!/\u00absearchMatchBg\u00bb\u00absearchMatchText\u00bbtarget/.test(hlText)) {
-        throw new Error("match not highlighted: " + JSON.stringify(hlText.slice(0, 200)));
-    }
-    if (/\u00absearchMatchBg\u00bb[^\u00ab]*plain/.test(hlText)) throw new Error("context line was highlighted");
+    const plainLine = ctxText.split("\n").find((line) => line.includes("const plain = 2;"));
+    if (!plainLine || plainLine.includes("«accent»")) throw new Error("context line was highlighted");
+    const hlText = hlLines.join("\n");
     if (/^\s*\d+#[^:]{1,4}:/m.test(hlText)) throw new Error("highlighted render still shows anchor prefixes");
     console.log("--- grep renderer: match highlighting OK ---");
 

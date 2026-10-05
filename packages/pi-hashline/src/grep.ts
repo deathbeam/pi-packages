@@ -271,7 +271,7 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
 
 function highlightMatchRanges(line: string, ranges: MatchRanges, theme: Theme): string {
     const plain = (chunk: string) => theme.fg("toolOutput", chunk);
-    const match = (chunk: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", chunk));
+    const match = (chunk: string) => theme.bold(theme.fg("accent", chunk));
     const parts: string[] = [];
     let pos = 0;
     for (const [start, end] of ranges) {
