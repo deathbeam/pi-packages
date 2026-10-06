@@ -49,7 +49,7 @@ try {
 }
 
 // Tripwires for wiring the compiled-file check cannot see: the child protocol, the delivery path,
-// and the prompt sections. Renderer behavior is exercised below, not matched against source text.
+// and where the prompt text lives. Renderer behavior is exercised below, not matched against source text.
 assert.match(index, /name: "delegate"/);
 assert.match(index, /registerCommand\("delegate"/);
 assert.match(index, /name: "delegate_list"/);
@@ -68,9 +68,8 @@ assert.match(index, /spawn\(process\.execPath, \[entrypoint, "--mode", "rpc", "-
 assert.match(index, /\["--model", model, "--tools", tools\.join\(","\)\]/);
 assert.match(child, /case "agent_settled"/);
 assert.match(child, /type: "steer", message/);
-assert.match(index, /systemPromptOptions\.sections\.agents/);
-// pi wraps each section in a tag of its own, so the content must not add a second <agents>.
-assert.doesNotMatch(index, /"<\/?agents>"/);
+// pi skips before_agent_start in runs a delegate report starts, so a prompt section would vanish exactly then.
+assert.doesNotMatch(index, /systemPromptOptions\.sections/);
 assert.match(index, /registerMessageRenderer\(RESULT_MESSAGE/);
 assert.match(index, /pi\.sendMessage\(/);
 // A follow-up waits for a run end; a parent stuck polling never reaches one and the report is lost.
@@ -316,11 +315,8 @@ let renderReport;
 const deliveries = [];
 const delivered = new Promise((resolve) => deliveries.push(resolve));
 const deliveredSecond = new Promise((resolve) => deliveries.push(resolve));
-let beforeAgentStart;
 extension({
-    on(event, handler) {
-        if (event === "before_agent_start") beforeAgentStart = handler;
-    },
+    on() {},
     sendMessage(message) {
         deliveries.shift()?.(message);
     },
@@ -335,17 +331,14 @@ extension({
     },
     getActiveTools: () => ["read"],
 });
-const promptEvent = { systemPromptOptions: { sections: {} } };
-beforeAgentStart(promptEvent, { cwd: fileURLToPath(root) });
-assert.match(
-    promptEvent.systemPromptOptions.sections.agents,
-    /identify independent scopes and delegate them in parallel/,
-);
 let notice;
 await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = message) } });
 assert.match(notice, /No delegates/);
 // Missing CLI argv must fail before spawning a child.
 const delegate = registered.find((tool) => tool.name === "delegate");
+// User agent dirs can override bundled agents, so check the tier format rather than one agent.
+assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
+assert.match(delegate.promptGuidelines.join("\n"), /use delegate proactively/);
 assert.match(
     delegate.promptGuidelines.join("\n"),
     /delegate any new context-heavy investigation before tracing it yourself/,

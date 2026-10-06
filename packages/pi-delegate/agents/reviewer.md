@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Independent review of a diff, plan, or finished change. Use before claiming work is done.
+description: Independent review of a diff, plan, or finished change. Use proactively before claiming non-trivial work is done.
 tools: read, grep, find, ls, bash
 model: strong
 thinking: high

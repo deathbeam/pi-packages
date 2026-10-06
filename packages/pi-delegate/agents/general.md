@@ -1,6 +1,6 @@
 ---
 name: general
-description: General-purpose agent for multi-step work that would flood the parent context; can inspect, edit, and validate changes.
+description: Multi-step work in its own context; can inspect, edit, run commands, and validate. Use for independent subtasks, repetitive edits across many files, or test and build runs whose output you need only summarized.
 tools: read, grep, find, ls, bash, edit, write
 model: balanced
 thinking: high

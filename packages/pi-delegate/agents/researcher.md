@@ -1,6 +1,6 @@
 ---
 name: researcher
-description: Web research with cited sources. Use when the answer needs external docs, versions, or current facts.
+description: Web research with cited sources. Use proactively whenever the answer needs external docs, versions, or current facts, instead of searching and fetching pages yourself.
 tools: read, web_search, web_fetch
 model: balanced
 thinking: medium

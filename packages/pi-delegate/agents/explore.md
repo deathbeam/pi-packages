@@ -1,6 +1,6 @@
 ---
 name: explore
-description: "Read-only codebase reconnaissance: files, callers, and data flow. Use before editing unfamiliar code."
+description: "Read-only codebase search: finds files, callers, and data flow. Use proactively for open-ended searches and before editing unfamiliar code; launch one per independent area."
 tools: read, grep, find, ls
 model: cheap
 thinking: low

@@ -45,7 +45,8 @@ thinking: low
 Explore the codebase and report relevant paths.
 ```
 
-Omit `tools` to inherit active tools. `model` can also be an explicit `provider/model`.
+Omit `tools` to inherit active tools. `model` can also be an explicit `provider/model`. The model sees the agent list from
+when the extension loaded, so run `/reload` after adding agents or changing their descriptions.
 
 ## Development
 

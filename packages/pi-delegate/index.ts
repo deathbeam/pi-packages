@@ -350,16 +350,6 @@ export default function (pi: ExtensionAPI) {
         viewing = undefined;
     });
 
-    pi.on("before_agent_start", (event, ctx) => {
-        const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
-        // pi wraps each section in a tag of the same name, so this content stays untagged.
-        event.systemPromptOptions.sections.agents = [
-            "Available agents:",
-            ...agents.map((agent) => `- ${agent.name}: ${agent.description}`),
-            "Delegation is authorized here. Before context-heavy work, identify independent scopes and delegate them in parallel. Keep brief checks, decisions, and synthesis in the parent; agents work in isolated contexts and return follow-up reports.",
-        ].join("\n");
-    });
-
     pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded }, theme) => {
         const report = message.details as DelegateReport | undefined;
         if (!report?.agent) return undefined;
@@ -618,22 +608,37 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
+    const cwd = process.cwd();
+    const agentList = discoverAgents(cwd, configFor(cwd).agentDirs).map(
+        (agent) => `- ${agent.name}${agent.model ? ` (${agent.model})` : ""}: ${agent.description}`,
+    );
+
     pi.registerTool({
         name: "delegate",
         label: "Delegate",
-        description:
-            "Delegate one focused task to a background Pi agent using a named Markdown agent definition. Returns immediately; the agent's result arrives later as a follow-up message. `description` labels the delegation in the transcript; `task` is the full instruction the child receives.",
-        promptSnippet: "Delegate a focused task to a background agent; the result arrives later as a follow-up message",
+        description: [
+            "Start a background Pi agent on one focused task. Returns a job id immediately; the agent's report arrives later as a follow-up message.",
+            "",
+            "Available agents (default model in parentheses):",
+            ...agentList,
+            "",
+            "The agent gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
+        ].join("\n"),
+        promptSnippet:
+            "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
         promptGuidelines: [
+            "Delegation is authorized: use delegate proactively, without waiting for the user to ask, whenever work matches an agent's description. Your context is the scarce resource: everything you read stays in it, is re-sent with every later request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
+            "Delegate when you need the conclusion rather than the raw material: open-ended searches (more than ~3 queries), understanding code across several files you will not edit, web research, long command output such as test runs and builds, independent subtasks, and reviews of finished work. Work directly for a known file path, one targeted search, a quick command, or code you will edit yourself.",
+            "Start every independent delegate before waiting on any, ideally in one message. Keep decisions and synthesis yourself. Trust reports instead of repeating their searches; read only what you act on.",
             "While delegates run, stay outside their scopes; delegate any new context-heavy investigation before tracing it yourself. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
-            agent: Type.String({ description: "Agent name, one of the agents listed in the <agents> prompt section." }),
+            agent: Type.String({ description: "Agent name from the list in this tool's description." }),
             description: Type.String({
                 description: "Short 3-8 word summary of this delegation, shown in the transcript.",
             }),
-            task: Type.String({ description: "The full instruction the delegated agent receives." }),
+            task: Type.String({ description: "Self-contained brief; the agent cannot see this conversation." }),
             model: Type.Optional(
                 Type.String({ description: "Model tier (cheap, balanced, strong) or an explicit provider/model." }),
             ),
