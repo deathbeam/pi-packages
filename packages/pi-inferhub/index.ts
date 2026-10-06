@@ -2,6 +2,7 @@ import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
 const BASE_URL = "https://api.inferhub.dev/v1";
+const ANTHROPIC_BASE_URL = "https://api.inferhub.dev";
 const API = "openai-completions";
 const PI_THINKING_LEVELS = [
     "minimal",
@@ -57,6 +58,13 @@ function normalizeName(id: string): string {
     return (id.split("/").pop() ?? id).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function nativeRoute(id: string): { api?: string; baseUrl?: string } {
+    const name = (id.split("/").pop() ?? id).toLowerCase();
+    if (name.startsWith("claude")) return { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL };
+    if (name.startsWith("gpt")) return { api: "openai-responses" };
+    return {};
+}
+
 function smallest(sources: CatalogEntry[], value: (entry: CatalogEntry) => unknown, fallback: number): number {
     const numbers = sources
         .map(value)
@@ -89,6 +97,7 @@ function toPiModel(entry: CatalogEntry, members: CatalogEntry[]): ProviderModelC
     )?.upstream_label;
 
     return {
+        ...nativeRoute(entry.id),
         id: entry.id,
         name: typeof label === "string" ? label : entry.id,
         reasoning: true,
@@ -156,7 +165,12 @@ export default async function (pi: ExtensionAPI) {
             registry = await fetchCatalog(apiKey, context.signal);
             await context.publish({
                 persist: {
-                    models: registry.map((model) => ({ ...model, provider: "inferhub", api: API, baseUrl: BASE_URL })),
+                    models: registry.map((model) => ({
+                        ...model,
+                        provider: "inferhub",
+                        api: model.api ?? API,
+                        baseUrl: model.baseUrl ?? BASE_URL,
+                    })),
                     checkedAt: Date.now(),
                 },
             });

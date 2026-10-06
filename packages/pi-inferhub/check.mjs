@@ -25,6 +25,14 @@ const catalog = {
             reasoning_levels: ["medium", "high", "max"],
             pricing: { official_in: 0.2, official_out: 0.8 },
         },
+        {
+            id: "cc/claude-haiku-4-5",
+            owned_by: "cc",
+            modality: "text",
+            input_token_limit: 200000,
+            max_output_tokens: 32000,
+        },
+        { id: "cx/gpt-6.1-sol", owned_by: "cx", modality: "text", reasoning_levels: ["low", "medium", "high"] },
         { id: "alias/glm-5.3", owned_by: "alias" },
         { id: "plain", owned_by: "other", modality: "text" },
         { id: "image-out", output_modality: "image" },
@@ -57,7 +65,21 @@ try {
     assert.equal(calls[0].init.headers.Authorization, "Bearer startup-key");
 
     const models = Object.fromEntries(config.models.map((model) => [model.id, model]));
-    assert.deepEqual(Object.keys(models), ["glm-5.3", "zhipu/glm-5.3", "alias/glm-5.3", "plain"]);
+    assert.deepEqual(Object.keys(models), [
+        "glm-5.3",
+        "zhipu/glm-5.3",
+        "cc/claude-haiku-4-5",
+        "cx/gpt-6.1-sol",
+        "alias/glm-5.3",
+        "plain",
+    ]);
+
+    // Claude and GPT models ride their native APIs; everything else inherits the provider default.
+    assert.equal(models["cc/claude-haiku-4-5"].api, "anthropic-messages");
+    assert.equal(models["cc/claude-haiku-4-5"].baseUrl, "https://api.inferhub.dev");
+    assert.equal(models["cx/gpt-6.1-sol"].api, "openai-responses");
+    assert.equal(models["cx/gpt-6.1-sol"].baseUrl, undefined);
+    assert.equal(models["glm-5.3"].api, undefined);
 
     // A single entry maps its limits, cheapest prices, image input, and advertised thinking levels.
     assert.equal(models["glm-5.3"].name, "GLM 5.3");
@@ -112,7 +134,7 @@ try {
     });
 
     // Image-output entries and entries without an id never become models.
-    assert.equal(config.models.length, 4);
+    assert.equal(config.models.length, 6);
 
     const signal = new AbortController().signal;
     const beforeRefresh = calls.length;
@@ -147,7 +169,12 @@ try {
     assert.equal(calls.length, beforeRefresh);
 
     // A keyed network refresh fetches, persists, and replaces the known catalog.
-    stub({ data: [{ id: "fresh", owned_by: "x" }] });
+    stub({
+        data: [
+            { id: "fresh", owned_by: "x" },
+            { id: "cc/claude-fresh", owned_by: "cc" },
+        ],
+    });
     const published = [];
     const refreshed = await config.refreshModels({
         allowNetwork: true,
@@ -157,19 +184,23 @@ try {
     });
     assert.deepEqual(
         refreshed.map((model) => model.id),
-        ["fresh"],
+        ["fresh", "cc/claude-fresh"],
     );
     assert.equal(calls.at(-1).url, "https://api.inferhub.dev/v1/models");
     assert.equal(calls.at(-1).init.headers.Authorization, "Bearer secret");
     assert.equal(published.length, 1);
+    // The persist keeps each model's native api and only defaults the provider api when missing.
     assert.deepEqual(
-        published[0].persist.models.map((model) => model.id),
-        ["fresh"],
+        published[0].persist.models.map(({ id, api, baseUrl }) => ({ id, api, baseUrl })),
+        [
+            { id: "fresh", api: "openai-completions", baseUrl: "https://api.inferhub.dev/v1" },
+            { id: "cc/claude-fresh", api: "anthropic-messages", baseUrl: "https://api.inferhub.dev" },
+        ],
     );
     assert.ok(published[0].persist.checkedAt <= Date.now());
     assert.deepEqual(
         (await config.refreshModels({ allowNetwork: false, signal, publish: noPublish })).map((model) => model.id),
-        ["fresh"],
+        ["fresh", "cc/claude-fresh"],
     );
 
     // A broken catalog must not take down startup; the provider still registers with no models.
