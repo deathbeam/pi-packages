@@ -73,7 +73,7 @@ export function runChild(
             if (!child.stdin.destroyed) child.stdin.end();
             signal?.removeEventListener("abort", abort);
             const result = aborted
-                ? new Error("Delegated agent was aborted")
+                ? new Error("Delegate was aborted")
                 : (error ??
                   childFailure ??
                   (code !== 0
@@ -86,7 +86,7 @@ export function runChild(
                 rejectPending(new Error(childError));
                 reject(new Error(childError));
             } else {
-                rejectPending(new Error("Delegated agent finished before acknowledging command"));
+                rejectPending(new Error("Delegate finished before acknowledging command"));
                 resolveChild(limitOutput(liveText.trim() || "(no output)"));
             }
         };
@@ -194,9 +194,9 @@ export function runChild(
             const write = writeQueue.then(
                 () =>
                     new Promise<void>((resolveWrite, rejectWrite) => {
-                        if (settled) return rejectWrite(childFailure ?? new Error("Delegated agent has finished"));
+                        if (settled) return rejectWrite(childFailure ?? new Error("Delegate has finished"));
                         if (child.stdin.destroyed || !child.stdin.writable) {
-                            return rejectWrite(new Error("Delegated agent stdin is not writable"));
+                            return rejectWrite(new Error("Delegate stdin is not writable"));
                         }
                         child.stdin.write(line, (error) => (error ? rejectWrite(error) : resolveWrite()));
                     }),

@@ -97,7 +97,7 @@ export function toolCallDetail(toolName: string, args: unknown): string {
         case "read":
         case "write":
         case "edit":
-            return value("file_path") || value("path");
+            return value("path");
         case "grep":
             return `/${value("pattern")}/ in ${path}`;
         case "find":
@@ -150,9 +150,9 @@ export function resultPreview(result: unknown, maxChars = 120): string | undefin
 }
 
 export function reportText(report: DelegateReport): string {
-    if (report.error) return `Delegated agent "${report.agent}" (job ${report.id}) failed: ${report.error}`;
+    if (report.error) return `Delegate "${report.agent}" (job ${report.id}) failed: ${report.error}`;
     const output = (report.output ?? "").trim();
-    return `Delegated agent "${report.agent}" (job ${report.id}) finished.${output ? `\n\n${output}` : ""}`;
+    return `Delegate "${report.agent}" (job ${report.id}) finished.${output ? `\n\n${output}` : ""}`;
 }
 
 export function jobLine(info: { description?: string } & UsageInfo, elapsedMs: number): string {

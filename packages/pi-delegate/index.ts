@@ -11,6 +11,7 @@ import {
     getMarkdownTheme,
     keyHint,
     parseFrontmatter,
+    rawKeyHint,
 } from "@earendil-works/pi-coding-agent";
 import {
     type Component,
@@ -103,7 +104,6 @@ const REMINDER_MESSAGE = "delegate-reminder";
 const JOB_ENTRY = "delegate-job";
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powershell", "web_search", "web_fetch"]);
 const FIRST_REMINDER_AT = 5;
-const TASK_PREVIEW_LINES = 5;
 
 function expandPath(value: string, cwd: string): string {
     return resolve(cwd, value.replace(/^~(?=\/|$)/, homedir()));
@@ -208,6 +208,11 @@ function resultFallback(body: string, theme: Theme, isError: boolean): Text {
     return new Text(`\n${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
 }
 
+/** Shared collapsed-output note so all three preview sites phrase it identically. */
+function moreLines(theme: Theme, hidden: number): string {
+    return theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand");
+}
+
 /** Shared tool layout: an optional identity header, then a width-aware payload preview. */
 function toolLayout(toolName: string, identity: string, payload: string, theme: Theme, expanded: boolean): Component {
     const container = new Container();
@@ -232,11 +237,7 @@ function toolLayout(toolName: string, identity: string, payload: string, theme: 
             if (expanded || lines.length <= COLLAPSED_OUTPUT_LINES) return lines;
             return [
                 ...lines.slice(0, COLLAPSED_OUTPUT_LINES),
-                truncateToWidth(
-                    theme.fg("muted", `… ${lines.length - COLLAPSED_OUTPUT_LINES} more lines, `) +
-                        keyHint("app.tools.expand", "to expand"),
-                    width,
-                ),
+                truncateToWidth(moreLines(theme, lines.length - COLLAPSED_OUTPUT_LINES), width),
             ];
         },
         invalidate: () => body.invalidate(),
@@ -413,14 +414,7 @@ export default function (pi: ExtensionAPI) {
         else if (report.output) {
             const { shown, hidden } = outputPreview(report.output, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
             container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
-            if (hidden > 0)
-                container.addChild(
-                    new Text(
-                        theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand"),
-                        0,
-                        0,
-                    ),
-                );
+            if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
         }
         return container;
     });
@@ -445,24 +439,15 @@ export default function (pi: ExtensionAPI) {
                     let historyWidth = 1;
                     let markdown = new WeakMap<ChildActivity, Markdown>();
                     const jobs = () => [...running.values(), ...recent];
-                    const bodyHeight = () => Math.max(0, tui.terminal.rows - 3);
-                    // The list pane already draws a border, and the muted model line sets the task apart.
-                    const taskLines = (job: InspectJob, width: number) => {
-                        const lines = wrapTextWithAnsi(job.task.trim(), Math.max(1, width)).map((line) =>
-                            theme.fg("text", line),
-                        );
-                        if (lines.length <= TASK_PREVIEW_LINES) return lines;
-                        return [
-                            ...lines.slice(0, TASK_PREVIEW_LINES),
-                            theme.fg("muted", `… ${lines.length - TASK_PREVIEW_LINES} more lines`),
-                        ];
-                    };
+                    // Fixed rows: title, top rule, bottom rule, footer.
+                    const bodyHeight = () => Math.max(0, tui.terminal.rows - 4);
                     const toolsLines = (job: InspectJob, width: number) =>
                         wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
                             theme.fg("dim", line),
                         );
+                    // Fixed rows: header, model, description, rule, counter.
                     const historyHeight = (job: InspectJob, width: number) =>
-                        Math.max(0, bodyHeight() - 6 - taskLines(job, width).length - toolsLines(job, width).length);
+                        Math.max(0, bodyHeight() - 5 - toolsLines(job, width).length);
                     // ScrollView needs fullscreen layout; window the history in regular TUI too.
                     const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
                         const row = (text: string) =>
@@ -481,7 +466,7 @@ export default function (pi: ExtensionAPI) {
                                 row(theme.fg("muted", `    ${item.description}`)),
                                 row(
                                     theme.fg(
-                                        "dim",
+                                        "muted",
                                         `    ${usageStats(item, (item.endedAt ?? Date.now()) - item.startedAt)}`,
                                     ),
                                 ),
@@ -489,7 +474,7 @@ export default function (pi: ExtensionAPI) {
                         return [
                             ...lines,
                             ...Array(Math.max(0, bodyHeight() - 1 - lines.length)).fill(row("")),
-                            row(theme.fg("dim", ` ${selectedIndex + 1}/${items.length}`)),
+                            row(theme.fg("dim", `${selectedIndex + 1}/${items.length}`)),
                         ].slice(0, bodyHeight());
                     };
                     const renderEntry = (entry: ChildActivity, width: number): string[] => {
@@ -516,7 +501,6 @@ export default function (pi: ExtensionAPI) {
                     };
                     const renderHistory = (width: number, job: InspectJob): string[] => {
                         historyWidth = width;
-                        const task = taskLines(job, width);
                         const tools = toolsLines(job, width);
                         const height = historyHeight(job, width);
                         const history = job.activity.flatMap((entry) => renderEntry(entry, width));
@@ -532,9 +516,7 @@ export default function (pi: ExtensionAPI) {
                             truncateToWidth(`${statusText(theme, job.status)} ${jobIdentity(theme, job)}`, width),
                             truncateToWidth(theme.fg("dim", job.model), width),
                             ...tools,
-                            theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
                             truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
-                            ...task,
                             theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
                             ...shown,
                             ...Array(Math.max(0, height - shown.length)).fill(""),
@@ -565,7 +547,7 @@ export default function (pi: ExtensionAPI) {
                             const footer = truncateToWidth(
                                 theme.fg(
                                     "dim",
-                                    `${keyHint("tui.select.up", "previous")} · ${keyHint("tui.select.down", "next")} · Tab switch pane · ${keyHint("tui.select.cancel", "close")}`,
+                                    `${keyHint("tui.select.up", "previous")} · ${keyHint("tui.select.down", "next")} · ${rawKeyHint("←/→", "switch pane")} · ${keyHint("tui.select.cancel", "close")}`,
                                 ),
                                 width,
                             );
@@ -573,7 +555,8 @@ export default function (pi: ExtensionAPI) {
                                 return [
                                     title,
                                     theme.fg("muted", "No delegates in this session."),
-                                    ...Array(Math.max(0, tui.terminal.rows - 3)).fill(""),
+                                    // Fixed rows: title, top rule, bottom rule, footer.
+                                    ...Array(Math.max(0, tui.terminal.rows - 4)).fill(""),
                                     footer,
                                 ].slice(0, tui.terminal.rows);
                             const sidebarWidth = Math.min(
@@ -603,6 +586,7 @@ export default function (pi: ExtensionAPI) {
                                 title,
                                 theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
                                 ...body,
+                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
                                 footer,
                             ].slice(0, tui.terminal.rows);
                         },
@@ -769,7 +753,7 @@ export default function (pi: ExtensionAPI) {
                 content: [
                     {
                         type: "text",
-                        text: `Started agent "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
+                        text: `Started delegate "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
                     },
                 ],
                 details,
@@ -799,19 +783,17 @@ export default function (pi: ExtensionAPI) {
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
             const status = details.background ? "started in background" : "completed";
+            // The done icon means actual completion; a background launch reports its status without it.
+            const header = details.background
+                ? `${jobIdentity(theme, details)} ${theme.fg("muted", status)}`
+                : `${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", status)}`;
             const container = new Container();
-            container.addChild(
-                new Text(
-                    `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("dim", status)}`,
-                    0,
-                    0,
-                ),
-            );
+            container.addChild(new Text(`\n${header}`, 0, 0));
             // The call body already carries the task; only the launch metadata is new here.
             if (expanded)
                 container.addChild(
                     new Text(
-                        theme.fg("dim", launchDetails({ model: details.model, tools: details.tools }).join("\n")),
+                        theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")),
                         0,
                         0,
                     ),
@@ -820,14 +802,7 @@ export default function (pi: ExtensionAPI) {
             if (!details.background && body) {
                 const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
                 container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
-                if (hidden > 0)
-                    container.addChild(
-                        new Text(
-                            theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand"),
-                            0,
-                            0,
-                        ),
-                    );
+                if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
             }
             return container;
         },

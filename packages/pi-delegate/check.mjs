@@ -118,7 +118,7 @@ assert.equal(usageStats({}, 0), "0s");
 assert.equal(usageStats({ toolCalls: 3, contextTokens: 2400, contextWindow: 200000 }, 42000), "2.4k/200k · 42s");
 assert.equal(usageStats({ contextTokens: 2400 }, 1000), "2.4k · 1s");
 assert.equal(toolCallDetail("bash", { command: "npm test\nsecond" }), "npm test");
-assert.equal(toolCallDetail("read", { file_path: "src/a.ts" }), "src/a.ts");
+assert.equal(toolCallDetail("read", { path: "src/a.ts" }), "src/a.ts");
 assert.equal(toolCallDetail("edit", { path: "src/a.ts" }), "src/a.ts");
 assert.equal(toolCallDetail("grep", { pattern: "foo", path: "src" }), "/foo/ in src");
 assert.equal(toolCallDetail("ls", {}), ".");
@@ -135,15 +135,15 @@ assert.equal(
         elapsedMs: 65000,
         output: "done",
     }),
-    'Delegated agent "explore" (job a1b2c3d4) finished.\n\ndone',
+    'Delegate "explore" (job a1b2c3d4) finished.\n\ndone',
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 0, elapsedMs: 1000 }),
-    'Delegated agent "explore" (job a1b2c3d4) finished.',
+    'Delegate "explore" (job a1b2c3d4) finished.',
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 1, elapsedMs: 1000, error: "boom" }),
-    'Delegated agent "explore" (job a1b2c3d4) failed: boom',
+    'Delegate "explore" (job a1b2c3d4) failed: boom',
 );
 assert.equal(jobLine({ description: "find callers" }, 42000), "find callers · 42s");
 assert.equal(jobLine({}, 0), "0s");
@@ -210,7 +210,7 @@ assert.equal(fake.stdout.readableEncoding, "utf8");
 await assert.rejects(run.steer("steer"), /steer rejected/);
 assert.deepEqual(activity, [], "rejected steering should not appear in activity");
 fake.stdout.write(
-    `${JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { file_path: "src/a.ts" } })}\n`,
+    `${JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "src/a.ts" } })}\n`,
 );
 fake.stdout.write(
     `${JSON.stringify({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "file loaded\nmore" }] } })}\n`,
@@ -591,7 +591,12 @@ try {
     assert.match(widgetLines.join("\n"), new RegExp(`${first.details.id} explore first run`));
     assert.match(
         delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
-        new RegExp(`✓ ${first.details.id} explore started in background`),
+        new RegExp(`${first.details.id} explore started in background`),
+    );
+    assert.doesNotMatch(
+        delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
+        /✓/,
+        "background launch must not show the completion icon",
     );
     const steer = registered.find((tool) => tool.name === "delegate_steer");
     const steerArgs = { id: `job ${first.details.id}`, message: guidance };
@@ -684,16 +689,16 @@ try {
     const toolsRow = rows.findIndex((row) => row.includes("read, grep, find, ls"));
     const titleRow = rows.findIndex((row) => row.split("│")[1]?.includes("second run"));
     assert.ok(rows.findIndex((row) => row.includes(second.details.model)) < toolsRow);
-    assert.match(rows[toolsRow + 1].split("│")[1], /─{20}/);
-    assert.equal(titleRow, toolsRow + 2);
+    assert.match(rows[toolsRow + 2].split("│")[1], /─{20}/);
+    assert.equal(titleRow, toolsRow + 1);
     assert.ok(titleRow < rows.findIndex((row) => row.includes("Trace delegates")));
     assert.doesNotMatch(rows[toolsRow].split("│")[1], /Tools:/);
     const narrow = view.render(32).join("\n");
     assert.match(narrow, /read, grep/);
     assert.match(narrow, /find, ls/);
-    assert.match(narrow, /… \d+ more lines/, "long task preview must be capped");
+    assert.equal(view.render(32).length, tui.terminal.rows, "long task must not grow the pane");
     assert.match(rows[4].split("│")[0], /\d+s/);
-    // The list pane already draws a border; the task text carries none of its own.
+    // The task reaches the pane only as the child's first user message.
     assert.match(opened, /Trace delegates/);
     assert.doesNotMatch(opened, /│\s*Trace/);
     assert.doesNotMatch(opened, /Model:|Task:/);
@@ -751,7 +756,7 @@ try {
     assert.equal(liveRows[guidanceRow + 1]?.split("│")[1]?.trim(), "", "steer paragraph break lost");
     assert.match(liveRows[guidanceRow + 2], /Keep both paragraphs\./);
     assert.match(
-        liveRows.at(-2)?.split("│")[1] ?? "",
+        liveRows.at(-3)?.split("│")[1] ?? "",
         /\b(\d+)\/\1\b/,
         "history stopped following the latest activity",
     );
@@ -791,13 +796,10 @@ try {
     assert.ok(colors.includes("toolTitle") && colors.includes("accent") && colors.includes("text"));
     for (let i = 0; i < 3; i++) view.handleInput("up");
     const scrolledRows = view.render(80);
-    const taskRow = scrolledRows.findIndex((row) => row.split("│")[1]?.includes("Trace delegates"));
-    const historyRow =
-        scrolledRows.findIndex((row, index) => index > taskRow && row.split("│")[1]?.includes("─".repeat(20))) + 1;
-    assert.ok(taskRow > titleRow && historyRow > taskRow + 1, "history separator missing");
-    const scrolledLine = scrolledRows[historyRow];
+    // No task block above the transcript anymore; anchor on the first transcript row under the header.
+    const scrolledLine = scrolledRows[toolsRow + 3];
     await steer.execute("call", { id: second.details.id, message: "Final parent guidance" });
-    assert.equal(view.render(80)[historyRow], scrolledLine, "new events moved the scrolled-back history");
+    assert.equal(view.render(80)[toolsRow + 3], scrolledLine, "new events moved the scrolled-back history");
     const secondReport = await Promise.race([deliveredSecond, timeout]);
     assert.equal(secondReport.details.error, undefined);
     assert.match(

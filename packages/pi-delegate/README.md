@@ -1,7 +1,7 @@
 # [@deathbeam/pi-delegate](https://www.npmjs.com/package/@deathbeam/pi-delegate)
 
 Run focused subagents with `delegate`, `delegate_list`, `delegate_steer`, and `delegate_cancel`.
-Use `/delegate` command to view and manage jobs in a full-screen TUI.
+Use `/delegate` command to inspect jobs in a full-screen TUI.
 
 ## Installation
 
