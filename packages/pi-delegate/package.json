@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-delegate",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "description": "Run focused Pi subagents as background tasks",
   "type": "module",
   "license": "MIT",

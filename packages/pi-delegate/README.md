@@ -48,6 +48,10 @@ Explore the codebase and report relevant paths.
 Omit `tools` to inherit active tools. `model` can also be an explicit `provider/model`. The model sees the agent list from
 when the extension loaded, so run `/reload` after adding agents or changing their descriptions.
 
+The main session is prompted to act as an orchestrator. When it makes 5, 10, 20, … direct exploration calls (`read`,
+`grep`, `find`, `ls`, shell, web tools) without delegating, a hidden reminder nudges it to delegate the rest. The count
+resets on each prompt and each `delegate` call.
+
 ## Development
 
 From this package directory:

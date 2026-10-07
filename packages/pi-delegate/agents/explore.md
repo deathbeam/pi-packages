@@ -1,6 +1,6 @@
 ---
 name: explore
-description: "Read-only codebase search: finds files, callers, and data flow. Use proactively for open-ended searches and before editing unfamiliar code; launch one per independent area."
+description: "Read-only codebase search: finds files, callers, and data flow. Use it for anything beyond one targeted search and before editing unfamiliar code; launch several in parallel for separate areas."
 tools: read, grep, find, ls
 model: cheap
 thinking: low

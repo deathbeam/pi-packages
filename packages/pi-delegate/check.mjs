@@ -338,11 +338,51 @@ assert.match(notice, /No delegates/);
 const delegate = registered.find((tool) => tool.name === "delegate");
 // User agent dirs can override bundled agents, so check the tier format rather than one agent.
 assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
-assert.match(delegate.promptGuidelines.join("\n"), /use delegate proactively/);
-assert.match(
-    delegate.promptGuidelines.join("\n"),
-    /delegate any new context-heavy investigation before tracing it yourself/,
-);
+assert.match(delegate.promptGuidelines.join("\n"), /You are the orchestrator/);
+// Drift reminder: only the orchestrating session, at 5 then 10 direct calls, and a delegate call resets it.
+const nudged = (activeTools) => {
+    const handlers = {};
+    const reminders = [];
+    extension({
+        on: (event, handler) => (handlers[event] = handler),
+        sendMessage: (message, options) => reminders.push({ message, options }),
+        registerMessageRenderer() {},
+        registerCommand() {},
+        registerTool() {},
+        getActiveTools: () => activeTools,
+    });
+    return {
+        reminders,
+        prompt: () => handlers.before_agent_start(),
+        call: (toolName, parentToolCallId) => handlers.tool_result({ toolName, parentToolCallId }),
+    };
+};
+const parent = nudged(["read", "delegate"]);
+for (const tool of ["grep", "grep", "read", "edit", "ls"]) parent.call(tool);
+assert.equal(parent.reminders.length, 0, "edits are not exploration");
+parent.call("bash");
+assert.equal(parent.reminders.length, 1);
+assert.equal(parent.reminders[0].message.display, false);
+assert.equal(parent.reminders[0].options.deliverAs, "steer");
+assert.match(parent.reminders[0].message.content, /5 direct exploration calls/);
+for (let i = 0; i < 4; i++) parent.call("read");
+assert.equal(parent.reminders.length, 1, "the second reminder waits for 10 calls");
+parent.call("read");
+assert.equal(parent.reminders.length, 2);
+parent.call("delegate");
+for (let i = 0; i < 5; i++) parent.call("read");
+assert.equal(parent.reminders.length, 3, "a delegate call resets the count");
+const childSession = nudged(["read"]);
+for (let i = 0; i < 10; i++) childSession.call("read");
+assert.equal(childSession.reminders.length, 0, "children cannot delegate, so they are never nudged");
+const scripted = nudged(["delegate"]);
+for (let i = 0; i < 10; i++) scripted.call("grep", "codemode-call");
+assert.equal(scripted.reminders.length, 0, "calls a script issued are not the model's own steps");
+for (let i = 0; i < 4; i++) scripted.call("read");
+scripted.prompt();
+scripted.call("read");
+assert.equal(scripted.reminders.length, 0, "a new prompt resets the count");
+assert.match(delegate.promptGuidelines.join("\n"), /While delegates run, stay outside their scopes/);
 assert.match(delegate.promptGuidelines.join("\n"), /required delegate report before claiming the task is done/);
 assert.match(delegate.promptGuidelines.join("\n"), /call any tool solely to wait/);
 const ctx = {

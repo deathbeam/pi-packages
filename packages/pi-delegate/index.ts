@@ -99,6 +99,9 @@ const DELEGATION_TOOLS = new Set(["delegate", "delegate_list", "delegate_steer",
 const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
+const REMINDER_MESSAGE = "delegate-reminder";
+const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powershell", "web_search", "web_fetch"]);
+const FIRST_REMINDER_AT = 5;
 const TASK_PREVIEW_LINES = 5;
 
 function expandPath(value: string, cwd: string): string {
@@ -245,6 +248,9 @@ export default function (pi: ExtensionAPI) {
     const recent: InspectJob[] = [];
     let viewing: (() => void) | undefined;
     let ticker: ReturnType<typeof setInterval> | undefined;
+    // Prompts are read once; drift happens one quick search at a time, so count it and nudge at 5, 10, 20, ...
+    let directCalls = 0;
+    let nextReminder = FIRST_REMINDER_AT;
 
     const addActivity = (job: DelegateJob, activity: ChildActivity) => {
         const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
@@ -348,6 +354,33 @@ export default function (pi: ExtensionAPI) {
         running.clear();
         recent.length = 0;
         viewing = undefined;
+    });
+
+    pi.on("before_agent_start", () => {
+        directCalls = 0;
+        nextReminder = FIRST_REMINDER_AT;
+    });
+
+    pi.on("tool_result", (event) => {
+        // Children run without the delegation tools, so only the orchestrating session is nudged.
+        if (!pi.getActiveTools().includes("delegate")) return;
+        if (event.toolName === "delegate") {
+            directCalls = 0;
+            nextReminder = FIRST_REMINDER_AT;
+            return;
+        }
+        // Calls a script or another tool issued are not the model's own steps.
+        if (event.parentToolCallId || !EXPLORATION_TOOLS.has(event.toolName) || ++directCalls < nextReminder) return;
+        nextReminder *= 2;
+        // Steering lands after the current tool batch, so it never cuts parallel calls short.
+        pi.sendMessage(
+            {
+                customType: REMINDER_MESSAGE,
+                content: `<system-reminder>You have made ${directCalls} direct exploration calls since your last delegation. If what remains is exploration, research, or a build/test/debug loop, delegate it now, in parallel for independent scopes, instead of continuing yourself.</system-reminder>`,
+                display: false,
+            },
+            { deliverAs: "steer" },
+        );
     });
 
     pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded }, theme) => {
@@ -617,20 +650,21 @@ export default function (pi: ExtensionAPI) {
         name: "delegate",
         label: "Delegate",
         description: [
-            "Start a background Pi agent on one focused task. Returns a job id immediately; the agent's report arrives later as a follow-up message.",
+            "Start a delegate: a background run of one of the agents below on one focused task. Returns a job id immediately; the report arrives later as a follow-up message.",
             "",
             "Available agents (default model in parentheses):",
             ...agentList,
             "",
-            "The agent gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
+            "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
         promptGuidelines: [
-            "Delegation is authorized: use delegate proactively, without waiting for the user to ask, whenever work matches an agent's description. Your context is the scarce resource: everything you read stays in it, is re-sent with every later request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
-            "Delegate when you need the conclusion rather than the raw material: open-ended searches (more than ~3 queries), understanding code across several files you will not edit, web research, long command output such as test runs and builds, independent subtasks, and reviews of finished work. Work directly for a known file path, one targeted search, a quick command, or code you will edit yourself. Once direct searching passes ~3 queries, delegate the rest.",
-            "Start every independent delegate before waiting on any, ideally in one message. Keep decisions and synthesis yourself. Trust reports instead of repeating their searches; read only what you act on.",
-            "While delegates run, stay outside their scopes; delegate any new context-heavy investigation before tracing it yourself. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
+            "You are the orchestrator, and delegating is your default: plan, split the work, brief delegates, and integrate their reports. Delegation is authorized; do not wait for the user to ask. Your context is the scarce resource: everything you read stays in it, is re-sent with every later request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
+            "Delegate exploration, research, implementation beyond a small edit, build/test/debug loops, and reviews. Work directly only for reading one known file or the lines you are about to edit, one targeted search, a small edit (about 30 lines in one file), a quick verification (one test run or one cited line), or a command the user asked you to run. Shell one-liners and scripts that search or read code count as exploration, not quick commands.",
+            "Your failure mode is drifting into doing the work yourself, one quick search at a time. Decide what to delegate before your first exploratory call; if one targeted search does not settle it, delegate the rest.",
+            "Start every independent delegate before waiting on any, ideally in one message. Trust reports instead of repeating their searches; check only what you act on. If a report falls short, delegate a follow-up that names the gap instead of redoing the work yourself.",
+            "While delegates run, stay outside their scopes. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
@@ -638,7 +672,7 @@ export default function (pi: ExtensionAPI) {
             description: Type.String({
                 description: "Short 3-8 word summary of this delegation, shown in the transcript.",
             }),
-            task: Type.String({ description: "Self-contained brief; the agent cannot see this conversation." }),
+            task: Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
             model: Type.Optional(
                 Type.String({ description: "Model tier (cheap, balanced, strong) or an explicit provider/model." }),
             ),
