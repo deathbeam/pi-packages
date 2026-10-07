@@ -313,6 +313,7 @@ const registered = [];
 let inspect;
 let renderReport;
 const deliveries = [];
+const savedEntries = [];
 const delivered = new Promise((resolve) => deliveries.push(resolve));
 const deliveredSecond = new Promise((resolve) => deliveries.push(resolve));
 extension({
@@ -330,6 +331,7 @@ extension({
         registered.push(tool);
     },
     getActiveTools: () => ["read"],
+    appendEntry: (customType, data) => savedEntries.push({ type: "custom", customType, data }),
 });
 let notice;
 await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = message) } });
@@ -823,6 +825,30 @@ try {
     await reopening;
     tui.terminal.rows = 24;
     assert.equal(screens, 2);
+    // pi --continue loads a fresh extension; finished jobs come back from the session branch.
+    let restoreSession;
+    let restoredInspect;
+    extension({
+        on: (event, handler) => event === "session_start" && (restoreSession = handler),
+        registerCommand: (name, command) => name === "delegate" && (restoredInspect = command),
+        registerTool() {},
+        registerMessageRenderer() {},
+        sendMessage() {},
+        appendEntry() {},
+        getActiveTools: () => [],
+    });
+    restoreSession({}, { sessionManager: { getBranch: () => savedEntries } });
+    tui.terminal.rows = 40;
+    const restoredReady = new Promise((resolve) => (showViewer = resolve));
+    const restoring = restoredInspect.handler("", { mode: "tui", ui });
+    const restored = await Promise.race([restoredReady, timeout]);
+    const restoredText = restored.render(80).join("\n");
+    assert.match(restoredText, /second run/);
+    assert.match(restoredText, /Final parent guidance/);
+    restored.handleInput("\x1b");
+    await restoring;
+    tui.terminal.rows = 24;
+    assert.equal(screens, 3);
     const cancel = registered.find((tool) => tool.name === "delegate_cancel");
     const tuiCtx = { ...ctx, mode: "tui", hasUI: true, ui };
     const cancelled = await delegate.execute(

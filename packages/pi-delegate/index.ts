@@ -100,6 +100,7 @@ const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
 const REMINDER_MESSAGE = "delegate-reminder";
+const JOB_ENTRY = "delegate-job";
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powershell", "web_search", "web_fetch"]);
 const FIRST_REMINDER_AT = 5;
 const TASK_PREVIEW_LINES = 5;
@@ -270,7 +271,9 @@ export default function (pi: ExtensionAPI) {
         job.status = status;
         if (detail) addActivity(job, { kind: "status", text: detail });
         const { controller, steer, lastTool, lastDetail, lastResult, ...snapshot } = job;
-        recent.unshift({ ...snapshot, endedAt: Date.now() });
+        const entry: InspectJob = { ...snapshot, endedAt: Date.now() };
+        recent.unshift(entry);
+        pi.appendEntry(JOB_ENTRY, entry);
     };
 
     const jobSnapshot = (job: DelegateJob) => ({
@@ -355,6 +358,17 @@ export default function (pi: ExtensionAPI) {
         recent.length = 0;
         viewing = undefined;
     });
+
+    // Rebuilt from the active branch, like pi's todo example; abandoned branches are alternative histories.
+    const restoreJobs = (ctx: ExtensionContext) => {
+        recent.length = 0;
+        for (const entry of ctx.sessionManager.getBranch()) {
+            if (entry.type !== "custom" || entry.customType !== JOB_ENTRY || !entry.data) continue;
+            recent.unshift(entry.data as InspectJob);
+        }
+    };
+    pi.on("session_start", (_event, ctx) => restoreJobs(ctx));
+    pi.on("session_tree", (_event, ctx) => restoreJobs(ctx));
 
     pi.on("before_agent_start", () => {
         directCalls = 0;
