@@ -20,7 +20,7 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
     "delegate": {
         "agentDirs": ["./.pi/agents"],
         "models": {
-            "cheap": "anthropic/claude-haiku-latest",
+            "cheap": { "model": "anthropic/claude-haiku-latest", "thinking": "low" },
             "balanced": "anthropic/claude-sonnet-latest",
             "strong": "anthropic/claude-opus-latest"
         }
@@ -29,7 +29,9 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
 ```
 
 Relative `agentDirs` resolve against the project cwd, later same-name definitions win. Project `models` override global
-tiers (`cheap`, `balanced`, `strong`), otherwise the child uses the current session model.
+tiers (`cheap`, `balanced`, `strong`); a tier is a `provider/model` string or a `{ "model": "...", "thinking": "..." }`
+object, otherwise the child uses the current session model and thinking level. Thinking resolves from the agent
+frontmatter first, then the tier entry, then the session level.
 
 Agents are Markdown files with frontmatter, the body becomes the child's system prompt:
 

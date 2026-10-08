@@ -173,15 +173,21 @@ function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[] {
     return [...agents.values()];
 }
 
-function resolveModel(
+export function resolveModel(
     value: string | undefined,
     models: Record<string, unknown>,
     current: ExtensionContext["model"],
-): string | undefined {
-    if (value && !MODEL_TIERS.has(value)) return value;
+): { model?: string; thinking?: string } {
+    if (value && !MODEL_TIERS.has(value)) return { model: value };
     const configured = value ? models[value] : undefined;
-    if (typeof configured === "string" && configured) return configured;
-    return current ? `${current.provider}/${current.id}` : undefined;
+    const entry =
+        configured && typeof configured === "object"
+            ? (configured as { model?: unknown; thinking?: unknown })
+            : undefined;
+    const model = typeof configured === "string" ? configured : typeof entry?.model === "string" ? entry.model : "";
+    // Tier thinking only applies when the model itself came from the tier entry.
+    if (model) return { model, thinking: typeof entry?.thinking === "string" ? entry.thinking : undefined };
+    return { model: current ? `${current.provider}/${current.id}` : undefined };
 }
 
 function contextWindowFor(ctx: ExtensionContext, model: string | undefined): number | undefined {
@@ -547,7 +553,7 @@ export default function (pi: ExtensionAPI) {
                             const footer = truncateToWidth(
                                 theme.fg(
                                     "dim",
-                                    `${keyHint("tui.select.up", "previous")} · ${keyHint("tui.select.down", "next")} · ${rawKeyHint("←/→", "switch pane")} · ${keyHint("tui.select.cancel", "close")}`,
+                                    `${keyHint("tui.select.up", "up")} · ${keyHint("tui.select.down", "down")} · ${rawKeyHint("←/→", "switch pane")} · ${keyHint("tui.select.cancel", "close")}`,
                                 ),
                                 width,
                             );
@@ -595,7 +601,6 @@ export default function (pi: ExtensionAPI) {
                         },
                         handleInput(data: string) {
                             if (keys.matches(data, "tui.select.cancel")) done(undefined);
-                            else if (matchesKey(data, "tab")) focus = focus === "list" ? "history" : "list";
                             else if (matchesKey(data, "left")) focus = "list";
                             else if (
                                 matchesKey(data, "right") ||
@@ -683,17 +688,23 @@ export default function (pi: ExtensionAPI) {
                 const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
                 throw new Error(`Unknown agent "${params.agent}". Available agents: ${names}.`);
             }
-            const model = resolveModel(params.model ?? agent.model, config.models ?? {}, ctx.model);
+            const { model, thinking: tierThinking } = resolveModel(
+                params.model ?? agent.model,
+                config.models ?? {},
+                ctx.model,
+            );
             if (!model) throw new Error(`No model found for "${params.agent}".`);
             const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
                 (tool) => !DELEGATION_TOOLS.has(tool),
             );
+            const thinking = agent.thinking ?? tierThinking ?? ctx.thinkingLevel;
+            const displayModel = thinking ? `${model}:${thinking}` : model;
             const job: DelegateJob = {
                 id: randomUUID().slice(0, 8),
                 agent: agent.name,
                 description: params.description.trim(),
                 task: params.task,
-                model,
+                model: displayModel,
                 status: "running",
                 activity: [],
                 tools,
@@ -707,13 +718,11 @@ export default function (pi: ExtensionAPI) {
                 agent: job.agent,
                 description: job.description,
                 task: job.task,
-                model,
+                model: displayModel,
                 tools,
-                // Only a UI can deliver a result that arrives after the tool returned; headless runs must block.
                 background: ctx.hasUI,
             };
             const args = ["--model", model, "--tools", tools.join(",")];
-            const thinking = agent.thinking ?? ctx.thinkingLevel;
             if (thinking) args.push("--thinking", thinking);
             if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
             const entrypoint = process.argv[1];
@@ -741,8 +750,6 @@ export default function (pi: ExtensionAPI) {
             running.set(job.id, job);
             if (!ticker) ticker = setInterval(() => refreshWidget(ctx), SPINNER_INTERVAL_MS);
             refreshWidget(ctx);
-            // The only failure left here is reporting into a session that is being torn down,
-            // and an unhandled rejection would crash pi.
             void run.done
                 .then(
                     (output) => finishJob(ctx, job, output),

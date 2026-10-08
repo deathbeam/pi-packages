@@ -31,6 +31,7 @@ import {
     WIDGET_MAX_LINES,
 } from "./format.ts";
 import { runChild } from "./child.ts";
+import { resolveModel } from "./index.ts";
 
 initTheme("dark");
 
@@ -66,6 +67,25 @@ assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).so
 assert.match(index, /!DELEGATION_TOOLS\.has\(tool\)/);
 assert.match(index, /spawn\(process\.execPath, \[entrypoint, "--mode", "rpc", "--no-session/);
 assert.match(index, /\["--model", model, "--tools", tools\.join\(","\)\]/);
+// Tier entries can pin model and thinking; agent frontmatter still wins, explicit models consult no tier.
+assert.match(index, /agent\.thinking \?\? tierThinking \?\? ctx\.thinkingLevel/);
+const session = { provider: "anthropic", id: "m" };
+assert.deepEqual(resolveModel("anthropic/x", {}, session), { model: "anthropic/x" });
+assert.deepEqual(resolveModel("cheap", { cheap: "anthropic/h" }, session), {
+    model: "anthropic/h",
+    thinking: undefined,
+});
+assert.deepEqual(resolveModel("cheap", { cheap: { model: "google/flash", thinking: "low" } }, session), {
+    model: "google/flash",
+    thinking: "low",
+});
+assert.deepEqual(resolveModel("cheap", { cheap: { model: "google/flash" } }, session), {
+    model: "google/flash",
+    thinking: undefined,
+});
+// A malformed entry falls back to the session model and carries no tier thinking.
+assert.deepEqual(resolveModel("cheap", { cheap: { thinking: "low" } }, session), { model: "anthropic/m" });
+assert.deepEqual(resolveModel(undefined, {}, undefined), { model: undefined });
 assert.match(child, /case "agent_settled"/);
 assert.match(child, /type: "steer", message/);
 // pi skips before_agent_start in runs a delegate report starts, so a prompt section would vanish exactly then.
@@ -616,6 +636,9 @@ try {
         .render(120)
         .join("\n");
     assert.match(launchResult, /Model:[\s\S]*Tools:/);
+    // Display-only suffix: agent frontmatter thinking (low) shows on the model, --model stays raw.
+    assert.match(first.details.model, /:low$/, "frontmatter thinking must suffix the model display");
+    assert.match(index, /thinking \? `\$\{model\}:\$\{thinking\}` : model/, "no-thinking must keep the bare model");
     assert.equal(launch.concat(launchResult).match(/trace it/g)?.length, 1, "launch task shown twice");
     assert.equal(launch.concat(launchResult).match(/first run/g)?.length, 1, "launch description shown twice");
     assert.match(
@@ -742,7 +765,7 @@ try {
     await Promise.race([new Promise((resolve) => (onRender = resolve)), timeout]);
     assert.match(widgetLines.join("\n"), /37k\/1\.0M/);
     assert.doesNotMatch(widgetLines.join("\n"), /\b\d+ tool calls?\b/);
-    view.handleInput("\t");
+    view.handleInput("\x1b[C");
     assert.match(view.render(80)[0], /\[Activity\]/);
     assert.doesNotMatch(view.render(80)[0], /\[Jobs/);
     assert.match(view.render(80).join("\n"), /read src\/104.ts/);
