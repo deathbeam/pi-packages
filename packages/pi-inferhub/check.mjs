@@ -23,7 +23,7 @@ const catalog = {
             input_token_limit: 100000,
             max_output_tokens: 16000,
             reasoning_levels: ["medium", "high", "max"],
-            pricing: { official_in: 0.2, official_out: 0.8 },
+            pricing: { min_ask_in: 0, official_in: 0.2, official_out: 0.8 },
         },
         {
             id: "cc/claude-haiku-4-5",
@@ -34,7 +34,7 @@ const catalog = {
         },
         { id: "cx/gpt-6.1-sol", owned_by: "cx", modality: "text", reasoning_levels: ["low", "medium", "high"] },
         { id: "alias/glm-5.3", owned_by: "alias" },
-        { id: "plain", owned_by: "other", modality: "text" },
+        { id: "plain", owned_by: "other", modality: "text", input_token_limit: 0, max_output_tokens: 0 },
         { id: "image-out", output_modality: "image" },
         { owned_by: "no-id" },
     ],
@@ -97,7 +97,7 @@ try {
         max: null,
     });
 
-    // Without advertised levels every Pi level stays except xhigh and max; missing limits get defaults.
+    // Without advertised levels every Pi level stays except xhigh and max; missing or zero limits get defaults.
     assert.equal(models["plain"].name, "plain");
     assert.deepEqual(models["plain"].input, ["text"]);
     assert.deepEqual(models["plain"].cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
@@ -117,10 +117,10 @@ try {
     assert.equal(models["zhipu/glm-5.3"].name, "zhipu/glm-5.3");
     assert.equal(models["zhipu/glm-5.3"].thinkingLevelMap.max, "max");
 
-    // An alias merges its same-named entries: common levels, narrowest limits, cheapest prices, text-only input.
+    // An alias merges its same-named entries: common levels, narrowest limits, cheapest prices (0 is a real price), text-only input.
     assert.equal(models["alias/glm-5.3"].name, "GLM 5.3");
     assert.deepEqual(models["alias/glm-5.3"].input, ["text"]);
-    assert.deepEqual(models["alias/glm-5.3"].cost, { input: 0.2, output: 0.8, cacheRead: 0, cacheWrite: 0 });
+    assert.deepEqual(models["alias/glm-5.3"].cost, { input: 0, output: 0.8, cacheRead: 0, cacheWrite: 0 });
     assert.equal(models["alias/glm-5.3"].contextWindow, 100000);
     assert.equal(models["alias/glm-5.3"].maxTokens, 16000);
     assert.deepEqual(models["alias/glm-5.3"].thinkingLevelMap, {

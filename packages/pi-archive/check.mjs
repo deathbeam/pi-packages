@@ -4,27 +4,20 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { Readable } from "node:stream";
-import {
-    default as piArchive,
-    searchSessions,
-    entryText,
-    matchesAll,
-    excerptAround,
-    projectLabel,
-    firstUserTitle,
-    recentSessions,
-    formatResults,
-} from "./index.ts";
+import piArchive from "./index.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-archive-check-"));
 const projA = path.join(root, "--home-user-git-projA--");
 const projB = path.join(root, "--home-user-git-projB--");
+const projShort = path.join(root, "--home-user--");
 fs.mkdirSync(projA);
 fs.mkdirSync(projB);
+fs.mkdirSync(projShort);
 
 const line = (obj) => JSON.stringify(obj);
+const aaaa = path.join(projA, "2026-09-01T00-00-00-000Z_aaaa.jsonl");
 fs.writeFileSync(
-    path.join(projA, "2026-09-01T00-00-00-000Z_aaaa.jsonl"),
+    aaaa,
     [
         line({ type: "session", version: 3, id: "aaaa" }),
         line({
@@ -57,6 +50,17 @@ fs.writeFileSync(
                 content: [{ type: "text", text: "Error EACCES: jwt key file unreadable" }],
             },
         }),
+        // Entries that must never match: search_archive's own results, system messages, non-message entries.
+        line({
+            type: "message",
+            message: {
+                role: "toolResult",
+                toolName: "search_archive",
+                content: [{ type: "text", text: "derived selfskip hit" }],
+            },
+        }),
+        line({ type: "model_change", model: "modelskip" }),
+        line({ type: "message", message: { role: "system", content: "confidential systemskip memo" } }),
         "",
     ].join("\n"),
 );
@@ -82,7 +86,7 @@ fs.writeFileSync(
             type: "message",
             id: "m1",
             parentId: null,
-            message: { role: "user", content: [{ type: "text", text: "jwt again but this session is the live one" }] },
+            message: { role: "user", content: "jwt again but this session is the live one" },
         }),
         ...Array.from({ length: 2 }, (_u, i) =>
             line({ type: "message", message: { role: "user", content: `signal intent ${i}` } }),
@@ -101,8 +105,18 @@ fs.writeFileSync(
     line({ type: "message", message: { role: "user", content: "literal\u2028and\u2029separators plain string" } }) +
         "\n",
 );
+// The oversized first record spans read chunks and must be skipped, not dropped.
+const largeFile = path.join(projA, "2026-09-05T00-00-00-000Z_eeee.jsonl");
+const largeFd = fs.openSync(largeFile, "w");
+fs.writeFileSync(largeFd, Buffer.alloc(16 * 1024 * 1024 + 128 * 1024, 120));
 fs.writeFileSync(
-    path.join(projB, "2026-09-06T00-00-00-000Z_ffff.jsonl"),
+    largeFd,
+    `\n${line({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "largeentry survives" }] } })}\n${line({ type: "message", message: { role: "user", content: "late title" } })}\n`,
+);
+fs.closeSync(largeFd);
+const ffff = path.join(projB, "2026-09-06T00-00-00-000Z_ffff.jsonl");
+fs.writeFileSync(
+    ffff,
     [
         line({ type: "session", version: 3, id: "ffff" }),
         ...Array.from({ length: 6 }, (_u, i) =>
@@ -111,186 +125,208 @@ fs.writeFileSync(
         "",
     ].join("\n"),
 );
-const largeFile = path.join(projB, "2026-09-05T00-00-00-000Z_eeee.jsonl");
-const largeFd = fs.openSync(largeFile, "w");
-fs.writeFileSync(largeFd, Buffer.alloc(16 * 1024 * 1024 + 128 * 1024, 120)); // oversized record spans chunks
 fs.writeFileSync(
-    largeFd,
-    `\n${line({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "largeentry survives" }] } })}\n${line({ type: "message", message: { role: "user", content: "late title" } })}\n`,
+    path.join(projShort, "2026-09-07T00-00-00-000Z_gggg.jsonl"),
+    [
+        line({ type: "session", version: 3, id: "gggg" }),
+        line({ type: "message", message: { role: "user", content: "zephyr works in short projects" } }),
+        line({ type: "message", message: { role: "user", content: "x".repeat(400) + "needle" + "y".repeat(400) } }),
+        "",
+    ].join("\n"),
 );
-fs.closeSync(largeFd);
+// No user message: the recent-sessions hint falls back to "(no user message)".
+fs.writeFileSync(
+    path.join(projA, "2026-09-08T00-00-00-000Z_hhhh.jsonl"),
+    [
+        line({ type: "session", version: 3, id: "hhhh" }),
+        line({
+            type: "message",
+            message: { role: "assistant", content: [{ type: "text", text: "assistant only entry" }] },
+        }),
+        "",
+    ].join("\n"),
+);
+// mtimes drive newest-first ranking; make them match the dates in the file names.
+for (const dir of [projA, projB, projShort]) {
+    for (const name of fs.readdirSync(dir)) {
+        const at = new Date(name.slice(0, 10));
+        fs.utimesSync(path.join(dir, name), at, at);
+    }
+}
 
-// entryText: skips thinking, reads compaction summaries
-const et = entryText({
-    type: "message",
-    message: {
-        role: "assistant",
-        content: [
-            { type: "thinking", thinking: "x" },
-            { type: "text", text: "hello" },
-        ],
+// Everything below goes through the only public seams: the registered tool and the before_agent_start hook.
+let tool;
+let beforeAgentStart;
+await piArchive({
+    registerTool: (t) => (tool = t),
+    on: (event, handler) => {
+        if (event === "before_agent_start") beforeAgentStart = handler;
     },
 });
-assert.equal(et?.text, "hello");
-assert.equal(entryText({ type: "compaction", summary: "sum" })?.role, "summary");
-assert.equal(entryText({ type: "model_change" }), null);
-assert.equal(entryText({ type: "message", message: { role: "user", content: "plain string" } })?.text, "plain string");
-assert.equal(entryText({ type: "message", message: { role: "system", content: "not searchable" } }), null);
-assert.equal(
-    entryText({
-        type: "message",
-        message: { role: "toolResult", toolName: "search_archive", content: [{ type: "text", text: "derived hit" }] },
-    }),
-    null,
-    "archive search results should not match themselves",
-);
+const archiveCtx = (entries = [], { dir = projA, file = currentFile } = {}) => ({
+    sessionManager: {
+        getEntries: () => entries,
+        getSessionDir: () => dir,
+        getSessionFile: () => file,
+    },
+});
+const search = async (params, ctx = archiveCtx(), signal) => {
+    const r = await tool.execute("id", params, signal, undefined, ctx);
+    return { text: r.content[0].text, details: r.details };
+};
+const hitLines = (text) => text.split("\n").filter((l) => l.startsWith("- "));
+const hits = async (params) => hitLines((await search(params)).text);
 
-assert.ok(matchesAll("Fix The JWT Bug", ["jwt", "bug"]));
-assert.ok(!matchesAll("Fix The JWT Bug", ["jwt", "renderer"]));
+// Ranking: current session first, then this project; compaction summaries and tool results are searchable.
+const jwt = await search({ query: "jwt" });
+assert.equal(jwt.details.matchCount, 4);
+assert.match(jwt.text, /\[this session \| 2026-09-03\]/);
+assert.match(jwt.text, /\[other session in this project \| 2026-09-01\]/);
+assert.deepEqual(hitLines(jwt.text), [
+    "- user: jwt again but this session is the live one",
+    "- summary: Fixed jwt refresh; expiry 5->30 min",
+    "- user: fix the jwt auth refresh bug",
+    "- toolResult: Error EACCES: jwt key file unreadable",
+]);
+assert.equal(jwt.text.split(currentFile).length - 1, 1);
+assert.equal(jwt.text.split(aaaa).length - 1, 1);
 
-assert.ok(excerptAround("x".repeat(400) + "needle" + "y".repeat(400), ["needle"]).includes("needle"));
-assert.ok(excerptAround("a".repeat(400), ["needle"]).startsWith("a".repeat(300) + "…")); // no match: truncated prefix + ellipsis
+// Thinking blocks are excluded from message text.
+assert.deepEqual(await hits({ query: "token" }), ["- assistant: the token expiry was 5 minutes, raised to 30"]);
 
-assert.equal(projectLabel("--home-deathbeam-git-dotfiles--"), "git/dotfiles");
-assert.equal(projectLabel("--home-user--"), "home/user");
+// All terms must appear in one entry.
+assert.match((await search({ query: "jwt renderer" })).text, /No matches for "jwt renderer"/);
 
-// search: ranking (current session first, then same project), AND terms, compaction hit
-const res = await searchSessions(root, "jwt", { currentFile, currentDir: projA });
-assert.equal(res.matches.length, 4);
-assert.equal(res.matches[0].currentSession, true);
-assert.equal(res.matches[0].role, "user");
-assert.equal(res.matches[1].sameProject, true);
-assert.equal(res.matches[1].date, "2026-09-01");
-assert.ok(res.matches.some((m) => m.role === "summary"));
-assert.ok(res.matches.some((m) => m.role === "toolResult" && m.excerpt.includes("EACCES")));
-assert.ok(res.matches.some((m) => m.excerpt.includes("30")));
-assert.match(formatResults("jwt", res), /\[this session \|/);
-assert.match(formatResults("jwt", res), /\[other session in this project \|/);
-assert.equal(formatResults("jwt", res).split(res.matches[1].file).length - 1, 1);
-const favored = await searchSessions(root, "signal", { currentFile, currentDir: projA });
-assert.deepEqual(
-    favored.matches.map((m) => m.role),
-    ["user", "user", "toolResult"],
-);
-assert.deepEqual(
-    favored.matches.map((m) => m.excerpt),
-    ["signal intent 1", "signal intent 0", "signal noise 4"],
-);
+// Dialogue is preferred over tool hits: two user messages plus one tool result.
+assert.deepEqual(await hits({ query: "signal" }), [
+    "- user: signal intent 1",
+    "- user: signal intent 0",
+    "- toolResult: signal noise 4",
+]);
+assert.deepEqual(await hits({ query: "signal", perSession: 1 }), ["- user: signal intent 1"]);
 
-// AND across terms finds nothing in projB
-const none = await searchSessions(root, "jwt renderer", {});
-assert.equal(none.matches.length, 0);
+// Project labels come from encoded dir names: the last two segments, or all of them when short.
+const renderer = await search({ query: "renderer", session: "projB" });
+assert.match(renderer.text, /\[git\/projB \| 2026-09-02\]/);
+assert.deepEqual(hitLines(renderer.text), ["- user: unrelated work on the renderer"]);
+assert.equal(renderer.details.truncated, false);
+const zephyr = await search({ query: "zephyr" });
+assert.match(zephyr.text, /\[home\/user \| 2026-09-07\]/);
+assert.deepEqual(hitLines(zephyr.text), ["- user: zephyr works in short projects"]);
 
-// session filter
-const filtered = await searchSessions(root, "renderer", { sessionFilter: "projB" });
-assert.equal(filtered.matches[0].project, "git/projB");
+// Excerpts keep 150 chars either side of the first hit, with ellipses when trimmed.
+const [needle] = await hits({ query: "needle" });
+assert.ok(needle.startsWith("- user: …" + "x".repeat(150) + "needle"), "150 chars before the hit");
+assert.ok(needle.endsWith("needle" + "y".repeat(144) + "…"), "150 chars after the hit start");
 
-// LF streaming must not split literal U+2028/U+2029, and oversized records must not be silently omitted.
-assert.equal((await searchSessions(root, "literal", {})).matches.length, 1);
-const large = await searchSessions(root, "largeentry", {});
-assert.equal(large.matches.length, 1);
-assert.equal(large.truncated, true);
-assert.equal(await firstUserTitle(largeFile), "late title");
-
-// limit
-const limited = await searchSessions(root, "jwt", { currentFile, currentDir: projA, limit: 1 });
-assert.equal(limited.matches.length, 1);
-assert.equal(limited.limitReached, true);
-assert.equal(limited.scanIncomplete, false);
-assert.match(formatResults("jwt", limited), /Result limit reached/);
-assert.doesNotMatch(formatResults("jwt", limited), /Search incomplete/);
-for (const limit of [0, -1, 1.5, Infinity, 101]) {
-    await assert.rejects(searchSessions(root, "jwt", { limit }), /limit must be an integer/);
+// search_archive results, system messages, and non-message entries never match.
+for (const term of ["selfskip", "systemskip", "modelskip"]) {
+    assert.match((await search({ query: term })).text, /No matches/, `${term} entries must not match`);
 }
-await assert.rejects(searchSessions(root, "", { limit: 0 }), /limit must be an integer/);
 
-const capped = await searchSessions(root, "capmark", {});
-assert.equal(capped.matches.length, 3);
-assert.deepEqual(
-    capped.matches.map((m) => m.excerpt),
-    [5, 4, 3].map((i) => `capmark hit number ${i}`),
-);
-assert.match(formatResults("capmark", capped), /at most 3 per session file/);
-assert.equal(formatResults("capmark", capped).split(capped.matches[0].file).length - 1, 1);
-const page1 = await searchSessions(root, "capmark", { perSession: 6, limit: 2 });
-const page2 = await searchSessions(root, "capmark", { perSession: 6, limit: 2, offset: 2 });
-assert.deepEqual(
-    page1.matches.map((m) => m.excerpt),
-    ["capmark hit number 5", "capmark hit number 4"],
-);
-assert.deepEqual(
-    page2.matches.map((m) => m.excerpt),
-    ["capmark hit number 3", "capmark hit number 2"],
-);
-assert.match(formatResults("capmark", page2), /at offset 2 — at most 6 per session file/);
-assert.match(
-    formatResults("capmark", await searchSessions(root, "capmark", { perSession: 6, offset: 6 })),
-    /No matches.*after offset 6/,
-);
-assert.equal(
-    (await searchSessions(root, "signal", { currentFile, currentDir: projA, perSession: 1 })).matches[0].role,
-    "user",
-);
-assert.equal(
-    (await searchSessions(root, "jwt", { currentFile, currentDir: projA, offset: 1, limit: 1 })).matches[0].sameProject,
-    true,
-);
+// LF-only scanning: literal U+2028/U+2029 inside a JSON string do not split the line.
+assert.deepEqual(await hits({ query: "literal" }), ["- user: literal and separators plain string"]);
+
+// Oversized records are skipped, not dropped, and mark the scan incomplete.
+const large = await search({ query: "largeentry" });
+assert.deepEqual(hitLines(large.text), ["- assistant: largeentry survives"]);
+assert.match(large.text, /\[other session in this project \| 2026-09-05\]/);
+assert.equal(large.details.truncated, true);
+assert.match(large.text, /Search incomplete/);
+
+// The limit stops the scan before the oversized file, so only the limit note appears.
+const limited = await search({ query: "jwt", limit: 1 });
+assert.deepEqual(hitLines(limited.text), ["- user: jwt again but this session is the live one"]);
+assert.equal(limited.details.truncated, true);
+assert.match(limited.text, /Result limit reached/);
+assert.doesNotMatch(limited.text, /Search incomplete/);
+
+// Options are validated before anything is scanned.
+for (const limit of [0, -1, 1.5, Infinity, 101]) {
+    await assert.rejects(search({ query: "jwt", limit }), /limit must be an integer/);
+}
+await assert.rejects(search({ query: "", limit: 0 }), /limit must be an integer/);
 for (const perSession of [0, -1, 1.5, Infinity, 1001]) {
-    await assert.rejects(searchSessions(root, "", { perSession }), /perSession must be an integer/);
+    await assert.rejects(search({ query: "", perSession }), /perSession must be an integer/);
 }
 for (const offset of [-1, 1.5, Infinity, 10001]) {
-    await assert.rejects(searchSessions(root, "", { offset }), /offset must be an integer/);
+    await assert.rejects(search({ query: "", offset }), /offset must be an integer/);
 }
 
-// Missing archives are normal; permission errors are not clean misses.
-assert.deepEqual(await searchSessions(path.join(root, "no-such-root"), "jwt", {}), {
-    matches: [],
-    bytesScanned: 0,
-    filesScanned: 0,
-    truncated: false,
-});
+// perSession keeps the newest hits per file; offset pages across ranked hits.
+const capped = await search({ query: "capmark" });
+assert.deepEqual(
+    hitLines(capped.text),
+    [5, 4, 3].map((i) => `- user: capmark hit number ${i}`),
+);
+assert.match(capped.text, /at most 3 per session file/);
+assert.equal(capped.text.split(ffff).length - 1, 1);
+assert.deepEqual(await hits({ query: "capmark", perSession: 6, limit: 2 }), [
+    "- user: capmark hit number 5",
+    "- user: capmark hit number 4",
+]);
+const page2 = await search({ query: "capmark", perSession: 6, limit: 2, offset: 2 });
+assert.deepEqual(hitLines(page2.text), ["- user: capmark hit number 3", "- user: capmark hit number 2"]);
+assert.match(page2.text, /at offset 2 — at most 6 per session file/);
+assert.match((await search({ query: "capmark", perSession: 6, offset: 6 })).text, /No matches.*after offset 6/);
+assert.match(
+    (await search({ query: "jwt", offset: 1, limit: 1 })).text,
+    /\[other session in this project \| 2026-09-01\]/,
+);
+
+// A missing archive is a clean miss.
+const missing = await search({ query: "jwt" }, archiveCtx([], { dir: path.join(root, "no-such-root", "sess") }));
+assert.match(missing.text, /No matches for "jwt" in 0 scanned session files\.$/);
+assert.deepEqual(missing.details, { matchCount: 0, filesScanned: 0, truncated: false });
+
 const deny = (code) => Object.assign(new Error(`${code}: denied`), { code });
 const realReaddir = fs.promises.readdir;
+// Permission errors on the archive root must not look like clean misses.
 fs.promises.readdir = async (dir, opts) => {
     if (dir === root) throw deny("EACCES");
     return realReaddir(dir, opts);
 };
 try {
-    await assert.rejects(searchSessions(root, "jwt", {}), { code: "EACCES" });
+    await assert.rejects(search({ query: "jwt" }), { code: "EACCES" });
 } finally {
     fs.promises.readdir = realReaddir;
 }
-
+// An unreadable project dir makes the search incomplete but keeps its matches.
 fs.promises.readdir = async (dir, opts) => {
     if (dir === projB) throw deny("EACCES");
     return realReaddir(dir, opts);
 };
 try {
-    const partial = await searchSessions(root, "jwt", {});
-    assert.ok(partial.matches.length > 0);
-    assert.equal(partial.truncated, true);
+    const partial = await search({ query: "jwt" });
+    assert.ok(partial.details.matchCount > 0);
+    assert.equal(partial.details.truncated, true);
+    assert.match(partial.text, /Search incomplete/);
 } finally {
     fs.promises.readdir = realReaddir;
 }
 
-// abort: signal already aborted yields zero matches, truncated flag set
+// An aborted signal yields zero matches and an incomplete scan.
 const ac = new AbortController();
 ac.abort();
-const aborted = await searchSessions(root, "jwt", {}, ac.signal);
-assert.equal(aborted.matches.length, 0);
-assert.equal(aborted.truncated, true);
+const aborted = await search({ query: "jwt" }, archiveCtx(), ac.signal);
+assert.equal(aborted.details.matchCount, 0);
+assert.equal(aborted.details.truncated, true);
+assert.match(aborted.text, /Search incomplete/);
 
 // Vanished files are skipped; unreadable files make the search incomplete.
 const realStat = fs.promises.stat;
 for (const code of ["ENOENT", "EACCES"]) {
-    const truncated = code === "EACCES";
     fs.promises.stat = async () => {
         throw deny(code);
     };
     try {
-        const result = await searchSessions(root, "jwt", {});
-        assert.equal(result.matches.length, 0);
-        assert.equal(result.truncated, truncated);
+        const result = await search({ query: "jwt" });
+        assert.equal(result.details.matchCount, 0);
+        assert.equal(result.details.truncated, code === "EACCES");
+        assert.match(
+            result.text,
+            code === "EACCES" ? /Search incomplete/ : /No matches for "jwt" in 0 scanned session files\.$/,
+        );
     } finally {
         fs.promises.stat = realStat;
     }
@@ -305,48 +341,14 @@ fs.createReadStream = () =>
         })(),
     );
 try {
-    assert.equal((await searchSessions(root, "missing", { sessionFilter: "projA" })).truncated, true);
+    const failed = await search({ query: "missing", session: "projA" });
+    assert.match(failed.text, /No matches for "missing"/);
+    assert.match(failed.text, /Search incomplete/);
 } finally {
     fs.createReadStream = realStream;
 }
 
-// Zero hits from an incomplete search must not claim a complete no-match result.
-const empty = { matches: [], bytesScanned: 1, filesScanned: 1, truncated: true };
-assert.match(formatResults("nothing", empty), /Search incomplete/);
-assert.doesNotMatch(formatResults("nothing", { ...empty, truncated: false }), /Search incomplete/);
-
-// titles + recent sessions
-assert.equal(
-    await firstUserTitle(path.join(projA, "2026-09-01T00-00-00-000Z_aaaa.jsonl")),
-    "fix the jwt auth refresh bug",
-);
-assert.equal(await firstUserTitle(path.join(projB, "does-not-exist.jsonl")), null);
-assert.equal(
-    await firstUserTitle(path.join(projB, "2026-09-04T00-00-00-000Z_dddd.jsonl")),
-    "literal\u2028and\u2029separators plain string",
-);
-const recent = recentSessions(projA, currentFile, 5);
-assert.equal(recent.length, 1);
-assert.equal(recent[0].name, "2026-09-01T00-00-00-000Z_aaaa.jsonl");
-
-// Keep the retrieval rule in both the system guidelines and the tool schema (used with custom SYSTEM.md).
-let registeredTool;
-let beforeAgentStart;
-await piArchive({
-    registerTool: (tool) => (registeredTool = tool),
-    on: (event, handler) => {
-        if (event === "before_agent_start") beforeAgentStart = handler;
-    },
-});
-assert.match(registeredTool.promptGuidelines?.join("\n") ?? "", /compaction.*search_archive/is);
-assert.match(registeredTool.description, /compaction.*search_archive/is);
-const archiveCtx = (entries, file = currentFile) => ({
-    sessionManager: {
-        getEntries: () => entries,
-        getSessionDir: () => projA,
-        getSessionFile: () => file,
-    },
-});
+// The hint lists recent sessions newest-first, titled with their first user message.
 assert.equal(await beforeAgentStart({}, archiveCtx([{ type: "message" }])), undefined);
 assert.equal(
     await beforeAgentStart({}, archiveCtx([{ type: "custom_message", customType: "archive-memory" }])),
@@ -354,12 +356,18 @@ assert.equal(
 );
 const hint = (await beforeAgentStart({}, archiveCtx([])))?.message?.content;
 assert.match(hint ?? "", /^Recent sessions in this project/);
-assert.doesNotMatch(hint, /\[pi-archive\]/);
-assert.match(hint, /fix the jwt auth refresh bug/);
+assert.match(
+    hint,
+    /- 2026-09-08: \(no user message\)\n- 2026-09-05: late title\n- 2026-09-01: fix the jwt auth refresh bug/,
+);
 assert.ok(
-    (await beforeAgentStart({}, archiveCtx([], path.join(projA, "new-session.jsonl"))))?.message,
+    (await beforeAgentStart({}, archiveCtx([], { file: path.join(projA, "new-session.jsonl") })))?.message,
     "new sessions receive their own titles",
 );
+
+// The retrieval rule lives in both the system guidelines and the tool schema (used with custom SYSTEM.md).
+assert.match(tool.promptGuidelines?.join("\n") ?? "", /compaction.*search_archive/is);
+assert.match(tool.description, /compaction.*search_archive/is);
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log("pi-archive: all checks passed");

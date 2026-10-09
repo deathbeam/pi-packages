@@ -1,11 +1,11 @@
 // Repeated identical no-ops need a hard error; soft hints do not stop model loops.
 
-const NOOP_HARD_LIMIT = 3;
-
 interface NoopEntry {
     payloadKey: string;
     count: number;
 }
+
+const NOOP_HARD_LIMIT = 3;
 
 const noopTracker = new Map<string, NoopEntry>();
 

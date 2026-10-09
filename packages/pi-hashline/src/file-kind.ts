@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { detectSupportedImageMimeTypeFromFile } from "@earendil-works/pi-coding-agent";
 
-export type LoadedFile =
+type LoadedFile =
     | { kind: "directory" }
     | { kind: "image" }
     | { kind: "text"; text: string; hadUtf8DecodeErrors?: true }

@@ -9,6 +9,9 @@ import { computeLineHash, HASH_LENGTH, NIBBLE_STR } from "./hash";
 /** Matches a rendered anchor prefix, e.g. ` 12#ABC:`. */
 const ANCHOR_PREFIX_RE = new RegExp(`^(\\s*\\d+#[${NIBBLE_STR}]{${HASH_LENGTH}}:)`);
 
+const ANCHOR_CONTEXT_LINES = 2;
+const ANCHOR_MAX_OUTPUT_LINES = 12;
+
 /** Strip ANSI escapes and unsafe control/format characters before terminal rendering. */
 export function sanitizeOutput(text: string): string {
     return text
@@ -42,9 +45,6 @@ export function splitVisibleLines(text: string): string[] {
 }
 
 // --- Affected-line computation (for returning anchors after edit) ---
-
-const ANCHOR_CONTEXT_LINES = 2;
-const ANCHOR_MAX_OUTPUT_LINES = 12;
 
 /**
  * Compute the post-edit line range covering changed lines plus context.
@@ -103,30 +103,17 @@ export function computeChangedLineRange(
 ): { firstChangedLine: number; lastChangedLine: number } | null {
     if (original === result) return null;
 
-    function countVisibleLines(text: string): number {
-        if (text.length === 0) {
-            return 0;
-        }
-        let count = 1;
-        let pos = text.indexOf("\n");
-        while (pos !== -1) {
-            count++;
-            pos = text.indexOf("\n", pos + 1);
-        }
-        return text.endsWith("\n") ? count - 1 : count;
-    }
-
     if (original.length === 0) {
         return {
             firstChangedLine: 1,
-            lastChangedLine: countVisibleLines(result),
+            lastChangedLine: splitVisibleLines(result).length,
         };
     }
 
     if (result.startsWith(original) && original.endsWith("\n")) {
         return {
-            firstChangedLine: countVisibleLines(original) + 1,
-            lastChangedLine: countVisibleLines(result),
+            firstChangedLine: splitVisibleLines(original).length + 1,
+            lastChangedLine: splitVisibleLines(result).length,
         };
     }
 
@@ -155,7 +142,7 @@ export function computeChangedLineRange(
     const firstChangedLine = indexToLine(firstDiff + 1, result);
     let lastChangedLine: number;
     if (lastRes < firstDiff) {
-        lastChangedLine = result.length === 0 ? 1 : countVisibleLines(result);
+        lastChangedLine = result.length === 0 ? 1 : splitVisibleLines(result).length;
     } else if (firstDiff === 0 && original.length > 0 && result.endsWith(original)) {
         lastChangedLine = firstChangedLine;
     } else {

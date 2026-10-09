@@ -2,7 +2,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const BASE = "https://api.keenable.ai";
+const DEFAULT_MAX_CHARS = 50_000;
 const TIMEOUT_MS = 60_000;
+const DATE_DESC = "Date (YYYY-MM-DD), ISO timestamp, or relative delta like 7d, 30min.";
 
 async function keen(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<any> {
     const key = process.env.KEENABLE_API_KEY;
@@ -21,8 +23,6 @@ async function keen(path: string, init: RequestInit = {}, signal?: AbortSignal):
     if (!res.ok) throw new Error(`Keenable ${res.status}: ${(await res.text()).slice(0, 300)}`);
     return res.json();
 }
-
-const DATE_DESC = "Date (YYYY-MM-DD), ISO timestamp, or relative delta like 7d, 30min.";
 
 export default function (pi: ExtensionAPI) {
     pi.registerTool({
@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
         parameters: Type.Object({
             url: Type.String({ description: "The URL to fetch." }),
             max_chars: Type.Optional(
-                Type.Integer({ minimum: 1, description: "Max characters of content (default 50000)." }),
+                Type.Integer({ minimum: 1, description: `Max characters of content (default ${DEFAULT_MAX_CHARS}).` }),
             ),
             live: Type.Optional(
                 Type.Boolean({ description: "Fetch live from the source instead of the indexed copy." }),
@@ -93,7 +93,7 @@ export default function (pi: ExtensionAPI) {
             if (p.live) q.set("live", "true");
             if (p.prompt) q.set("prompt", p.prompt);
             const r = await keen(`/v1/fetch?${q}`, {}, signal);
-            const text = `# ${r.title ?? p.url}\n${r.url}\n\n${(r.content ?? "").slice(0, p.max_chars ?? 50000)}`;
+            const text = `# ${r.title ?? p.url}\n${r.url}\n\n${(r.content ?? "").slice(0, p.max_chars ?? DEFAULT_MAX_CHARS)}`;
             return { content: [{ type: "text", text }], details: undefined };
         },
     });

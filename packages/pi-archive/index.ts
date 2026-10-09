@@ -5,15 +5,7 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
-const DEFAULT_PER_SESSION = 3;
-const MAX_PER_SESSION = 1000;
-const MAX_OFFSET = 10000;
-const MAX_SEARCH_LIMIT = 100;
-const READ_CHUNK_BYTES = 64 * 1024;
-const MAX_LINE_BYTES = 16 * 1024 * 1024;
-
-export interface ArchiveMatch {
+interface ArchiveMatch {
     file: string;
     project: string; // short project label, e.g. "git/dotfiles"
     date: string; // from file name, e.g. "2026-09-07"
@@ -23,7 +15,7 @@ export interface ArchiveMatch {
     sameProject: boolean;
 }
 
-export interface SearchOptions {
+interface SearchOptions {
     currentFile?: string;
     currentDir?: string;
     sessionFilter?: string; // substring matched against the encoded cwd dir name
@@ -31,6 +23,21 @@ export interface SearchOptions {
     perSession?: number;
     offset?: number;
 }
+
+const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
+const DEFAULT_PER_SESSION = 3;
+const MAX_PER_SESSION = 1000;
+const MAX_OFFSET = 10000;
+const MAX_SEARCH_LIMIT = 100;
+const READ_CHUNK_BYTES = 64 * 1024;
+const MAX_LINE_BYTES = 16 * 1024 * 1024;
+const EXCERPT_RADIUS = 150;
+const TITLE_MAX_CHARS = 120;
+const OPTION_BOUNDS = [
+    { name: "limit", min: 1, max: MAX_SEARCH_LIMIT },
+    { name: "perSession", min: 1, max: MAX_PER_SESSION },
+    { name: "offset", min: 0, max: MAX_OFFSET },
+] as const;
 
 function parseJsonLine(line: string): any | null {
     try {
@@ -40,16 +47,16 @@ function parseJsonLine(line: string): any | null {
     }
 }
 
-export function projectLabel(dirName: string): string {
+function projectLabel(dirName: string): string {
     const parts = dirName.replace(/^-+|-+$/g, "").split("-");
     return parts.length <= 2 ? parts.join("/") : parts.slice(-2).join("/");
 }
 
-export function fileDate(fileName: string): string {
+function fileDate(fileName: string): string {
     return fileName.slice(0, 10);
 }
 
-export function entryText(entry: unknown): { role: string; text: string } | null {
+function entryText(entry: unknown): { role: string; text: string } | null {
     const e = entry as Record<string, any>;
     const content = e?.message?.content;
     if (
@@ -160,29 +167,30 @@ async function scanJsonLines(
     }
 }
 
-export function parseTerms(query: string): string[] {
+function parseTerms(query: string): string[] {
     return query.toLowerCase().split(/\s+/).filter(Boolean);
 }
 
-export function matchesAll(text: string, terms: string[]): boolean {
+function matchesAll(text: string, terms: string[]): boolean {
     const lower = text.toLowerCase();
     return terms.every((t) => lower.includes(t));
 }
 
-export function excerptAround(text: string, terms: string[], radius = 150): string {
+function excerptAround(text: string, terms: string[]): string {
     const lower = text.toLowerCase();
     let idx = -1;
     for (const t of terms) {
         const i = lower.indexOf(t);
         if (i >= 0 && (idx === -1 || i < idx)) idx = i;
     }
-    const start = idx === -1 ? 0 : Math.max(0, idx - radius);
-    const end = idx === -1 ? radius * 2 : idx + radius;
+    // Callers only reach here after matchesAll, so every term is present and idx >= 0.
+    const start = Math.max(0, idx - EXCERPT_RADIUS);
+    const end = idx + EXCERPT_RADIUS;
     return (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
 }
 
 /** Rank the current session first, then this project, then other projects newest-first. */
-export async function searchSessions(
+async function searchSessions(
     root: string,
     query: string,
     opts: SearchOptions = {},
@@ -199,23 +207,11 @@ export async function searchSessions(
     offset?: number;
 }> {
     const terms = parseTerms(query);
-    if (
-        opts.limit !== undefined &&
-        (!Number.isSafeInteger(opts.limit) || opts.limit < 1 || opts.limit > MAX_SEARCH_LIMIT)
-    ) {
-        throw new RangeError(`limit must be an integer from 1 to ${MAX_SEARCH_LIMIT}`);
-    }
-    if (
-        opts.perSession !== undefined &&
-        (!Number.isSafeInteger(opts.perSession) || opts.perSession < 1 || opts.perSession > MAX_PER_SESSION)
-    ) {
-        throw new RangeError(`perSession must be an integer from 1 to ${MAX_PER_SESSION}`);
-    }
-    if (
-        opts.offset !== undefined &&
-        (!Number.isSafeInteger(opts.offset) || opts.offset < 0 || opts.offset > MAX_OFFSET)
-    ) {
-        throw new RangeError(`offset must be an integer from 0 to ${MAX_OFFSET}`);
+    for (const { name, min, max } of OPTION_BOUNDS) {
+        const value = opts[name];
+        if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max)) {
+            throw new RangeError(`${name} must be an integer from ${min} to ${max}`);
+        }
     }
     if (terms.length === 0) return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: false };
     const limit = opts.limit ?? 20;
@@ -256,7 +252,8 @@ export async function searchSessions(
             }
         }
     }
-    if (signal?.aborted) return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: true };
+    if (signal?.aborted)
+        return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: true, scanIncomplete: true };
 
     const currentDirName = opts.currentDir ? path.basename(opts.currentDir) : undefined;
     const rank = (f: (typeof files)[number]) =>
@@ -264,19 +261,20 @@ export async function searchSessions(
     files.sort((a, b) => rank(a) - rank(b) || b.mtime - a.mtime);
 
     const matches: ArchiveMatch[] = [];
-    // ponytail: live offsets can shift as sessions grow; use entry-ID cursors if paging must be exact.
+    // shortcut: live offsets can shift as sessions grow, use entry-ID cursors when paging must be exact
     let skipped = 0;
     let bytes = 0;
     let filesScanned = 0;
-    let scanIncomplete = incompleteDiscovery;
+    // Only truthiness is consumed; the string records why the scan stopped short.
+    let incompleteReason: string | undefined = incompleteDiscovery ? "partial discovery" : undefined;
     let limitReached = false;
     for (const { file, dir, name } of files) {
         if (signal?.aborted || bytes >= MAX_TOTAL_BYTES) {
-            scanIncomplete = true;
+            incompleteReason ??= signal?.aborted ? "aborted" : "bytes cap";
             break;
         }
         onProgress?.(filesScanned, matches.length);
-        // ponytail: newest hits require scanning each file; index offsets if archive searches get slow.
+        // shortcut: newest hits require scanning each file, index offsets when archive searches get slow
         const fileMessages: ArchiveMatch[] = [];
         const fileTools: ArchiveMatch[] = [];
         const scan = await scanJsonLines(file, MAX_TOTAL_BYTES - bytes, signal, (line) => {
@@ -300,7 +298,7 @@ export async function searchSessions(
         });
         bytes += scan.bytes;
         filesScanned++;
-        // ponytail: prefer dialogue with one tool hit; add relevance ranking if noisy matches persist.
+        // shortcut: prefer dialogue with one tool hit, add relevance ranking when noisy matches persist
         const keepMessages = fileTools.length && perSession > 1 ? perSession - 1 : perSession;
         const selected = fileMessages.slice(-keepMessages).reverse();
         const toolSlots = perSession - selected.length;
@@ -310,15 +308,16 @@ export async function searchSessions(
             else if (matches.length < limit) matches.push(hit);
         }
         if (signal?.aborted || scan.incomplete) {
-            scanIncomplete = true;
+            incompleteReason ??= "scan stopped";
             break;
         }
-        if (scan.oversizedLines > 0) scanIncomplete = true;
+        if (scan.oversizedLines > 0) incompleteReason ??= "oversized line";
         if (matches.length >= limit) {
             limitReached = true;
             break;
         }
     }
+    const scanIncomplete = incompleteReason !== undefined;
     return {
         matches,
         bytesScanned: bytes,
@@ -331,19 +330,18 @@ export async function searchSessions(
     };
 }
 
-export async function firstUserTitle(file: string, maxLen = 120): Promise<string | null> {
+async function firstUserTitle(file: string): Promise<string | null> {
     let title: string | null = null;
     await scanJsonLines(file, Number.MAX_SAFE_INTEGER, undefined, (line) => {
         const et = entryText(parseJsonLine(line));
         if (et?.role !== "user" || !et.text.trim()) return true;
-        title = et.text.length > maxLen ? et.text.slice(0, maxLen) + "…" : et.text;
+        title = et.text.length > TITLE_MAX_CHARS ? et.text.slice(0, TITLE_MAX_CHARS) + "…" : et.text;
         return false;
     });
     return title;
 }
 
-/** Recent session files in a project dir (encoded cwd), newest first. */
-export function recentSessions(
+function recentSessions(
     sessionDir: string,
     excludeFile: string | undefined,
     count: number,
@@ -360,20 +358,16 @@ export function recentSessions(
         if (file === excludeFile) continue;
         try {
             out.push({ file, name, mtime: fs.statSync(file).mtimeMs });
-        } catch {
-            /* skip */
-        }
+        } catch {}
     }
     out.sort((a, b) => b.mtime - a.mtime);
     return out.slice(0, count).map(({ file, name }) => ({ file, name }));
 }
 
-export function formatResults(query: string, result: Awaited<ReturnType<typeof searchSessions>>): string {
+function formatResults(query: string, result: Awaited<ReturnType<typeof searchSessions>>): string {
     const notes = [
         result.limitReached ? "Result limit reached; increase offset to check for more." : "",
-        result.truncated && (!result.limitReached || result.scanIncomplete)
-            ? "Search incomplete; narrow the search or check archive access."
-            : "",
+        result.scanIncomplete ? "Search incomplete; narrow the search or check archive access." : "",
     ].filter(Boolean);
     const note = notes.length ? `\n(${notes.join(" ")})` : "";
     if (result.matches.length === 0) {

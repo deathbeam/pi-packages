@@ -14,20 +14,8 @@ import * as XXH from "xxhashjs";
 export const HASH_LENGTH = 3;
 
 /**
- * Custom 16-character hash alphabet. Deliberately excludes:
- * - Most hex digits: A, C, D, E, F (B is retained to reach 16 letters, so a
- *   hash such as "BBB" can still coincide with a hex-ish token)
- * - Visually confusable letters: D, G, I, L, O (look like digits 0, 6, 1, 1, 0)
- * - Common vowels A, E, I, O, U (prevents accidental English words)
- *
- * 16 characters means each hash character encodes exactly one nibble (4 bits),
- * so an N-char hash is a direct read of the low 4*N bits of xxh32, with no base
- * conversion, and the length-to-entropy relationship stays obvious.
- *
- * At 3 characters, tokens drawn from real uppercase identifiers may
- * coincidentally share the character set. Detectors must not rely on shape
- * alone to distinguish anchors from content; context and position remain
- * the authoritative signals.
+ * One character per nibble: an N-char hash reads the low 4*N bits of xxh32 directly. The alphabet
+ * excludes hex digits, lookalikes, and vowels so hashes rarely coincide with real uppercase tokens.
  */
 export const NIBBLE_STR = "ZPMQVRWSNKTXJBYH";
 /** Anchor hashes are displayed uppercase; input matching tolerates any case. */
@@ -35,6 +23,15 @@ export const HASH_ALPHABET_RE = new RegExp(`^[${NIBBLE_STR}]+$`, "i");
 
 /** Lines containing no alphanumeric character (only punctuation/symbols/whitespace). */
 export const RE_SIGNIFICANT = /[\p{L}\p{N}]/u;
+
+/** Fuzzy-match Unicode replacement regexes for anchor textHint validation. */
+const FUZZY_SINGLE_QUOTES_RE = /[\u2018\u2019\u201A\u201B]/g;
+const FUZZY_DOUBLE_QUOTES_RE = /[\u201C\u201D\u201E\u201F]/g;
+const FUZZY_HYPHENS_RE = /[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g;
+const FUZZY_UNICODE_SPACES_RE = /[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g;
+
+/** First ASCII "..." or Unicode U+2026 in a hint marks it as model-truncated content. */
+const ELLIPSIS_RE = /\.{3}|…/;
 
 /**
  * Normalize a line for hash input: strip \r, trimEnd. Leading indentation
@@ -77,12 +74,6 @@ export function computeLineHash(fileLines: readonly string[], index: number): st
     return computeHashFromContext(prev, curr, next);
 }
 
-/** Fuzzy-match Unicode replacement regexes for anchor textHint validation. */
-const FUZZY_SINGLE_QUOTES_RE = /[\u2018\u2019\u201A\u201B]/g;
-const FUZZY_DOUBLE_QUOTES_RE = /[\u201C\u201D\u201E\u201F]/g;
-const FUZZY_HYPHENS_RE = /[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g;
-const FUZZY_UNICODE_SPACES_RE = /[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g;
-
 /**
  * Whitespace on BOTH ends is normalized away. Trailing drift is classic
  * copy noise; leading drift covers both a space typed after the ":"
@@ -101,9 +92,6 @@ function normalizeFuzzyLine(text: string): string {
 export function isFuzzyEquivalentLine(expected: string, actual: string): boolean {
     return normalizeFuzzyLine(expected) === normalizeFuzzyLine(actual);
 }
-
-/** First ASCII "..." or Unicode U+2026 in a hint marks it as model-truncated content. */
-const ELLIPSIS_RE = /\.{3}|…/;
 
 /**
  * Match a textHint against an actual file line for anchor validation.

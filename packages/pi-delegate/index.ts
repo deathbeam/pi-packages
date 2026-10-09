@@ -1,57 +1,36 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import {
-    CONFIG_DIR_NAME,
-    getAgentDir,
-    getMarkdownTheme,
-    keyHint,
-    parseFrontmatter,
-    rawKeyHint,
-} from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import {
     type Component,
     Container,
-    HStack,
     Markdown,
     Spacer,
     Text,
     TruncatedText,
-    matchesKey,
     truncateToWidth,
-    wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
     COLLAPSED_OUTPUT_LINES,
     type DelegateReport,
-    formatTools,
     jobIdentity,
     jobLine,
-    type JobStatus,
     launchDetails,
     outputPreview,
     reportText,
+    resumeHint,
     SPINNER_INTERVAL_MS,
-    STATUS_COLORS,
     statusText,
     usageStats,
     widgetJobs,
 } from "./format.ts";
-import { type ChildActivity, runChild } from "./child.ts";
-
-type AgentFile = {
-    name: string;
-    description: string;
-    tools?: string[];
-    model?: string;
-    thinking?: string;
-    prompt: string;
-};
+import { runChild } from "./child.ts";
+import { createJobStore, resumeDecision, type DelegateJob } from "./store.ts";
+import { registerInspector } from "./inspector.ts";
+import { configFor, contextWindowFor, discoverAgents, resolveModel } from "./agents.ts";
 
 type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "description" | "task" | "model" | "tools"> & {
     background: boolean;
@@ -65,136 +44,15 @@ type SteerDetails = Pick<
     elapsedMs: number;
 };
 
-type InspectJob = {
-    id: string;
-    agent: string;
-    description: string;
-    task: string;
-    model: string;
-    tools: string[];
-    toolCalls: number;
-    contextTokens?: number;
-    contextWindow?: number;
-    startedAt: number;
-    endedAt?: number;
-    status: JobStatus;
-    activity: ChildActivity[];
-};
-
-type DelegateJob = InspectJob & {
-    lastTool?: string;
-    lastDetail?: string;
-    lastResult?: string;
-    controller: AbortController;
-    steer?: (message: string) => Promise<void>;
-};
-
-type DelegateConfig = {
-    agentDirs?: unknown;
-    models?: Record<string, unknown>;
-};
-
-const DEFAULT_AGENT_DIR = "~/.agents/agents";
-const BUNDLED_AGENT_DIR = fileURLToPath(new URL("./agents", import.meta.url));
 const DELEGATION_TOOLS = new Set(["delegate", "delegate_list", "delegate_steer", "delegate_cancel"]);
-const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
 const REMINDER_MESSAGE = "delegate-reminder";
-const JOB_ENTRY = "delegate-job";
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powershell", "web_search", "web_fetch"]);
 const FIRST_REMINDER_AT = 5;
-
-function expandPath(value: string, cwd: string): string {
-    return resolve(cwd, value.replace(/^~(?=\/|$)/, homedir()));
-}
-
-function stringList(value: unknown): string[] {
-    const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
-    return values
-        .filter((item): item is string => typeof item === "string")
-        .map((item) => item.trim())
-        .filter(Boolean);
-}
-
-function readConfig(path: string): DelegateConfig {
-    try {
-        const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-        if (!parsed || typeof parsed !== "object") return {};
-        const delegate = (parsed as { delegate?: unknown }).delegate;
-        return delegate && typeof delegate === "object" ? (delegate as DelegateConfig) : {};
-    } catch {
-        return {};
-    }
-}
-
-function configFor(cwd: string): DelegateConfig {
-    const global = readConfig(join(getAgentDir(), "settings.json"));
-    const project = readConfig(join(cwd, CONFIG_DIR_NAME, "settings.json"));
-    return {
-        agentDirs: [...stringList(global.agentDirs), ...stringList(project.agentDirs)],
-        models: { ...(global.models ?? {}), ...(project.models ?? {}) },
-    };
-}
-
-function loadAgents(dir: string): AgentFile[] {
-    if (!existsSync(dir)) return [];
-    const agents: AgentFile[] = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (!entry.name.endsWith(".md") || (!entry.isFile() && !entry.isSymbolicLink())) continue;
-        try {
-            const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(
-                readFileSync(join(dir, entry.name), "utf8"),
-            );
-            if (typeof frontmatter.name !== "string" || typeof frontmatter.description !== "string") continue;
-            agents.push({
-                name: frontmatter.name,
-                description: frontmatter.description,
-                tools: stringList(frontmatter.tools),
-                model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-                thinking: typeof frontmatter.thinking === "string" ? frontmatter.thinking : undefined,
-                prompt: body.trim(),
-            });
-        } catch {
-            // One malformed agent file should not disable delegation.
-        }
-    }
-    return agents;
-}
-
-function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[] {
-    const dirs = [BUNDLED_AGENT_DIR, DEFAULT_AGENT_DIR, ...stringList(configuredDirs)].map((dir) =>
-        expandPath(dir, cwd),
-    );
-    const agents = new Map<string, AgentFile>();
-    for (const dir of [...new Set(dirs)]) {
-        for (const agent of loadAgents(dir)) agents.set(agent.name, agent);
-    }
-    return [...agents.values()];
-}
-
-export function resolveModel(
-    value: string | undefined,
-    models: Record<string, unknown>,
-    current: ExtensionContext["model"],
-): { model?: string; thinking?: string } {
-    if (value && !MODEL_TIERS.has(value)) return { model: value };
-    const configured = value ? models[value] : undefined;
-    const entry =
-        configured && typeof configured === "object"
-            ? (configured as { model?: unknown; thinking?: unknown })
-            : undefined;
-    const model = typeof configured === "string" ? configured : typeof entry?.model === "string" ? entry.model : "";
-    // Tier thinking only applies when the model itself came from the tier entry.
-    if (model) return { model, thinking: typeof entry?.thinking === "string" ? entry.thinking : undefined };
-    return { model: current ? `${current.provider}/${current.id}` : undefined };
-}
-
-function contextWindowFor(ctx: ExtensionContext, model: string | undefined): number | undefined {
-    const separator = model?.indexOf("/") ?? -1;
-    if (!model || separator < 0) return undefined;
-    return ctx.modelRegistry.find(model.slice(0, separator), model.slice(separator + 1))?.contextWindow;
-}
+const DELEGATE_SESSION_DIR = join(getAgentDir(), "sessions", "delegates");
+const RESUME_PROMPT = "Continue the task above from where you left off.";
+const INTERRUPTED_MESSAGE = "delegate-interrupted";
 
 function argText(value: unknown): string {
     return typeof value === "string" ? value : "";
@@ -252,36 +110,11 @@ function toolLayout(toolName: string, identity: string, payload: string, theme: 
 }
 
 export default function (pi: ExtensionAPI) {
-    const running = new Map<string, DelegateJob>();
-    const recent: InspectJob[] = [];
-    let viewing: (() => void) | undefined;
+    const store = createJobStore(pi.appendEntry);
     let ticker: ReturnType<typeof setInterval> | undefined;
     // Prompts are read once; drift happens one quick search at a time, so count it and nudge at 5, 10, 20, ...
     let directCalls = 0;
     let nextReminder = FIRST_REMINDER_AT;
-
-    const addActivity = (job: DelegateJob, activity: ChildActivity) => {
-        const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
-        job.activity.push(
-            activity.kind === "assistant" || activity.kind === "user"
-                ? activity
-                : {
-                      ...activity,
-                      text: normalize(activity.text),
-                      detail: activity.detail && normalize(activity.detail),
-                  },
-        );
-        viewing?.();
-    };
-
-    const remember = (job: DelegateJob, status: JobStatus, detail?: string) => {
-        job.status = status;
-        if (detail) addActivity(job, { kind: "status", text: detail });
-        const { controller, steer, lastTool, lastDetail, lastResult, ...snapshot } = job;
-        const entry: InspectJob = { ...snapshot, endedAt: Date.now() };
-        recent.unshift(entry);
-        pi.appendEntry(JOB_ENTRY, entry);
-    };
 
     const jobSnapshot = (job: DelegateJob) => ({
         id: job.id,
@@ -294,22 +127,23 @@ export default function (pi: ExtensionAPI) {
 
     const jobTarget = (rawId: unknown, theme: Theme): string => {
         const id = jobId(rawId);
-        const job = running.get(id) ?? recent.find((item) => item.id === id);
+        const job = store.find(id);
         return job ? jobIdentity(theme, job) : theme.fg("muted", id || "…");
     };
 
     const refreshWidget = (ctx: ExtensionContext) => {
         if (!ctx.hasUI) return;
-        viewing?.();
-        if (running.size === 0) {
+        store.notify();
+        const jobs = store.live();
+        if (jobs.length === 0) {
             ctx.ui.setWidget(WIDGET_KEY, undefined);
             return;
         }
         const theme = ctx.ui.theme;
         const now = Date.now();
-        const { shown, hidden, detail } = widgetJobs([...running.values()]);
+        const { shown, hidden, detail } = widgetJobs(jobs);
         const lines: string[] = [];
-        const counts = `${running.size} running · ${running.size + recent.length} total`;
+        const counts = `${jobs.length} running · ${store.all().length} total`;
         lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
         for (const job of shown) {
             lines.push(
@@ -326,17 +160,18 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setWidget(WIDGET_KEY, lines);
     };
 
-    const stopTicker = () => {
-        if (ticker) clearInterval(ticker);
-        ticker = undefined;
+    // The ticker animates spinners exactly while live jobs exist.
+    const syncTicker = (ctx: ExtensionContext) => {
+        if (store.live().length > 0) ticker ??= setInterval(() => refreshWidget(ctx), SPINNER_INTERVAL_MS);
+        else if (ticker) {
+            clearInterval(ticker);
+            ticker = undefined;
+        }
     };
 
     const finishJob = (ctx: ExtensionContext, job: DelegateJob, output?: string, error?: string) => {
-        // Cancellation was already acknowledged; shutdown has no UI to report into.
-        if (job.controller.signal.aborted) return;
-        running.delete(job.id);
-        remember(job, error ? "failed" : "done", error ? `Error: ${error}` : undefined);
-        if (running.size === 0) stopTicker();
+        if (!store.finish(job, error ? "failed" : "done", error ? `Error: ${error}` : undefined)) return;
+        syncTicker(ctx);
         refreshWidget(ctx);
         const report: DelegateReport = {
             id: job.id,
@@ -359,23 +194,28 @@ export default function (pi: ExtensionAPI) {
     };
 
     pi.on("session_shutdown", () => {
-        stopTicker();
-        for (const job of running.values()) job.controller.abort();
-        running.clear();
-        recent.length = 0;
-        viewing = undefined;
+        if (ticker) clearInterval(ticker);
+        for (const job of store.live()) job.controller.abort();
+        store.clear();
     });
 
     // Rebuilt from the active branch, like pi's todo example; abandoned branches are alternative histories.
-    const restoreJobs = (ctx: ExtensionContext) => {
-        recent.length = 0;
-        for (const entry of ctx.sessionManager.getBranch()) {
-            if (entry.type !== "custom" || entry.customType !== JOB_ENTRY || !entry.data) continue;
-            recent.unshift(entry.data as InspectJob);
-        }
+    const restoreSession = (ctx: ExtensionContext) => {
+        const interrupted = store.restore(ctx.sessionManager.getBranch());
+        // Custom entries never reach the model, so announce the interrupted jobs as a steered message.
+        if (interrupted.length)
+            pi.sendMessage(
+                {
+                    customType: INTERRUPTED_MESSAGE,
+                    content: `<system-reminder>These delegate jobs were interrupted by a restart or crash; their transcripts survive. Resume each with the delegate tool's resume parameter (job id only):\n${interrupted.map((job) => `- ${job.id} ${job.agent}: ${job.description}`).join("\n")}</system-reminder>`,
+                    display: false,
+                },
+                { deliverAs: "steer" },
+            );
     };
-    pi.on("session_start", (_event, ctx) => restoreJobs(ctx));
-    pi.on("session_tree", (_event, ctx) => restoreJobs(ctx));
+
+    pi.on("session_start", (_event, ctx) => restoreSession(ctx));
+    pi.on("session_tree", (_event, ctx) => restoreSession(ctx));
 
     pi.on("before_agent_start", () => {
         directCalls = 0;
@@ -425,224 +265,7 @@ export default function (pi: ExtensionAPI) {
         return container;
     });
 
-    pi.registerCommand("delegate", {
-        description: "Inspect live and recent delegate activity",
-        handler: async (_args, ctx) => {
-            if (ctx.mode !== "tui") return;
-            if (!running.size && !recent.length) {
-                ctx.ui.notify("No delegates in this session yet.", "info");
-                return;
-            }
-            const screen = {
-                overlay: true,
-                overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0 },
-            } as const;
-            try {
-                await ctx.ui.custom((tui, theme, keys, done) => {
-                    let selectedId = running.keys().next().value ?? recent[0]!.id;
-                    let focus: "list" | "history" = "list";
-                    let top: number | undefined;
-                    let historyWidth = 1;
-                    let markdown = new WeakMap<ChildActivity, Markdown>();
-                    const jobs = () => [...running.values(), ...recent];
-                    // Fixed rows: title, top rule, bottom rule, footer.
-                    const bodyHeight = () => Math.max(0, tui.terminal.rows - 4);
-                    const toolsLines = (job: InspectJob, width: number) =>
-                        wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
-                            theme.fg("dim", line),
-                        );
-                    // Fixed rows: header, model, description, rule, counter.
-                    const historyHeight = (job: InspectJob, width: number) =>
-                        Math.max(0, bodyHeight() - 5 - toolsLines(job, width).length);
-                    // ScrollView needs fullscreen layout; window the history in regular TUI too.
-                    const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
-                        const row = (text: string) =>
-                            truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│");
-                        const visible = Math.max(1, Math.floor((bodyHeight() - 1) / 3));
-                        const start = Math.max(
-                            0,
-                            Math.min(selectedIndex - Math.floor(visible / 2), items.length - visible),
-                        );
-                        const lines = items
-                            .slice(start, start + visible)
-                            .flatMap((item, index) => [
-                                row(
-                                    `${theme.fg(start + index === selectedIndex && focus === "list" ? "accent" : "text", start + index === selectedIndex ? "›" : " ")} ${statusText(theme, item.status)} ${jobIdentity(theme, item)}`,
-                                ),
-                                row(theme.fg("muted", `    ${item.description}`)),
-                                row(
-                                    theme.fg(
-                                        "muted",
-                                        `    ${usageStats(item, (item.endedAt ?? Date.now()) - item.startedAt)}`,
-                                    ),
-                                ),
-                            ]);
-                        return [
-                            ...lines,
-                            ...Array(Math.max(0, bodyHeight() - 1 - lines.length)).fill(row("")),
-                            row(theme.fg("dim", `${selectedIndex + 1}/${items.length}`)),
-                        ].slice(0, bodyHeight());
-                    };
-                    const renderEntry = (entry: ChildActivity, width: number): string[] => {
-                        if (entry.kind === "assistant" || entry.kind === "user") {
-                            let md = markdown.get(entry);
-                            if (!md) {
-                                md = new Markdown(entry.text, 0, 0, getMarkdownTheme());
-                                markdown.set(entry, md);
-                            }
-                            return [theme.fg("accent", entry.kind), ...md.render(width), ""];
-                        }
-                        if (entry.kind === "tool")
-                            return [
-                                truncateToWidth(
-                                    theme.fg("toolTitle", entry.text) +
-                                        (entry.detail ? ` ${theme.fg("accent", entry.detail)}` : ""),
-                                    width,
-                                ),
-                            ];
-                        if (entry.kind === "result") return [truncateToWidth(theme.fg("text", entry.text), width)];
-                        // Only failure detail still says anything; the header icon carries the status.
-                        if (!entry.text) return [];
-                        return [truncateToWidth(theme.fg(STATUS_COLORS.failed, entry.text), width)];
-                    };
-                    const renderHistory = (width: number, job: InspectJob): string[] => {
-                        historyWidth = width;
-                        const tools = toolsLines(job, width);
-                        const height = historyHeight(job, width);
-                        const history = job.activity.flatMap((entry) => renderEntry(entry, width));
-                        const maxTop = Math.max(0, history.length - height);
-                        const start = Math.min(top ?? maxTop, maxTop);
-                        const visible = history.slice(start, start + height);
-                        const shown = visible.length
-                            ? visible
-                            : height
-                              ? [theme.fg("muted", "Waiting for activity…")]
-                              : [];
-                        return [
-                            truncateToWidth(`${statusText(theme, job.status)} ${jobIdentity(theme, job)}`, width),
-                            truncateToWidth(theme.fg("dim", job.model), width),
-                            ...tools,
-                            truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
-                            theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
-                            ...shown,
-                            ...Array(Math.max(0, height - shown.length)).fill(""),
-                            truncateToWidth(
-                                theme.fg(
-                                    "dim",
-                                    `${visible.length ? `${start + 1}–${start + visible.length}` : "0"}/${history.length}`,
-                                ),
-                                width,
-                            ),
-                        ].slice(0, bodyHeight());
-                    };
-                    viewing = () => tui.requestRender();
-                    return {
-                        render(width: number) {
-                            const items = jobs();
-                            const selectedIndex = Math.max(
-                                0,
-                                items.findIndex((item) => item.id === selectedId),
-                            );
-                            const selected = items[selectedIndex];
-                            const title = truncateToWidth(
-                                `${theme.fg(focus === "list" ? "accent" : "muted", focus === "list" ? "[Jobs]" : "Jobs")}  ` +
-                                    `${theme.fg(focus === "history" ? "accent" : "muted", focus === "history" ? "[Activity]" : "Activity")}` +
-                                    theme.fg("dim", ` · ${running.size} running · ${items.length} total`),
-                                width,
-                            );
-                            const footer = truncateToWidth(
-                                theme.fg(
-                                    "dim",
-                                    `${keyHint("tui.select.up", "up")} · ${keyHint("tui.select.down", "down")} · ${rawKeyHint("←/→", "switch pane")} · ${keyHint("tui.select.cancel", "close")}`,
-                                ),
-                                width,
-                            );
-                            if (!selected)
-                                return [
-                                    title,
-                                    theme.fg("muted", "No delegates in this session."),
-                                    // Fixed rows: title, top rule, bottom rule, footer.
-                                    ...Array(Math.max(0, tui.terminal.rows - 4)).fill(""),
-                                    footer,
-                                ].slice(0, tui.terminal.rows);
-                            const sidebarWidth = Math.min(
-                                40,
-                                Math.max(16, Math.floor(width * 0.35)),
-                                Math.max(1, width - 2),
-                            );
-                            const body = new HStack(
-                                [
-                                    {
-                                        component: {
-                                            render: (w) => renderJobs(w, items, selectedIndex),
-                                            invalidate() {},
-                                        },
-                                        basis: sidebarWidth,
-                                        shrink: 0,
-                                    },
-                                    {
-                                        component: { render: (w) => renderHistory(w, selected), invalidate() {} },
-                                        basis: 0,
-                                        grow: 1,
-                                    },
-                                ],
-                                { gap: 1 },
-                            ).render(width);
-                            return [
-                                title,
-                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
-                                ...body,
-                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
-                                footer,
-                            ].slice(0, tui.terminal.rows);
-                        },
-                        invalidate() {
-                            markdown = new WeakMap();
-                        },
-                        handleInput(data: string) {
-                            if (keys.matches(data, "tui.select.cancel")) done(undefined);
-                            else if (matchesKey(data, "left")) focus = "list";
-                            else if (
-                                matchesKey(data, "right") ||
-                                (focus === "list" && keys.matches(data, "tui.select.confirm"))
-                            )
-                                focus = "history";
-                            else if (keys.matches(data, "tui.select.up") || keys.matches(data, "tui.select.down")) {
-                                const up = keys.matches(data, "tui.select.up");
-                                const items = jobs();
-                                if (focus === "list") {
-                                    const index = Math.max(
-                                        0,
-                                        items.findIndex((item) => item.id === selectedId),
-                                    );
-                                    selectedId =
-                                        items[Math.max(0, Math.min(items.length - 1, index + (up ? -1 : 1)))]?.id ??
-                                        selectedId;
-                                    top = undefined;
-                                } else {
-                                    const selected = items.find((item) => item.id === selectedId) ?? items[0];
-                                    const length =
-                                        selected?.activity.reduce(
-                                            (sum, entry) => sum + renderEntry(entry, historyWidth).length,
-                                            0,
-                                        ) ?? 0;
-                                    const maxTop = Math.max(
-                                        0,
-                                        length - (selected ? historyHeight(selected, historyWidth) : 0),
-                                    );
-                                    const position = Math.max(0, Math.min(maxTop, top ?? maxTop) + (up ? -1 : 1));
-                                    top = position >= maxTop ? undefined : position;
-                                }
-                            }
-                            tui.requestRender();
-                        },
-                    };
-                }, screen);
-            } finally {
-                viewing = undefined;
-            }
-        },
-    });
+    registerInspector(pi, store);
 
     const cwd = process.cwd();
     const agentList = discoverAgents(cwd, configFor(cwd).agentDirs).map(
@@ -659,6 +282,8 @@ export default function (pi: ExtensionAPI) {
             ...agentList,
             "",
             "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
+            "",
+            "An interrupted, failed, or cancelled job can be continued by passing its job id as `resume`. The agent, task, and description come from the original job, and the model may be overridden. Done jobs need no resume: their reports are already in this session.",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
@@ -671,39 +296,57 @@ export default function (pi: ExtensionAPI) {
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
-            agent: Type.String({ description: "Agent name from the list in this tool's description." }),
-            description: Type.String({
-                description: "Short 3-8 word summary of this delegation, shown in the transcript.",
-            }),
-            task: Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
+            agent: Type.Optional(Type.String({ description: "Agent name from the list in this tool's description." })),
+            description: Type.Optional(
+                Type.String({ description: "Short 3-8 word summary of this delegation, shown in the transcript." }),
+            ),
+            task: Type.Optional(
+                Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
+            ),
             model: Type.Optional(
                 Type.String({ description: "Model tier (cheap, balanced, strong) or an explicit provider/model." }),
+            ),
+            resume: Type.Optional(
+                Type.String({
+                    description:
+                        "Job id of an interrupted, failed, or cancelled delegate to continue; it reuses the original agent, description and task (model may be overridden).",
+                }),
             ),
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
             const config = configFor(ctx.cwd);
             const agents = discoverAgents(ctx.cwd, config.agentDirs);
-            const agent = agents.find((candidate) => candidate.name === params.agent);
+            const resuming = params.resume
+                ? resumeDecision(jobId(params.resume), store.all(), new Set(store.live().map((job) => job.id)))
+                : undefined;
+            if (resuming?.error) throw new Error(resuming.error);
+            const prior = resuming?.job;
+            if (!prior && (!params.agent || !params.description || !params.task))
+                throw new Error(
+                    "agent, description and task are required unless resuming an interrupted, failed, or cancelled job.",
+                );
+            const agent = agents.find((candidate) => candidate.name === (prior?.agent ?? params.agent));
             if (!agent) {
                 const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
-                throw new Error(`Unknown agent "${params.agent}". Available agents: ${names}.`);
+                throw new Error(`Unknown agent "${prior?.agent ?? params.agent}". Available agents: ${names}.`);
             }
             const { model, thinking: tierThinking } = resolveModel(
                 params.model ?? agent.model,
                 config.models ?? {},
                 ctx.model,
             );
-            if (!model) throw new Error(`No model found for "${params.agent}".`);
+            if (!model) throw new Error(`No model found for "${agent.name}".`);
             const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
                 (tool) => !DELEGATION_TOOLS.has(tool),
             );
             const thinking = agent.thinking ?? tierThinking ?? ctx.thinkingLevel;
             const displayModel = thinking ? `${model}:${thinking}` : model;
             const job: DelegateJob = {
-                id: randomUUID().slice(0, 8),
+                // A resumed job keeps its id: the pinned child session id reopens the old transcript.
+                id: prior?.id ?? randomUUID().slice(0, 8),
                 agent: agent.name,
-                description: params.description.trim(),
-                task: params.task,
+                description: (prior?.description ?? params.description ?? "").trim(),
+                task: prior?.task ?? params.task ?? "",
                 model: displayModel,
                 status: "running",
                 activity: [],
@@ -722,33 +365,51 @@ export default function (pi: ExtensionAPI) {
                 tools,
                 background: ctx.hasUI,
             };
-            const args = ["--model", model, "--tools", tools.join(",")];
+            const args = [
+                "--session-id",
+                `delegate-${job.id}`,
+                "--session-dir",
+                DELEGATE_SESSION_DIR,
+                "--model",
+                model,
+                "--tools",
+                tools.join(","),
+            ];
             if (thinking) args.push("--thinking", thinking);
             if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
             const entrypoint = process.argv[1];
             if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
-            const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", "--no-session", ...args], {
+            const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
                 cwd: ctx.cwd,
                 shell: false,
                 stdio: "pipe",
             });
-            const run = runChild(child, params.task, details.background ? job.controller.signal : signal, (update) => {
-                if (job.status !== "running") return;
-                const { activity, ...progress } = update;
-                for (const [key, value] of Object.entries(progress)) {
-                    if (value !== undefined) (job as Record<string, unknown>)[key] = value;
-                }
-                if (activity && details.background) addActivity(job, activity);
-            });
+            store.launch(job, details.background);
+            const run = runChild(
+                child,
+                prior ? RESUME_PROMPT : job.task,
+                details.background ? job.controller.signal : signal,
+                (update) => store.record(job, update),
+                Boolean(prior),
+            );
             job.steer = run.steer;
 
             if (!details.background) {
-                const output = await run.done;
-                return { content: [{ type: "text", text: output }], details };
+                try {
+                    const output = await run.done;
+                    store.finish(job, "done");
+                    return { content: [{ type: "text", text: output }], details };
+                } catch (error) {
+                    // Record the outcome so the launch entry cannot linger as "running".
+                    const cancelled = error instanceof Error && error.message === "Delegate was aborted";
+                    store.finish(job, cancelled ? "cancelled" : "failed");
+                    // Failed jobs are resumable; mirror the failed background report's hint on the thrown error.
+                    if (!cancelled && error instanceof Error) error.message += `\n${resumeHint(job.id)}`;
+                    throw error;
+                }
             }
 
-            running.set(job.id, job);
-            if (!ticker) ticker = setInterval(() => refreshWidget(ctx), SPINNER_INTERVAL_MS);
+            syncTicker(ctx);
             refreshWidget(ctx);
             void run.done
                 .then(
@@ -829,7 +490,7 @@ export default function (pi: ExtensionAPI) {
         }),
         async execute(_toolCallId, params) {
             const id = jobId(params.id);
-            const job = running.get(id);
+            const job = store.live().find((candidate) => candidate.id === id);
             if (!job?.steer) throw new Error(`No running delegate job "${id}".`);
             await job.steer(params.message);
             const details: SteerDetails = {
@@ -876,19 +537,18 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_cancel",
         label: "Cancel delegate",
         description:
-            "Cancel a running background delegate by job id. Requests abort now and forcibly kills the child after five seconds if needed. Cancelled jobs send no follow-up report.",
+            "Cancel a running background delegate by job id. Requests abort now and forcibly kills the child after five seconds if needed. Cancelled jobs send no follow-up report, but can be resumed later with the delegate tool's `resume` parameter.",
         promptSnippet: "Cancel a running background delegate by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id from delegate or delegate_list." }),
         }),
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const id = jobId(params.id);
-            const job = running.get(id);
+            const job = store.live().find((candidate) => candidate.id === id);
             if (!job) throw new Error(`No running delegate job "${id}".`);
-            running.delete(id);
-            remember(job, "cancelled");
+            store.finish(job, "cancelled");
             job.controller.abort();
-            if (running.size === 0) stopTicker();
+            syncTicker(ctx);
             refreshWidget(ctx);
             return {
                 content: [
@@ -923,7 +583,7 @@ export default function (pi: ExtensionAPI) {
         parameters: Type.Object({}),
         async execute() {
             const now = Date.now();
-            const jobs = [...running.values()];
+            const jobs = store.live();
             if (!jobs.length)
                 return { content: [{ type: "text", text: "No delegates are running." }], details: undefined };
             const lastActivity = (job: DelegateJob) =>

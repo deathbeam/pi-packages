@@ -22,7 +22,7 @@ export type ChildUpdate = {
     contextTokens?: number;
     activity?: ChildActivity;
 };
-export type ChildUpdateHandler = (update: ChildUpdate) => void;
+type ChildUpdateHandler = (update: ChildUpdate) => void;
 
 type ChildRun = {
     done: Promise<string>;
@@ -35,6 +35,7 @@ export function runChild(
     task: string,
     signal: AbortSignal | undefined,
     onUpdate?: ChildUpdateHandler,
+    resume?: boolean,
 ): ChildRun {
     let buffer = "";
     let liveText = "";
@@ -49,9 +50,14 @@ export function runChild(
     let writeQueue = Promise.resolve();
     const pending = new Map<
         string,
-        { command: string; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
+        {
+            command: string;
+            resolve: (data: any) => void;
+            reject: (error: Error) => void;
+            timer: ReturnType<typeof setTimeout>;
+        }
     >();
-    let send!: (command: Record<string, unknown>) => Promise<void>;
+    let send!: (command: Record<string, unknown>) => Promise<any>;
 
     const done = new Promise<string>((resolveChild, reject) => {
         const rejectPending = (error: Error) => {
@@ -105,7 +111,7 @@ export function runChild(
                     pending.delete(event.id);
                     clearTimeout(request.timer);
                     if (event.success === true && event.command === request.command) {
-                        request.resolve();
+                        request.resolve(event.data);
                         return;
                     }
                     const responseError = new Error(
@@ -206,7 +212,7 @@ export function runChild(
         };
         send = (command: Record<string, unknown>) => {
             const id = `delegate_${++requestId}`;
-            const response = new Promise<void>((resolveResponse, rejectResponse) => {
+            const response = new Promise<any>((resolveResponse, rejectResponse) => {
                 const timer = setTimeout(() => {
                     pending.delete(id);
                     rejectResponse(new Error(`Timed out waiting for ${command.type} acknowledgement`));
@@ -259,9 +265,32 @@ export function runChild(
             finish(null);
         } else {
             signal?.addEventListener("abort", abort, { once: true });
-            void send({ type: "prompt", message: task }).catch((error) => {
-                if (!settled) fail(error);
-            });
+            const prompt = () => {
+                void send({ type: "prompt", message: task }).catch((error) => {
+                    if (!settled) fail(error);
+                });
+            };
+            if (resume) {
+                // An empty transcript means the pinned session was recreated (e.g. a different cwd) and the task is gone; fail rather than prompt into a blank session.
+                void send({ type: "get_state" })
+                    .then((data) => {
+                        if (!settled && !aborted && !data?.messageCount) {
+                            fail(
+                                new Error(
+                                    "Resumed delegate transcript is empty; the pinned session was recreated. Start a fresh delegate instead.",
+                                ),
+                            );
+                            return;
+                        }
+                        prompt();
+                    })
+                    // A resume we cannot verify must not prompt into an unknown transcript.
+                    .catch((error) => {
+                        if (!settled && !aborted) fail(error);
+                    });
+            } else {
+                prompt();
+            }
         }
     });
 

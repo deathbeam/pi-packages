@@ -47,7 +47,7 @@ function formatDiffPreviewLine(prefix: " " | "+" | "-", lineNum: number, lineNum
     return `${prefix}${paddedLineNum} ${line}`;
 }
 
-export function generateDiffString(oldContent: string, newContent: string, contextLines = 4): { diff: string } {
+export function generateDiffString(oldContent: string, newContent: string, contextLines = 4): string {
     const parts = Diff.diffLines(oldContent, newContent);
     const output: string[] = [];
     const maxLineNum = Math.max(oldContent.split("\n").length, newContent.split("\n").length);
@@ -112,5 +112,5 @@ export function generateDiffString(oldContent: string, newContent: string, conte
         lastWasChange = false;
     }
 
-    return { diff: output.join("\n") };
+    return output.join("\n");
 }

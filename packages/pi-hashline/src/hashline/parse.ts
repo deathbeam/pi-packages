@@ -43,6 +43,8 @@ const DISPLAY_PREFIX_PLUS_RE = new RegExp(`^\\+\\s*\\d+\\s*#\\s*${DISPLAY_HASH_Q
  */
 export const BARE_PREFIX_RE = new RegExp(`^\\s*([${NIBBLE_STR}]{${HASH_LENGTH}}):`, "i");
 
+const ITEM_KEYS = new Set(["op", "pos", "end", "lines"]);
+
 // --- Parsing ---
 
 /**
@@ -146,29 +148,6 @@ function hashlineParseText(edit: string[] | undefined): string[] {
     return lines;
 }
 
-/**
- * Validate + parse flat tool-schema edits into typed internal representations.
- *
- * Backstop validation + anchor parsing. Payloads arriving through pi's
- * agent loop were already validated against the published TypeBox schema
- * (additionalProperties, op enum, required fields, types), so most of
- * these checks are unreachable there; they exist for direct execute()
- * callers, where they keep garbage from crashing parseAnchorRef or
- * silently no-opping unsupported ops.
- *
- * Strict: provided anchors must parse successfully. Missing anchors are
- * fine for append (to EOF) and prepend (to BOF), but a malformed anchor
- * that was explicitly supplied is always an error.
- *
- * - replace + pos only: single-line replace
- * - replace + pos + end: range replace
- * - append + pos: append after that anchor
- * - prepend + pos: prepend before that anchor
- * - no anchors: file-level append/prepend (only for those ops)
- */
-
-const ITEM_KEYS = new Set(["op", "pos", "end", "lines"]);
-
 function isStringArray(value: unknown): value is string[] {
     return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -224,6 +203,27 @@ function assertEditItem(edit: Record<string, unknown>, index: number): void {
         );
     }
 }
+
+/**
+ * Validate + parse flat tool-schema edits into typed internal representations.
+ *
+ * Backstop validation + anchor parsing. Payloads arriving through pi's
+ * agent loop were already validated against the published TypeBox schema
+ * (additionalProperties, op enum, required fields, types), so most of
+ * these checks are unreachable there; they exist for direct execute()
+ * callers, where they keep garbage from crashing parseAnchorRef or
+ * silently no-opping unsupported ops.
+ *
+ * Strict: provided anchors must parse successfully. Missing anchors are
+ * fine for append (to EOF) and prepend (to BOF), but a malformed anchor
+ * that was explicitly supplied is always an error.
+ *
+ * - replace + pos only: single-line replace
+ * - replace + pos + end: range replace
+ * - append + pos: append after that anchor
+ * - prepend + pos: prepend before that anchor
+ * - no anchors: file-level append/prepend (only for those ops)
+ */
 
 export function resolveEditAnchors(edits: HashlineToolEdit[]): HashlineEdit[] {
     const result: HashlineEdit[] = [];

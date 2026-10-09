@@ -6,9 +6,7 @@
  */
 
 import { generateDiffString } from "./edit-diff";
-import { computeAffectedLineRange, formatHashlineRegion, splitVisibleLines } from "./hashline";
-
-const CHANGED_ANCHOR_TEXT_BUDGET_BYTES = 50 * 1024;
+import { computeAffectedLineRange, formatHashlineRegion, splitVisibleLines, type NoopEdit } from "./hashline";
 
 type ToolResult = {
     content: Array<{ type: "text"; text: string }>;
@@ -27,15 +25,9 @@ export type EditMeta = {
     lastChangedLine?: number;
 };
 
-type NoopEditEntry = {
-    editIndex: number;
-    loc: string;
-    currentContent: string;
-};
-
 interface NoopResponseInput {
     path: string;
-    noopEdits: NoopEditEntry[] | undefined;
+    noopEdits: NoopEdit[] | undefined;
     warnings: string[] | undefined;
 }
 
@@ -46,11 +38,12 @@ interface SuccessResponseInput {
     editMeta: EditMeta;
 }
 
+const CHANGED_ANCHOR_TEXT_BUDGET_BYTES = 50 * 1024;
+const ANCHORS_OMITTED_TEXT = "Anchors omitted; use read for subsequent edits.";
+
 function warningsBlockOf(warnings: string[] | undefined): string {
     return warnings?.length ? `\n\nWarnings:\n${warnings.join("\n")}` : "";
 }
-
-const ANCHORS_OMITTED_TEXT = "Anchors omitted; use read for subsequent edits.";
 
 /**
  * Model-facing anchor block for the changed region: fresh LINE#HASH lines the
@@ -96,7 +89,6 @@ export function buildNoopResponse(input: NoopResponseInput): ToolResult {
 export function buildChangedResponse(input: SuccessResponseInput): ToolResult {
     const { result, warnings, originalNormalized, editMeta } = input;
 
-    const diffResult = generateDiffString(originalNormalized, result);
     const warningsBlock = warningsBlockOf(warnings);
 
     const resultLines = splitVisibleLines(result);
@@ -112,7 +104,7 @@ export function buildChangedResponse(input: SuccessResponseInput): ToolResult {
     return {
         content: [{ type: "text", text }],
         details: {
-            diff: diffResult.diff,
+            diff: generateDiffString(originalNormalized, result),
             firstChangedLine: editMeta.firstChangedLine,
             warnings: warnings ?? [],
         },

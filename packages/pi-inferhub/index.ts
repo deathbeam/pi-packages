@@ -1,6 +1,23 @@
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
+type CatalogEntry = {
+    id?: unknown;
+    owned_by?: unknown;
+    modality?: unknown;
+    output_modality?: unknown;
+    input_token_limit?: unknown;
+    max_output_tokens?: unknown;
+    reasoning_levels?: unknown;
+    upstream_label?: unknown;
+    pricing?: {
+        min_ask_in?: unknown;
+        min_ask_out?: unknown;
+        official_in?: unknown;
+        official_out?: unknown;
+    };
+};
+
 const BASE_URL = "https://api.inferhub.dev/v1";
 const ANTHROPIC_BASE_URL = "https://api.inferhub.dev";
 const API = "openai-completions";
@@ -22,29 +39,6 @@ const COMPAT = {
     maxTokensField: "max_tokens",
 } as const;
 
-type CatalogEntry = {
-    id?: unknown;
-    owned_by?: unknown;
-    modality?: unknown;
-    output_modality?: unknown;
-    input_token_limit?: unknown;
-    max_output_tokens?: unknown;
-    reasoning_levels?: unknown;
-    upstream_label?: unknown;
-    pricing?: {
-        min_ask_in?: unknown;
-        min_ask_out?: unknown;
-        official_in?: unknown;
-        official_out?: unknown;
-    };
-};
-
-function advertisedLevels(entry: CatalogEntry): string[] {
-    return Array.isArray(entry.reasoning_levels)
-        ? entry.reasoning_levels.filter((level): level is string => typeof level === "string")
-        : [];
-}
-
 function thinkingLevelMap(advertised: string[]): ThinkingLevelMap {
     const map: ThinkingLevelMap = { off: "none", xhigh: null, max: null };
     for (const level of PI_THINKING_LEVELS) {
@@ -58,33 +52,19 @@ function normalizeName(id: string): string {
     return (id.split("/").pop() ?? id).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function nativeRoute(id: string): { api?: string; baseUrl?: string } {
-    const name = (id.split("/").pop() ?? id).toLowerCase();
-    if (name.startsWith("claude")) return { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL };
-    if (name.startsWith("gpt")) return { api: "openai-responses" };
-    return {};
-}
-
 function smallest(sources: CatalogEntry[], value: (entry: CatalogEntry) => unknown, fallback: number): number {
     const numbers = sources
         .map(value)
-        .filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry) && entry > 0);
+        .filter((entry): entry is number => typeof entry === "number" && Number.isFinite(entry) && entry >= 0);
     return numbers.length > 0 ? Math.min(...numbers) : fallback;
 }
 
-function cheapest(sources: CatalogEntry[], key: "input" | "output"): number {
-    const prices = sources
-        .map((entry) =>
-            key === "input"
-                ? (entry.pricing?.min_ask_in ?? entry.pricing?.official_in)
-                : (entry.pricing?.min_ask_out ?? entry.pricing?.official_out),
-        )
-        .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0);
-    return prices.length > 0 ? Math.min(...prices) : 0;
-}
-
 function commonLevels(sources: CatalogEntry[]): string[] {
-    const [first = [], ...rest] = sources.map(advertisedLevels);
+    const [first = [], ...rest] = sources.map((entry): string[] =>
+        Array.isArray(entry.reasoning_levels)
+            ? entry.reasoning_levels.filter((level): level is string => typeof level === "string")
+            : [],
+    );
     return first.filter((level) => rest.every((levels) => levels.includes(level)));
 }
 
@@ -95,9 +75,11 @@ function toPiModel(entry: CatalogEntry, members: CatalogEntry[]): ProviderModelC
     const label = sources.find(
         (source) => typeof source.upstream_label === "string" && source.upstream_label,
     )?.upstream_label;
+    const name = normalizeName(entry.id);
 
     return {
-        ...nativeRoute(entry.id),
+        ...(name.startsWith("claude") ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
+        ...(name.startsWith("gpt") ? { api: "openai-responses" } : {}),
         id: entry.id,
         name: typeof label === "string" ? label : entry.id,
         reasoning: true,
@@ -105,9 +87,15 @@ function toPiModel(entry: CatalogEntry, members: CatalogEntry[]): ProviderModelC
         input: sources.every((source) => typeof source.modality === "string" && source.modality.includes("image"))
             ? ["text", "image"]
             : ["text"],
-        cost: { input: cheapest(sources, "input"), output: cheapest(sources, "output"), cacheRead: 0, cacheWrite: 0 },
-        contextWindow: smallest(sources, (source) => source.input_token_limit, 128000),
-        maxTokens: smallest(sources, (source) => source.max_output_tokens, 16384),
+        cost: {
+            input: smallest(sources, (source) => source.pricing?.min_ask_in ?? source.pricing?.official_in, 0),
+            output: smallest(sources, (source) => source.pricing?.min_ask_out ?? source.pricing?.official_out, 0),
+            cacheRead: 0,
+            cacheWrite: 0,
+        },
+        // A 0 limit is missing data, unlike a 0 price, so it falls back to the default.
+        contextWindow: smallest(sources, (source) => source.input_token_limit || undefined, 128000),
+        maxTokens: smallest(sources, (source) => source.max_output_tokens || undefined, 16384),
         compat: { ...COMPAT },
     };
 }

@@ -13,6 +13,7 @@ import {
     resolveEditAnchors,
     sanitizeOutput,
     type HashlineToolEdit,
+    type NoopEdit,
 } from "./hashline";
 import { loadFileKindAndText } from "./file-kind";
 import { resolveToCwd } from "./path-utils";
@@ -22,6 +23,33 @@ import { buildChangedResponse, buildNoopResponse, type EditMeta, type HashlineEd
 import { isDuplicateAppliedPayload, recordAppliedEdit, recordNoopEdit } from "./noop-loop-guard";
 import { getReadSnapshot, getReadSnapshotVersions, rememberReadSnapshot } from "./read-snapshot";
 import { threeWayMerge } from "./merge";
+
+type EditRequestParams = {
+    path: string;
+    edits: HashlineToolEdit[];
+};
+
+type EditPipelineResult = {
+    path: string;
+    originalNormalized: string;
+    originalContent: string;
+    result: string;
+    bom: string;
+    originalEnding: "\r\n" | "\n";
+    hadUtf8DecodeErrors: boolean;
+    warnings: string[];
+    noopEdits?: NoopEdit[];
+    firstChangedLine?: number;
+    lastChangedLine?: number;
+};
+
+// TParams is intentionally TSchema, not typeof hashlineEditToolSchema. The
+// published `parameters` schema stays strict (additionalProperties, enum op)
+// for the model, but prepareArguments treats params as unknown and defers
+// validation to resolveEditAnchors during execute; typing it as
+// Static<typeof hashlineEditToolSchema> would claim conformance that
+// prepareArguments does not enforce (assertEditRequest is envelope-only).
+type EditToolDefinition = ToolDefinition<TSchema, HashlineEditToolDetails>;
 
 const hashlineEditOpSchema = Type.Unsafe<"replace" | "append" | "prepend">({
     type: "string",
@@ -64,25 +92,6 @@ const hashlineEditToolSchema = Type.Object(
     { additionalProperties: false },
 );
 
-type EditRequestParams = {
-    path: string;
-    edits: HashlineToolEdit[];
-};
-
-type EditPipelineResult = {
-    path: string;
-    originalNormalized: string;
-    originalContent: string;
-    result: string;
-    bom: string;
-    originalEnding: "\r\n" | "\n";
-    hadUtf8DecodeErrors: boolean;
-    warnings: string[];
-    noopEdits?: { editIndex: number; loc: string; currentContent: string }[];
-    firstChangedLine?: number;
-    lastChangedLine?: number;
-};
-
 const EDIT_DESC = loadPrompt(new URL("../prompts/edit.md", import.meta.url)).trim();
 
 const EDIT_PROMPT_SNIPPET = loadPrompt(new URL("../prompts/edit-snippet.md", import.meta.url)).trim();
@@ -90,6 +99,8 @@ const EDIT_PROMPT_SNIPPET = loadPrompt(new URL("../prompts/edit-snippet.md", imp
 const EDIT_PROMPT_GUIDELINES = loadPromptGuidelines(new URL("../prompts/edit-guidelines.md", import.meta.url));
 
 const ROOT_KEYS = new Set(["path", "edits"]);
+
+const COLLAPSED_DIFF_LINES = 15;
 
 // prepareArguments runs before Pi's schema validation; reject native text-replace
 // with anchor guidance here, leaving edit-item validation to resolveEditAnchors.
@@ -278,16 +289,6 @@ async function executeEditPipeline(
         lastChangedLine: anchorResult.lastChangedLine,
     });
 }
-
-// TParams is intentionally TSchema, not typeof hashlineEditToolSchema. The
-// published `parameters` schema stays strict (additionalProperties, enum op)
-// for the model, but prepareArguments treats params as unknown and defers
-// validation to resolveEditAnchors during execute; typing it as
-// Static<typeof hashlineEditToolSchema> would claim conformance that
-// prepareArguments does not enforce (assertEditRequest is envelope-only).
-type EditToolDefinition = ToolDefinition<TSchema, HashlineEditToolDetails>;
-
-const COLLAPSED_DIFF_LINES = 15;
 
 /** Collapse the diff but never hide warnings. */
 function capDiffPreview(diff: string, expanded: boolean, theme: Pick<Theme, "fg">): string {

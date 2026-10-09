@@ -1,7 +1,7 @@
 {
   "name": "@deathbeam/pi-archive",
-  "version": "0.0.6",
-  "description": "Search and recall past Pi session transcripts",
+  "version": "0.0.7",
+  "description": "Minimal extension for searching past Pi conversations.",
   "type": "module",
   "license": "MIT",
   "repository": {

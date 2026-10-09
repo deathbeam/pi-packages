@@ -24,11 +24,33 @@ interface HashMismatch {
     textHint?: string;
 }
 
-interface NoopEdit {
+export interface NoopEdit {
     editIndex: number;
     loc: string;
     currentContent: string;
 }
+
+type ResolvedEditSpan = {
+    kind: "replace" | "insert";
+    index: number;
+    label: string;
+    start: number;
+    end: number;
+    replacement: string;
+    boundary?: number;
+    insertMode?: "append-empty-origin" | "prepend-empty-origin";
+};
+
+type LineIndex = {
+    fileLines: string[];
+    lineStarts: number[];
+    hasTerminalNewline: boolean;
+    /**
+     * Line count as the model sees it in read output: excludes the trailing
+     * sentinel element produced by split("\n") on a newline-terminated file.
+     */
+    visibleLineCount: number;
+};
 
 // --- Mismatch formatting ---
 
@@ -146,10 +168,9 @@ function warnBareHashPrefixLines(edits: HashlineEdit[], fileLines: string[], war
     // Collect bare-prefix suspects up front: regex only. Almost every edit has
     // none, so this lets the common path bail before paying for file hashes.
     const suspects: { line: string; hash: string }[] = [];
-    const bareRe = BARE_PREFIX_RE;
     for (const edit of edits) {
         for (const line of edit.lines) {
-            const match = line.match(bareRe);
+            const match = line.match(BARE_PREFIX_RE);
             if (match) suspects.push({ line, hash: match[1]! });
         }
     }
@@ -165,28 +186,6 @@ function warnBareHashPrefixLines(edits: HashlineEdit[], fileLines: string[], war
         );
     }
 }
-
-type ResolvedEditSpan = {
-    kind: "replace" | "insert";
-    index: number;
-    label: string;
-    start: number;
-    end: number;
-    replacement: string;
-    boundary?: number;
-    insertMode?: "append-empty-origin" | "prepend-empty-origin";
-};
-
-type LineIndex = {
-    fileLines: string[];
-    lineStarts: number[];
-    hasTerminalNewline: boolean;
-    /**
-     * Line count as the model sees it in read output: excludes the trailing
-     * sentinel element produced by split("\n") on a newline-terminated file.
-     */
-    visibleLineCount: number;
-};
 
 function buildLineIndex(content: string): LineIndex {
     const fileLines = content.split("\n");
@@ -511,9 +510,7 @@ function validateAnchorEdits(
         const line = lineIndex.fileLines[ref.line - 1]!;
         const actual = computeLineHash(lineIndex.fileLines, ref.line - 1);
         if (actual === ref.hash) {
-            // QUESTIONING: hash matches but textHint says otherwise; treat as stale (anti-collision guard).
-            // Guards the 1/256 collision case: a model that copied "LINE#HASH:content" gets the content
-            // cross-checked for free. If the hint clearly differs from the actual line, the anchor is stale.
+            // A matching hash with a contradicting hint is a 1/256 collision: treat the anchor as stale.
             // Ellipsis-truncated hints ("console.log(...)") compare by prefix; see hintMatchesLine.
             if (ref.textHint !== undefined && !hintMatchesLine(ref.textHint, line)) {
                 mismatches.push({ line: ref.line, expected: ref.hash, actual, textHint: ref.textHint });
@@ -522,8 +519,8 @@ function validateAnchorEdits(
             return true;
         }
         if (ref.textHint !== undefined) {
-            // FORGIVENESS: hash mismatched, but recompute using the hint's content in the current file's
-            // neighbor context. If that matches ref.hash and the hint fuzzy-matches the actual line, accept.
+            // Hash mismatched: recompute with the hint in the current neighbor context;
+            // accept when that matches ref.hash and the hint fuzzy-matches the actual line.
             const prevLine = normalizeHashInput(ref.line > 1 ? lineIndex.fileLines[ref.line - 2]! : "");
             const nextLine = normalizeHashInput(
                 ref.line < lineIndex.fileLines.length ? lineIndex.fileLines[ref.line]! : "",
@@ -599,8 +596,6 @@ function validateAnchorEdits(
                         "[E_BAD_OP] Append with empty lines payload. Provide content to insert or remove the edit.",
                     );
                 }
-                // Warn when the inserted lines are identical to the lines already adjacent
-                // at the insertion point; symptom of a duplicate insert after a prior success.
                 warnDuplicateInsert("append", edit, lineIndex, warnings);
                 break;
             }
@@ -611,7 +606,6 @@ function validateAnchorEdits(
                         "[E_BAD_OP] Prepend with empty lines payload. Provide content to insert or remove the edit.",
                     );
                 }
-                // Same duplicate-insert guard for prepend.
                 warnDuplicateInsert("prepend", edit, lineIndex, warnings);
                 break;
             }

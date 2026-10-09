@@ -1,11 +1,12 @@
 /** Formatting helpers stay runtime Pi-import-free for the native check; Pi's analogous formatters are private. */
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { JobStatus } from "./store.ts";
 
-export type JobStatus = "running" | "done" | "failed" | "cancelled";
-export type UsageInfo = {
+type UsageInfo = {
     contextTokens?: number;
     contextWindow?: number;
 };
+
 export type DelegateReport = {
     id: string;
     agent: string;
@@ -19,31 +20,33 @@ export type DelegateReport = {
     error?: string;
 };
 
-export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const SPINNER_INTERVAL_MS = 100;
-export const STATUS_ICONS = {
+const STATUS_ICONS = {
     done: "✓",
     failed: "✗",
     cancelled: "✗",
+    interrupted: "⏸",
 } as const satisfies Record<Exclude<JobStatus, "running">, string>;
 export const STATUS_COLORS = {
     running: "warning",
     done: "success",
     failed: "error",
     cancelled: "muted",
+    interrupted: "warning",
 } as const satisfies Record<JobStatus, string>;
 /** Pi slices extension widgets at ten lines and appends its own truncation note. */
-export const WIDGET_MAX_LINES = 10;
-/** Only a few jobs still fit with their tool-call and tool-result lines: 1 tally + 3*3 lines. */
-const WIDGET_MAX_DETAIL_JOBS = 3;
-/** In bulk, one row per job: 1 tally + 8 rows + 1 "more running" footer. */
-const WIDGET_MAX_JOBS = 8;
+const WIDGET_MAX_LINES = 10;
+/** Only a few jobs still fit with their tool-call and tool-result lines: 1 tally + 3 lines per job. */
+const WIDGET_MAX_DETAIL_JOBS = Math.floor((WIDGET_MAX_LINES - 1) / 3);
+/** In bulk, one row per job: 1 tally + N rows + 1 "more running" footer. */
+const WIDGET_MAX_JOBS = WIDGET_MAX_LINES - 2;
 export const COLLAPSED_OUTPUT_LINES = 10;
-export const MAX_OUTPUT_BYTES = 50 * 1024;
+const MAX_OUTPUT_BYTES = 50 * 1024;
 const EXPANDED_PAD = "  ";
 
 /** Terminal statuses have static icons; running jobs use statusIcon's clock-driven frame. */
-export function statusIcon(status: JobStatus, now = Date.now()): string {
+function statusIcon(status: JobStatus, now = Date.now()): string {
     return status === "running"
         ? SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]!
         : STATUS_ICONS[status];
@@ -61,7 +64,7 @@ export function formatTools(tools: string[]): string {
     return tools.join(", ") || "none";
 }
 
-export function formatTokens(count: number): string {
+function formatTokens(count: number): string {
     if (count < 1000) return String(count);
     if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
     if (count < 1000000) return `${Math.round(count / 1000)}k`;
@@ -69,7 +72,7 @@ export function formatTokens(count: number): string {
     return `${Math.round(count / 1000000)}M`;
 }
 
-export function formatDuration(ms: number): string {
+function formatDuration(ms: number): string {
     const seconds = Math.max(0, Math.floor(ms / 1000));
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
@@ -149,8 +152,14 @@ export function resultPreview(result: unknown, maxChars = 120): string | undefin
     return line.length > maxChars ? `${line.slice(0, maxChars - 1)}…` : line;
 }
 
+/** Shared so failed reports and thrown errors phrase the resume hint identically. */
+export function resumeHint(id: string): string {
+    return `To continue this job, call delegate with resume: ${id}.`;
+}
+
 export function reportText(report: DelegateReport): string {
-    if (report.error) return `Delegate "${report.agent}" (job ${report.id}) failed: ${report.error}`;
+    if (report.error)
+        return `Delegate "${report.agent}" (job ${report.id}) failed: ${report.error}\n${resumeHint(report.id)}`;
     const output = (report.output ?? "").trim();
     return `Delegate "${report.agent}" (job ${report.id}) finished.${output ? `\n\n${output}` : ""}`;
 }

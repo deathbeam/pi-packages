@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-inferhub",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "InferHub provider with a live model catalog for Pi",
   "type": "module",
   "license": "MIT",

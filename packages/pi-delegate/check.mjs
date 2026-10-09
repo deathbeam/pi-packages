@@ -12,51 +12,54 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
     COLLAPSED_OUTPUT_LINES,
-    formatDuration,
-    formatTokens,
     jobLine,
     launchDetails,
     limitOutput,
     outputPreview,
     reportText,
     resultPreview,
-    SPINNER_FRAMES,
     SPINNER_INTERVAL_MS,
     STATUS_COLORS,
-    STATUS_ICONS,
-    statusIcon,
+    statusText,
     toolCallDetail,
     usageStats,
     widgetJobs,
-    WIDGET_MAX_LINES,
 } from "./format.ts";
 import { runChild } from "./child.ts";
-import { resolveModel } from "./index.ts";
+import { resolveModel } from "./agents.ts";
+import { createJobStore, resumeDecision } from "./store.ts";
 
 initTheme("dark");
 
 const root = new URL("./", import.meta.url);
 const index = readFileSync(new URL("index.ts", root), "utf8");
 const child = readFileSync(new URL("child.ts", root), "utf8");
+const store = readFileSync(new URL("store.ts", root), "utf8");
+const inspector = readFileSync(new URL("inspector.ts", root), "utf8");
+const agents = readFileSync(new URL("agents.ts", root), "utf8");
+// Tripwires match source text across every module, so code that moved stays covered.
+const sources = `${index}\n${store}\n${inspector}\n${agents}`;
 
 // Regex tripwires cannot see runtime syntax or protocol behavior, so compile and exercise both below.
-const indexCheckDir = mkdtempSync(join(tmpdir(), "pi-delegate-index-check-"));
-const indexCheckFile = join(indexCheckDir, "index.mjs");
-writeFileSync(indexCheckFile, stripTypeScriptTypes(index, { mode: "strip" }));
-try {
-    execFileSync(process.execPath, ["--check", indexCheckFile], { stdio: "pipe" });
-} finally {
-    rmSync(indexCheckDir, { recursive: true, force: true });
+for (const source of [index, store, inspector, agents]) {
+    const dir = mkdtempSync(join(tmpdir(), "pi-delegate-index-check-"));
+    const file = join(dir, "index.mjs");
+    writeFileSync(file, stripTypeScriptTypes(source, { mode: "strip" }));
+    try {
+        execFileSync(process.execPath, ["--check", file], { stdio: "pipe" });
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 }
 
 // Tripwires for wiring the compiled-file check cannot see: the child protocol, the delivery path,
 // and where the prompt text lives. Renderer behavior is exercised below, not matched against source text.
-assert.match(index, /name: "delegate"/);
-assert.match(index, /registerCommand\("delegate"/);
-assert.match(index, /name: "delegate_list"/);
-assert.match(index, /name: "delegate_steer"/);
-assert.match(index, /name: "delegate_cancel"/);
-const excluded = index.match(/const DELEGATION_TOOLS = new Set\(\[([\s\S]*?)\]\)/)?.[1];
+assert.match(sources, /name: "delegate"/);
+assert.match(sources, /registerCommand\("delegate"/);
+assert.match(sources, /name: "delegate_list"/);
+assert.match(sources, /name: "delegate_steer"/);
+assert.match(sources, /name: "delegate_cancel"/);
+const excluded = sources.match(/const DELEGATION_TOOLS = new Set\(([\s\S]*?)\]\)/)?.[1];
 assert.ok(excluded, "missing child delegation denylist");
 assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).sort(), [
     "delegate",
@@ -64,11 +67,15 @@ assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).so
     "delegate_list",
     "delegate_steer",
 ]);
-assert.match(index, /!DELEGATION_TOOLS\.has\(tool\)/);
-assert.match(index, /spawn\(process\.execPath, \[entrypoint, "--mode", "rpc", "--no-session/);
-assert.match(index, /\["--model", model, "--tools", tools\.join\(","\)\]/);
+assert.match(sources, /!DELEGATION_TOOLS\.has\(tool\)/);
+// Pinned child sessions: every spawn and resume reopens the same deterministic transcript.
+assert.doesNotMatch(sources, /--no-session/);
+assert.match(sources, /const DELEGATE_SESSION_DIR = join\(getAgentDir\(\), "sessions", "delegates"\)/);
+assert.match(sources, /"--session-id",\s*`delegate-\$\{job\.id\}`,\s*"--session-dir",\s*DELEGATE_SESSION_DIR/);
+assert.match(sources, /spawn\(process\.execPath, \[entrypoint, "--mode", "rpc", \.\.\.args\]/);
+assert.match(sources, /"--model",\s*model,\s*"--tools",\s*tools\.join\(","\)/);
 // Tier entries can pin model and thinking; agent frontmatter still wins, explicit models consult no tier.
-assert.match(index, /agent\.thinking \?\? tierThinking \?\? ctx\.thinkingLevel/);
+assert.match(sources, /agent\.thinking \?\? tierThinking \?\? ctx\.thinkingLevel/);
 const session = { provider: "anthropic", id: "m" };
 assert.deepEqual(resolveModel("anthropic/x", {}, session), { model: "anthropic/x" });
 assert.deepEqual(resolveModel("cheap", { cheap: "anthropic/h" }, session), {
@@ -87,17 +94,19 @@ assert.deepEqual(resolveModel("cheap", { cheap: { model: "google/flash" } }, ses
 assert.deepEqual(resolveModel("cheap", { cheap: { thinking: "low" } }, session), { model: "anthropic/m" });
 assert.deepEqual(resolveModel(undefined, {}, undefined), { model: undefined });
 assert.match(child, /case "agent_settled"/);
+// get_state exists only for the resume guard: verifying the pinned transcript is not empty.
+assert.match(child, /type: "get_state"/);
 assert.match(child, /type: "steer", message/);
 // pi skips before_agent_start in runs a delegate report starts, so a prompt section would vanish exactly then.
-assert.doesNotMatch(index, /systemPromptOptions\.sections/);
-assert.match(index, /registerMessageRenderer\(RESULT_MESSAGE/);
-assert.match(index, /pi\.sendMessage\(/);
+assert.doesNotMatch(sources, /systemPromptOptions\.sections/);
+assert.match(sources, /registerMessageRenderer\(RESULT_MESSAGE/);
+assert.match(sources, /pi\.sendMessage\(/);
 // A follow-up waits for a run end; a parent stuck polling never reaches one and the report is lost.
-assert.match(index, /background: ctx\.hasUI/);
-assert.match(index, /deliverAs: "steer"/);
-assert.match(index, /setWidget\(WIDGET_KEY/);
+assert.match(sources, /background: ctx\.hasUI/);
+assert.match(sources, /deliverAs: "steer"/);
+assert.match(sources, /setWidget\(WIDGET_KEY/);
 // One status vocabulary; a glyph written into a view drifts out of sync with the others.
-assert.doesNotMatch(index, /[✓✗●○]/);
+assert.doesNotMatch(sources, /[✓✗●○]/);
 
 const expected = ["explore", "general", "researcher", "reviewer"];
 const agentFiles = readdirSync(new URL("agents/", root))
@@ -116,27 +125,72 @@ for (const { file, text } of agentFiles) {
     if (level) assert.ok(thinkingLevels.has(level), `${file} has invalid thinking level "${level}"`);
 }
 
-assert.ok(SPINNER_FRAMES.length > 1);
-assert.deepEqual(Object.keys(STATUS_ICONS).sort(), ["cancelled", "done", "failed"]);
-assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "failed", "running"]);
-assert.equal(statusIcon("running", 0), SPINNER_FRAMES[0]);
-assert.equal(statusIcon("running", SPINNER_INTERVAL_MS), SPINNER_FRAMES[1]);
-assert.equal(statusIcon("done", SPINNER_INTERVAL_MS), STATUS_ICONS.done);
+// Crash recovery: entry dedupe runs through the store's restore seam; resume decisions are pure and tested directly.
+const jobEntry = (id, status, extra = {}) => ({
+    id,
+    agent: "explore",
+    description: "d",
+    task: "t",
+    model: "m",
+    tools: [],
+    toolCalls: 0,
+    startedAt: 1,
+    status,
+    activity: [],
+    ...extra,
+});
+const branch = (jobs) => jobs.map((job) => ({ type: "custom", customType: "delegate-job", data: job }));
+// Last entry wins per id and the order stays newest first, so a job shows once with its latest status.
+// A restored "running" job no live job owns is a crash orphan, so restore marks it interrupted.
+const restoreStore = createJobStore(() => {});
+const restoredIds = (entries) => {
+    restoreStore.restore(entries);
+    return restoreStore.all().map(({ id, status }) => ({ id, status }));
+};
+assert.deepEqual(restoredIds(branch([jobEntry("a", "running"), jobEntry("b", "running"), jobEntry("a", "done")])), [
+    { id: "a", status: "done" },
+    { id: "b", status: "interrupted" },
+]);
+assert.deepEqual(restoredIds(branch([jobEntry("a", "running"), jobEntry("a", "interrupted")])), [
+    { id: "a", status: "interrupted" },
+]);
+assert.deepEqual(
+    restoredIds([{ type: "custom", customType: "other", data: jobEntry("a", "running") }, { type: "message" }]),
+    [],
+);
+const resumable = [
+    jobEntry("i", "interrupted"),
+    jobEntry("d", "done"),
+    jobEntry("f", "failed"),
+    jobEntry("c", "cancelled"),
+];
+assert.deepEqual(resumeDecision("i", resumable, new Set()), { job: jobEntry("i", "interrupted") });
+assert.deepEqual(resumeDecision("f", resumable, new Set()), { job: jobEntry("f", "failed") });
+assert.deepEqual(resumeDecision("c", resumable, new Set()), { job: jobEntry("c", "cancelled") });
+assert.match(resumeDecision("d", resumable, new Set()).error, /already done.*report/);
+assert.match(resumeDecision("zz", resumable, new Set()).error, /Unknown delegate job/);
+assert.match(resumeDecision("i", resumable, new Set(["i"])).error, /still running/);
+
+assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "failed", "interrupted", "running"]);
+// One vocabulary: every status renders through statusText; only running spins with the clock.
+const bare = { fg: (_color, text) => text };
+assert.notEqual(statusText(bare, "running", 0), statusText(bare, "running", SPINNER_INTERVAL_MS));
+for (const status of ["done", "failed", "cancelled", "interrupted"])
+    assert.equal(statusText(bare, status, 0), statusText(bare, status, SPINNER_INTERVAL_MS), `${status} icon spins`);
 assert.equal(launchDetails({ model: "x/y", tools: ["read", "ls"] }).join("\n"), "  Model: x/y\n  Tools: read, ls");
 assert.deepEqual(launchDetails({ tools: [] }), ["  Model: default", "  Tools: none"]);
 assert.deepEqual(outputPreview("a\nb", 5), { shown: ["a", "b"], hidden: 0 });
 assert.deepEqual(outputPreview("a\nb\nc", 2), { shown: ["a", "b"], hidden: 1 });
 assert.deepEqual(outputPreview("```\ncode\nmore", 2), { shown: ["```", "code", "```"], hidden: 1 });
 assert.deepEqual(outputPreview("```\na\n```\nb", 3), { shown: ["```", "a", "```"], hidden: 1 });
-assert.equal(formatTokens(900), "900");
-assert.equal(formatTokens(1234), "1.2k");
-assert.equal(formatTokens(200000), "200k");
-assert.equal(formatDuration(42000), "42s");
-assert.equal(formatDuration(65000), "1m 05s");
-assert.equal(formatDuration(3720000), "1h 02m");
 assert.equal(usageStats({}, 0), "0s");
-assert.equal(usageStats({ toolCalls: 3, contextTokens: 2400, contextWindow: 200000 }, 42000), "2.4k/200k · 42s");
+assert.equal(usageStats({ contextTokens: 900 }, 42000), "900 · 42s");
+assert.equal(usageStats({ contextTokens: 1234 }, 0), "1.2k · 0s");
+assert.equal(usageStats({ contextTokens: 200000 }, 0), "200k · 0s");
 assert.equal(usageStats({ contextTokens: 2400 }, 1000), "2.4k · 1s");
+assert.equal(usageStats({ toolCalls: 3, contextTokens: 2400, contextWindow: 200000 }, 42000), "2.4k/200k · 42s");
+assert.equal(usageStats({}, 65000), "1m 05s");
+assert.equal(usageStats({}, 3720000), "1h 02m");
 assert.equal(toolCallDetail("bash", { command: "npm test\nsecond" }), "npm test");
 assert.equal(toolCallDetail("read", { path: "src/a.ts" }), "src/a.ts");
 assert.equal(toolCallDetail("edit", { path: "src/a.ts" }), "src/a.ts");
@@ -163,7 +217,7 @@ assert.equal(
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 1, elapsedMs: 1000, error: "boom" }),
-    'Delegate "explore" (job a1b2c3d4) failed: boom',
+    'Delegate "explore" (job a1b2c3d4) failed: boom\nTo continue this job, call delegate with resume: a1b2c3d4.',
 );
 assert.equal(jobLine({ description: "find callers" }, 42000), "find callers · 42s");
 assert.equal(jobLine({}, 0), "0s");
@@ -172,7 +226,7 @@ assert.equal(jobLine({ description: "x", toolCalls: 3, contextTokens: 2400 }, 42
 for (let count = 1; count <= 40; count += 1) {
     const { shown, hidden, detail } = widgetJobs(Array.from({ length: count }, (_, i) => i));
     const lines = 1 + shown.length * (detail ? 3 : 1) + (hidden ? 1 : 0);
-    assert.ok(lines <= WIDGET_MAX_LINES, `${count} jobs render ${lines} lines`);
+    assert.ok(lines <= 10, `${count} jobs render ${lines} lines`);
 }
 assert.deepEqual(widgetJobs([1, 2, 3]), { shown: [1, 2, 3], hidden: 0, detail: true });
 assert.deepEqual(widgetJobs([1, 2, 3, 4]), { shown: [1, 2, 3, 4], hidden: 0, detail: false });
@@ -297,6 +351,15 @@ rejected.stdin.on("data", (chunk) => {
 await assert.rejects(runChild(rejected, "bad task", undefined).done, /prompt rejected/);
 assert.equal(killed, true);
 assert.equal(rejected.stdin.writableEnded, true);
+// A resume whose get_state fails must fail the run, not prompt into an unverifiable transcript.
+const unverifiable = fakeChild();
+unverifiable.stdin.on("data", (chunk) => {
+    const command = JSON.parse(chunk.toString());
+    unverifiable.stdout.write(
+        `${JSON.stringify({ type: "response", id: command.id, command: command.type, success: false, error: "state unavailable" })}\n`,
+    );
+});
+await assert.rejects(runChild(unverifiable, "task", undefined, undefined, true).done, /state unavailable/);
 
 const signal = new AbortController();
 signal.abort();
@@ -360,6 +423,8 @@ assert.match(notice, /No delegates/);
 const delegate = registered.find((tool) => tool.name === "delegate");
 // User agent dirs can override bundled agents, so check the tier format rather than one agent.
 assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
+// The model must learn from the tool description which jobs are resumable and how to resume them.
+assert.match(delegate.description, /interrupted, failed, or cancelled job.*`resume`/s);
 assert.match(delegate.promptGuidelines.join("\n"), /You are the orchestrator/);
 // Drift reminder: only the orchestrating session, at 5 then 10 direct calls, and a delegate call resets it.
 const nudged = (activeTools) => {
@@ -437,14 +502,21 @@ const fakeCli = join(fakeCliDir, "pi.mjs");
 writeFileSync(
     fakeCli,
     `
+import { existsSync } from "node:fs";
 let stage = 0;
 const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
 process.stdin.on("data", (data) => {
     for (const line of data.toString().trim().split("\\n")) {
         const command = JSON.parse(line);
-        if (command.type === "prompt") {
+        if (command.type === "get_state") {
+            send({ type: "response", command: "get_state", id: command.id, success: true, data: { messageCount: existsSync("/tmp/pi-delegate-fake-empty") ? 0 : 5 } });
+        } else if (command.type === "prompt") {
             send({ type: "response", command: "prompt", id: command.id, success: true });
             send({ type: "message_end", message: { role: "user", content: [{ type: "text", text: command.message }], timestamp: Date.now() } });
+            if (command.message === "Continue the task above from where you left off.") {
+                send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Resumed and finished." }], timestamp: Date.now() } });
+                send({ type: "agent_settled" });
+            }
         } else if (command.type === "steer") {
             if (++stage === 1) {
                 for (let i = 0; i < 105; i++) {
@@ -609,6 +681,11 @@ try {
     assert.match(first.content[0].text, /no-op bash commands.*end your turn/);
     assert.match(widgetLines.join("\n"), /1 running · 1 total/);
     assert.match(widgetLines.join("\n"), new RegExp(`${first.details.id} explore first run`));
+    // The launch entry is written at spawn, before the job produces any output.
+    assert.ok(
+        savedEntries.some((entry) => entry.data?.id === first.details.id && entry.data?.status === "running"),
+        "launch entry missing",
+    );
     assert.match(
         delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
         new RegExp(`${first.details.id} explore started in background`),
@@ -638,7 +715,7 @@ try {
     assert.match(launchResult, /Model:[\s\S]*Tools:/);
     // Display-only suffix: agent frontmatter thinking (low) shows on the model, --model stays raw.
     assert.match(first.details.model, /:low$/, "frontmatter thinking must suffix the model display");
-    assert.match(index, /thinking \? `\$\{model\}:\$\{thinking\}` : model/, "no-thinking must keep the bare model");
+    assert.match(sources, /thinking \? `\$\{model\}:\$\{thinking\}` : model/, "no-thinking must keep the bare model");
     assert.equal(launch.concat(launchResult).match(/trace it/g)?.length, 1, "launch task shown twice");
     assert.equal(launch.concat(launchResult).match(/first run/g)?.length, 1, "launch description shown twice");
     assert.match(
@@ -728,10 +805,9 @@ try {
     const originalNow = Date.now;
     try {
         Date.now = () => 0;
-        const frame = () => SPINNER_FRAMES.find((icon) => view.render(80)[2]?.includes(icon));
-        const firstFrame = frame();
+        const firstFrame = view.render(80)[2];
         Date.now = () => SPINNER_INTERVAL_MS;
-        assert.notEqual(frame(), firstFrame, "running status spinner stayed frozen");
+        assert.notEqual(view.render(80)[2], firstFrame, "running status spinner stayed frozen");
     } finally {
         Date.now = originalNow;
     }
@@ -870,10 +946,130 @@ try {
     const restoredText = restored.render(80).join("\n");
     assert.match(restoredText, /second run/);
     assert.match(restoredText, /Final parent guidance/);
+    // Launch plus completion entries restore as one job per id, not two rows.
+    assert.match(restoredText, /0 running · 2 total/, "restored jobs listed more than once");
     restored.handleInput("\x1b");
     await restoring;
     tui.terminal.rows = 24;
     assert.equal(screens, 3);
+
+    // Crash recovery end to end: a restored "running" job is interrupted and announced, then resumable.
+    let recoverSession;
+    let treeSession;
+    let resumeTool;
+    let resumeCancel;
+    let recoverInspect;
+    let interruptedNotice;
+    extension({
+        on: (event, handler) =>
+            event === "session_start"
+                ? (recoverSession = handler)
+                : event === "session_tree" && (treeSession = handler),
+        registerCommand: (name, command) => name === "delegate" && (recoverInspect = command),
+        registerTool: (tool) => {
+            if (tool.name === "delegate") resumeTool = tool;
+            else if (tool.name === "delegate_cancel") resumeCancel = tool;
+        },
+        registerMessageRenderer() {},
+        sendMessage: (message) => (interruptedNotice = message),
+        appendEntry: (customType, data) => savedEntries.push({ type: "custom", customType, data }),
+        getActiveTools: () => [],
+    });
+    const orphan = {
+        ...jobEntry("orphan1", "running"),
+        agent: "explore",
+        description: "orphaned run",
+    };
+    recoverSession(
+        {},
+        { sessionManager: { getBranch: () => [{ type: "custom", customType: "delegate-job", data: orphan }] } },
+    );
+    assert.equal(orphan.status, "running", "restore mutated the session's own entry");
+    assert.equal(savedEntries.at(-1).data.status, "interrupted");
+    assert.equal(savedEntries.at(-1).data.id, "orphan1");
+    assert.equal(interruptedNotice.customType, "delegate-interrupted");
+    assert.match(interruptedNotice.content, /orphan1 .*explore: orphaned run/);
+    assert.match(interruptedNotice.content, /resume/);
+    const resumed = await resumeTool.execute("call", { resume: "job orphan1" }, undefined, () => {}, {
+        ...ctx,
+        hasUI: false,
+    });
+    assert.match(resumed.content[0].text, /Resumed and finished\./);
+    assert.equal(resumed.details.id, "orphan1");
+    const orphanEntries = savedEntries.filter((entry) => entry.data?.id === "orphan1");
+    assert.deepEqual(
+        orphanEntries.map((entry) => entry.data.status),
+        ["interrupted", "running", "done"],
+    );
+    await assert.rejects(
+        resumeTool.execute("call", { resume: "job orphan1" }, undefined, () => {}, { ...ctx, hasUI: false }),
+        /already done/,
+    );
+    // A mid-run session_tree rebuild restores the live job's launch entry. The restore must not double it, and
+    // finishing the job must not leave a phantom running row behind.
+    const phantom = await resumeTool.execute(
+        "call",
+        { agent: "explore", description: "phantom run", task: "trace it" },
+        undefined,
+        () => {},
+        { ...ctx, mode: "tui", hasUI: true, ui },
+    );
+    treeSession({}, { sessionManager: { getBranch: () => savedEntries } });
+    tui.terminal.rows = 40;
+    const phantomReady = new Promise((resolve) => (showViewer = resolve));
+    const openingPhantom = recoverInspect.handler("", { mode: "tui", ui });
+    const phantomView = await Promise.race([phantomReady, timeout]);
+    assert.match(
+        phantomView.render(80).join("\n"),
+        /1 running · 4 total/,
+        "restored launch entry doubled the live job",
+    );
+    await resumeCancel.execute("call", { id: phantom.details.id }, undefined, () => {}, {
+        ...ctx,
+        mode: "tui",
+        hasUI: true,
+        ui,
+    });
+    phantomView.invalidate();
+    const phantomDone = phantomView.render(80).join("\n");
+    assert.match(phantomDone, /0 running · 4 total/, "finished job left a phantom running row");
+    assert.match(phantomDone, /✗/);
+    phantomView.handleInput("\x1b");
+    await openingPhantom;
+    tui.terminal.rows = 24;
+    // Resuming a recreated (empty) pinned transcript must fail instead of prompting into a blank session.
+    const orphan2 = {
+        ...jobEntry("orphan2", "running"),
+        agent: "explore",
+        description: "empty resume",
+    };
+    recoverSession(
+        {},
+        {
+            sessionManager: {
+                getBranch: () => [...savedEntries, { type: "custom", customType: "delegate-job", data: orphan2 }],
+            },
+        },
+    );
+    assert.equal(savedEntries.at(-1).data.status, "interrupted");
+    writeFileSync("/tmp/pi-delegate-fake-empty", "");
+    await assert.rejects(
+        resumeTool.execute("call", { resume: "job orphan2" }, undefined, () => {}, { ...ctx, hasUI: false }),
+        /transcript is empty[\s\S]*resume: orphan2/,
+    );
+    rmSync("/tmp/pi-delegate-fake-empty", { force: true });
+    assert.equal(savedEntries.filter((entry) => entry.data?.id === "orphan2").at(-1).data.status, "failed");
+    // A failed job is resumable: the pinned transcript reopens and the continuation prompt settles it.
+    const resumedFailed = await resumeTool.execute("call", { resume: "job orphan2" }, undefined, () => {}, {
+        ...ctx,
+        hasUI: false,
+    });
+    assert.match(resumedFailed.content[0].text, /Resumed and finished\./);
+    assert.equal(resumedFailed.details.id, "orphan2");
+    assert.deepEqual(
+        savedEntries.filter((entry) => entry.data?.id === "orphan2").map((entry) => entry.data.status),
+        ["interrupted", "running", "failed", "running", "done"],
+    );
     const cancel = registered.find((tool) => tool.name === "delegate_cancel");
     const tuiCtx = { ...ctx, mode: "tui", hasUI: true, ui };
     const cancelled = await delegate.execute(
@@ -896,12 +1092,9 @@ try {
         .renderResult(cancellation, { expanded: false }, theme, { isError: false })
         .render(120)
         .join("\n");
-    assert.match(
-        cancelledResult,
-        new RegExp(`${STATUS_ICONS.cancelled} ${cancelled.details.id} explore cancellation requested`),
-    );
+    assert.match(cancelledResult, new RegExp(`✗ ${cancelled.details.id} explore cancellation requested`));
     assert.ok(
-        colored.some(([color, text]) => color === STATUS_COLORS.cancelled && text === STATUS_ICONS.cancelled),
+        colored.some(([color, text]) => color === STATUS_COLORS.cancelled && text === "✗"),
         "cancellation icon must be muted, not an error",
     );
     const remaining = await delegate.execute(
@@ -917,6 +1110,7 @@ try {
     clearTimeout(timer);
     process.argv = argv;
     rmSync(fakeCliDir, { recursive: true, force: true });
+    rmSync("/tmp/pi-delegate-fake-empty", { force: true });
 }
 
 console.log("pi-delegate check passed");

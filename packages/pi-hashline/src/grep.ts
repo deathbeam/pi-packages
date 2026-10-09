@@ -13,29 +13,6 @@ import { loadPrompt } from "./prompt-loader";
 import { rememberReadSnapshot } from "./read-snapshot";
 import { throwIfAborted } from "./runtime";
 
-const GREP_DESC = loadPrompt(new URL("../prompts/grep.md", import.meta.url))
-    .replaceAll("{{DEFAULT_MAX_LINES}}", String(DEFAULT_MAX_LINES))
-    .replaceAll("{{DEFAULT_MAX_BYTES}}", formatSize(DEFAULT_MAX_BYTES))
-    .trim();
-
-const GREP_PROMPT_SNIPPET = loadPrompt(new URL("../prompts/grep-snippet.md", import.meta.url)).trim();
-
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
-const STDERR_MAX_BYTES = 64 * 1024;
-
-const RG_BIN = "rg";
-
-/** Detect whether ripgrep is available on PATH. Only called at registration time. */
-function isRgAvailable(): boolean {
-    try {
-        const result = spawnSync(RG_BIN, ["--version"], { encoding: "utf-8" });
-        return result.error === undefined && result.status === 0;
-    } catch {
-        return false;
-    }
-}
-
 /** rg --json submatch: byte offsets into `lines.text` (which includes the newline). */
 interface RgSubmatch {
     start: number;
@@ -67,6 +44,36 @@ interface LineRange {
     end: number;
 }
 
+interface RgSearchResult {
+    matchesByFile: Map<string, Map<number, MatchRanges>>;
+    matches: number;
+    truncated: boolean;
+    warning?: string;
+}
+
+const GREP_DESC = loadPrompt(new URL("../prompts/grep.md", import.meta.url))
+    .replaceAll("{{DEFAULT_MAX_LINES}}", String(DEFAULT_MAX_LINES))
+    .replaceAll("{{DEFAULT_MAX_BYTES}}", formatSize(DEFAULT_MAX_BYTES))
+    .trim();
+
+const GREP_PROMPT_SNIPPET = loadPrompt(new URL("../prompts/grep-snippet.md", import.meta.url)).trim();
+
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+const STDERR_MAX_BYTES = 64 * 1024;
+
+const RG_BIN = "rg";
+
+/** Detect whether ripgrep is available on PATH. Only called at registration time. */
+function isRgAvailable(): boolean {
+    try {
+        const result = spawnSync(RG_BIN, ["--version"], { encoding: "utf-8" });
+        return result.error === undefined && result.status === 0;
+    } catch {
+        return false;
+    }
+}
+
 /** Merge a new range into an existing sorted, non-overlapping list. */
 function mergeRange(ranges: LineRange[], range: LineRange): void {
     let merged = range;
@@ -84,13 +91,6 @@ function mergeRange(ranges: LineRange[], range: LineRange): void {
     remaining.push(merged);
     remaining.sort((a, b) => a.start - b.start);
     ranges.splice(0, ranges.length, ...remaining);
-}
-
-interface RgSearchResult {
-    matchesByFile: Map<string, Map<number, MatchRanges>>;
-    matches: number;
-    truncated: boolean;
-    warning?: string;
 }
 
 function addMatch(

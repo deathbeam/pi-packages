@@ -53,14 +53,8 @@ function isAmbiguous(lines: readonly string[], pattern: readonly string[]): bool
  * - a hunk's search window is duplicated in `current` (ambiguous placement),
  * - the patch cannot apply to `current` with fuzzFactor 0, or
  * - the merged result is identical to `current` (nothing new to write).
- *
- * Short-circuit: if `base === current`, return `baseEdited` directly.
  */
 export function threeWayMerge(base: string, baseEdited: string, current: string): string | null {
-    if (base === current) {
-        return baseEdited;
-    }
-
     const patch = structuredPatch("a", "b", base, baseEdited, "", "", { context: 3 });
 
     // Refuse ambiguous placement: a duplicated search window means jsdiff could
