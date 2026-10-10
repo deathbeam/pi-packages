@@ -105,6 +105,11 @@ const agentLoopRun = async (tool, args) =>
         throw new Error("read did not resolve Pi-style file URL");
     }
     console.log("--- shared Pi-style path resolution OK ---");
+    // Strict models inject literal "null" (string) for optional params they omit; it must not become a search path.
+    const nullPathGrep = await run(byName.grep, { pattern: "const x = 1;", path: "null" });
+    if (!/#[A-Z]{3}:const x = 1;/.test(nullPathGrep.content[0].text)) {
+        throw new Error('grep path "null" was not treated as omitted');
+    }
 
     // 2. edit: replace line 2 using the anchor from read output
     const anchor = readText.match(/^\s*2#([A-Z]{3}):/m);

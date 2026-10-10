@@ -46,7 +46,11 @@ export default function (pi: ExtensionAPI) {
                 Type.String({ description: `Pages published at/before this time. ${DATE_DESC}` }),
             ),
         }),
-        async execute(_id, p, signal) {
+        async execute(_id, rawParams, signal) {
+            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
+            const p = Object.fromEntries(
+                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
+            ) as typeof rawParams;
             const r = await keen(
                 "/v1/search",
                 {
@@ -87,7 +91,11 @@ export default function (pi: ExtensionAPI) {
                 }),
             ),
         }),
-        async execute(_id, p, signal) {
+        async execute(_id, rawParams, signal) {
+            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
+            const p = Object.fromEntries(
+                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
+            ) as typeof rawParams;
             const q = new URLSearchParams({ url: p.url });
             if (p.max_chars !== undefined) q.set("maxChars", String(p.max_chars));
             if (p.live) q.set("live", "true");

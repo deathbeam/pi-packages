@@ -1106,6 +1106,16 @@ try {
     );
     assert.match(widgetLines.join("\n"), /1 running · 4 total/);
     await cancel.execute("call", { id: remaining.details.id }, undefined, () => {}, tuiCtx);
+// Strict models inject literal "null" (string or JSON null) for optional params they omit;
+// it must not read as job id "null" and fail the call.
+const nulled = await delegate.execute(
+    "call",
+    { agent: "explore", description: "null params", task: "trace it", resume: "null", model: null },
+    undefined,
+    () => {},
+    tuiCtx,
+);
+await cancel.execute("call", { id: nulled.details.id }, undefined, () => {}, tuiCtx);
 } finally {
     clearTimeout(timer);
     process.argv = argv;

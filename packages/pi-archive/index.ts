@@ -426,7 +426,11 @@ export default function (pi: ExtensionAPI) {
                 }),
             ),
         }),
-        async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
+            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
+            const params = Object.fromEntries(
+                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
+            ) as typeof rawParams;
             const sessionDir = ctx.sessionManager.getSessionDir();
             const root = path.dirname(sessionDir);
             const result = await searchSessions(

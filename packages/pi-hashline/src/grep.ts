@@ -403,7 +403,11 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             return text;
         },
 
-        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
+            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
+            const params = Object.fromEntries(
+                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
+            ) as typeof rawParams;
             throwIfAborted(signal);
 
             const searchPath = params.path ? resolveToCwd(params.path, ctx.cwd) : ctx.cwd;

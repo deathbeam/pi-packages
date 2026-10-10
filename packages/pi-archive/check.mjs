@@ -214,6 +214,9 @@ const zephyr = await search({ query: "zephyr" });
 assert.match(zephyr.text, /\[home\/user \| 2026-09-07\]/);
 assert.deepEqual(hitLines(zephyr.text), ["- user: zephyr works in short projects"]);
 
+// Strict models inject literal "null" (string) for optional params they omit; it must not filter sessions.
+assert.equal((await search({ query: "jwt", session: "null" })).details.matchCount, 4);
+
 // Excerpts keep 150 chars either side of the first hit, with ellipses when trimmed.
 const [needle] = await hits({ query: "needle" });
 assert.ok(needle.startsWith("- user: …" + "x".repeat(150) + "needle"), "150 chars before the hit");

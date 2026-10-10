@@ -54,6 +54,14 @@ try {
     assert.equal(last().pathname, "/v1/search");
     delete process.env.KEENABLE_API_KEY;
 
+    // Strict models inject literal "null" (string) for optional params they omit; it must not become a real filter.
+    stub({ results: [] });
+    await tools.web_search.execute("n", { query: "hi", site: "null", published_after: "null" });
+    assert.deepEqual(JSON.parse(calls.at(-1).init.body), { query: "hi" });
+    stub({ title: "T", url: "u", content: "body" });
+    await tools.web_fetch.execute("n2", { url: "https://example.com/", prompt: "null" });
+    assert.equal(last().searchParams.get("prompt"), null);
+
     // Every request carries its own timeout signal, not the caller's.
     stub({ results: [] });
     const ac = new AbortController();
