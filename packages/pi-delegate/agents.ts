@@ -10,7 +10,6 @@ type AgentFile = {
     description: string;
     tools?: string[];
     model?: string;
-    thinking?: string;
     prompt: string;
 };
 
@@ -70,7 +69,6 @@ function loadAgents(dir: string): AgentFile[] {
                 description: frontmatter.description,
                 tools: stringList(frontmatter.tools),
                 model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-                thinking: typeof frontmatter.thinking === "string" ? frontmatter.thinking : undefined,
                 prompt: body.trim(),
             });
         } catch {
@@ -91,21 +89,27 @@ export function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[
     return [...agents.values()];
 }
 
+// Same `:<thinking>` suffix pi's --model takes; only known levels split, so ids like `llama3:8b` stay whole.
+function splitThinking(value: string): { model: string; thinking?: string } {
+    const match = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/.exec(value);
+    return match ? { model: match[1], thinking: match[2] } : { model: value };
+}
+
+// Precedence: requested `:<thinking>` suffix, then the tier suffix, then the session level.
 export function resolveModel(
     value: string | undefined,
     models: Record<string, unknown>,
-    current: ExtensionContext["model"],
+    ctx: Pick<ExtensionContext, "model" | "thinkingLevel">,
 ): { model?: string; thinking?: string } {
-    if (value && !MODEL_TIERS.has(value)) return { model: value };
-    const configured = value ? models[value] : undefined;
-    const entry =
-        configured && typeof configured === "object"
-            ? (configured as { model?: unknown; thinking?: unknown })
-            : undefined;
-    const model = typeof configured === "string" ? configured : typeof entry?.model === "string" ? entry.model : "";
-    // Tier thinking only applies when the model itself came from the tier entry.
-    if (model) return { model, thinking: typeof entry?.thinking === "string" ? entry.thinking : undefined };
-    return { model: current ? `${current.provider}/${current.id}` : undefined };
+    const split = splitThinking(value ?? "");
+    const thinking = split.thinking ?? ctx.thinkingLevel;
+    if (split.model && !MODEL_TIERS.has(split.model)) return { model: split.model, thinking };
+    const configured = models[split.model];
+    if (typeof configured === "string" && configured) {
+        const tier = splitThinking(configured);
+        return { model: tier.model, thinking: split.thinking ?? tier.thinking ?? ctx.thinkingLevel };
+    }
+    return { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking };
 }
 
 export function contextWindowFor(ctx: ExtensionContext, model: string | undefined): number | undefined {

@@ -307,7 +307,10 @@ export default function (pi: ExtensionAPI) {
                 Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
             ),
             model: Type.Optional(
-                Type.String({ description: "Model tier (cheap, balanced, strong) or an explicit provider/model." }),
+                Type.String({
+                    description:
+                        "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix.",
+                }),
             ),
             resume: Type.Optional(
                 Type.String({
@@ -337,16 +340,11 @@ export default function (pi: ExtensionAPI) {
                 const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
                 throw new Error(`Unknown agent "${prior?.agent ?? params.agent}". Available agents: ${names}.`);
             }
-            const { model, thinking: tierThinking } = resolveModel(
-                params.model ?? agent.model,
-                config.models ?? {},
-                ctx.model,
-            );
+            const { model, thinking } = resolveModel(params.model ?? agent.model, config.models ?? {}, ctx);
             if (!model) throw new Error(`No model found for "${agent.name}".`);
             const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
                 (tool) => !DELEGATION_TOOLS.has(tool),
             );
-            const thinking = agent.thinking ?? tierThinking ?? ctx.thinkingLevel;
             const displayModel = thinking ? `${model}:${thinking}` : model;
             const job: DelegateJob = {
                 // A resumed job keeps its id: the pinned child session id reopens the old transcript.

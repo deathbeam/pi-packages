@@ -20,18 +20,18 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
     "delegate": {
         "agentDirs": ["./.pi/agents"],
         "models": {
-            "cheap": { "model": "anthropic/claude-haiku-latest", "thinking": "low" },
-            "balanced": "anthropic/claude-sonnet-latest",
-            "strong": "anthropic/claude-opus-latest"
+            "cheap": "anthropic/claude-haiku-5-5:low",
+            "balanced": "anthropic/claude-sonnet-5-5:high",
+            "strong": "anthropic/claude-opus-5-5:high"
         }
     }
 }
 ```
 
 Relative `agentDirs` resolve against the project cwd, later same-name definitions win. Project `models` override global
-tiers (`cheap`, `balanced`, `strong`); a tier is a `provider/model` string or a `{ "model": "...", "thinking": "..." }`
-object, otherwise the child uses the current session model and thinking level. Thinking resolves from the agent
-frontmatter first, then the tier entry, then the session level.
+tiers (`cheap`, `balanced`, `strong`); a tier is a `provider/model` string with an optional `:<thinking>` suffix, as in
+pi's `--model`. An unset tier makes the child use the current session model. Thinking resolves from the agent's
+`model` suffix first, then the tier suffix, then the session level.
 
 Agents are Markdown files with frontmatter, the body becomes the child's system prompt:
 
@@ -41,13 +41,12 @@ name: scout
 description: Explore the codebase
 tools: read, grep
 model: cheap
-thinking: low
 ---
 
 Explore the codebase and report relevant paths.
 ```
 
-Omit `tools` to inherit active tools. `model` can also be an explicit `provider/model`. The model sees the agent list from
+Omit `tools` to inherit active tools. `model` can also be an explicit `provider/model[:thinking]`. The model sees the agent list from
 when the extension loaded, so run `/reload` after adding agents or changing their descriptions.
 
 The main session is prompted to act as an orchestrator. When it makes 5, 10, 20, … direct exploration calls (`read`,

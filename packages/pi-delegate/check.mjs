@@ -74,25 +74,31 @@ assert.match(sources, /const DELEGATE_SESSION_DIR = join\(getAgentDir\(\), "sess
 assert.match(sources, /"--session-id",\s*`delegate-\$\{job\.id\}`,\s*"--session-dir",\s*DELEGATE_SESSION_DIR/);
 assert.match(sources, /spawn\(process\.execPath, \[entrypoint, "--mode", "rpc", \.\.\.args\]/);
 assert.match(sources, /"--model",\s*model,\s*"--tools",\s*tools\.join\(","\)/);
-// Tier entries can pin model and thinking; agent frontmatter still wins, explicit models consult no tier.
-assert.match(sources, /agent\.thinking \?\? tierThinking \?\? ctx\.thinkingLevel/);
-const session = { provider: "anthropic", id: "m" };
-assert.deepEqual(resolveModel("anthropic/x", {}, session), { model: "anthropic/x" });
+// A `:<thinking>` suffix on the agent/param beats the tier suffix, which beats the session level.
+const session = { model: { provider: "anthropic", id: "m" }, thinkingLevel: "medium" };
+assert.deepEqual(resolveModel("anthropic/x", {}, session), { model: "anthropic/x", thinking: "medium" });
+assert.deepEqual(resolveModel("anthropic/x:high", {}, session), { model: "anthropic/x", thinking: "high" });
+// Only known levels split, so colon-bearing ids stay whole.
+assert.deepEqual(resolveModel("ollama/llama3:8b", {}, session), { model: "ollama/llama3:8b", thinking: "medium" });
 assert.deepEqual(resolveModel("cheap", { cheap: "anthropic/h" }, session), {
     model: "anthropic/h",
-    thinking: undefined,
+    thinking: "medium",
 });
-assert.deepEqual(resolveModel("cheap", { cheap: { model: "google/flash", thinking: "low" } }, session), {
+assert.deepEqual(resolveModel("cheap", { cheap: "google/flash:low" }, session), {
     model: "google/flash",
     thinking: "low",
 });
-assert.deepEqual(resolveModel("cheap", { cheap: { model: "google/flash" } }, session), {
+assert.deepEqual(resolveModel("cheap:high", { cheap: "google/flash:low" }, session), {
     model: "google/flash",
-    thinking: undefined,
+    thinking: "high",
 });
-// A malformed entry falls back to the session model and carries no tier thinking.
-assert.deepEqual(resolveModel("cheap", { cheap: { thinking: "low" } }, session), { model: "anthropic/m" });
-assert.deepEqual(resolveModel(undefined, {}, undefined), { model: undefined });
+// An unset or malformed tier falls back to the session model but keeps the requested level.
+assert.deepEqual(resolveModel("cheap:low", {}, session), { model: "anthropic/m", thinking: "low" });
+assert.deepEqual(resolveModel("cheap", { cheap: { model: "x/y" } }, session), {
+    model: "anthropic/m",
+    thinking: "medium",
+});
+assert.deepEqual(resolveModel(undefined, {}, {}), { model: undefined, thinking: undefined });
 assert.match(child, /case "agent_settled"/);
 // get_state exists only for the resume guard: verifying the pinned transcript is not empty.
 assert.match(child, /type: "get_state"/);
@@ -118,11 +124,15 @@ assert.match(
     agentFiles.find(({ file }) => file === "reviewer.md").text,
     /caused or made reachable by the assigned change/,
 );
-// An invalid level makes every delegate of that agent fail at child launch, not at load.
-const thinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+// A typo like `cheap:hgh` would not split and fail every delegate of that agent at child launch.
 for (const { file, text } of agentFiles) {
-    const level = text.match(/^thinking:\s*(\S+)/m)?.[1];
-    if (level) assert.ok(thinkingLevels.has(level), `${file} has invalid thinking level "${level}"`);
+    const model = text.match(/^model:\s*(\S+)/m)?.[1];
+    if (model)
+        assert.match(
+            model,
+            /^(cheap|balanced|strong)(:(off|minimal|low|medium|high|xhigh|max))?$/,
+            `${file} model "${model}"`,
+        );
 }
 
 // Crash recovery: entry dedupe runs through the store's restore seam; resume decisions are pure and tested directly.
@@ -713,8 +723,8 @@ try {
         .render(120)
         .join("\n");
     assert.match(launchResult, /Model:[\s\S]*Tools:/);
-    // Display-only suffix: agent frontmatter thinking (low) shows on the model, --model stays raw.
-    assert.match(first.details.model, /:low$/, "frontmatter thinking must suffix the model display");
+    // Display-only suffix: the session thinking (off) shows on the model, --model stays raw.
+    assert.match(first.details.model, /:off$/, "inherited thinking must suffix the model display");
     assert.match(sources, /thinking \? `\$\{model\}:\$\{thinking\}` : model/, "no-thinking must keep the bare model");
     assert.equal(launch.concat(launchResult).match(/trace it/g)?.length, 1, "launch task shown twice");
     assert.equal(launch.concat(launchResult).match(/first run/g)?.length, 1, "launch description shown twice");

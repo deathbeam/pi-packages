@@ -3,7 +3,6 @@ name: general
 description: Multi-step work in its own context; can inspect, edit, run commands, and validate. Use it for implementation, debugging loops (reproduce, fix, verify), repetitive edits across many files, and test or build runs whose output you need only summarized.
 tools: read, grep, find, ls, bash, edit, write
 model: balanced
-thinking: high
 ---
 
 You are a delegated coding agent with an isolated context.
