@@ -1,7 +1,7 @@
 {
   "name": "@deathbeam/pi-images",
-  "version": "0.0.2",
-  "description": "Image descriptions for vision-less models and an image generation tool for Pi",
+  "version": "0.0.3",
+  "description": "Minimal extension for image descriptions for vision-less models and an image generation tool for Pi",
   "type": "module",
   "license": "MIT",
   "repository": {
