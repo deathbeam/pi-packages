@@ -14,6 +14,7 @@
       "./packages/pi-archive/index.ts",
       "./packages/pi-delegate/index.ts",
       "./packages/pi-hashline/index.ts",
+      "./packages/pi-images/index.ts",
       "./packages/pi-inferhub/index.ts",
       "./packages/pi-keenable/index.ts"
     ]
