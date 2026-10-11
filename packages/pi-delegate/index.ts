@@ -23,7 +23,9 @@ import {
     reportText,
     resumeHint,
     SPINNER_INTERVAL_MS,
+    formatDuration,
     statusText,
+    totalElapsedMs,
     usageStats,
     widgetJobs,
 } from "./format.ts";
@@ -143,7 +145,8 @@ export default function (pi: ExtensionAPI) {
         const now = Date.now();
         const { shown, hidden, detail } = widgetJobs(jobs);
         const lines: string[] = [];
-        const counts = `${jobs.length} running · ${store.all().length} total`;
+        const all = store.all();
+        const counts = `${jobs.length} running · ${all.length} total · ${formatDuration(totalElapsedMs(all, now))}`;
         lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
         for (const job of shown) {
             lines.push(

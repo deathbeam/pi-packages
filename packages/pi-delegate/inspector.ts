@@ -1,7 +1,15 @@
 import { type ExtensionAPI, getMarkdownTheme, keyHint, rawKeyHint } from "@earendil-works/pi-coding-agent";
 import { HStack, Markdown, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { ChildActivity } from "./child.ts";
-import { formatTools, jobIdentity, STATUS_COLORS, statusText, usageStats } from "./format.ts";
+import {
+    formatDuration,
+    formatTools,
+    jobIdentity,
+    STATUS_COLORS,
+    statusText,
+    totalElapsedMs,
+    usageStats,
+} from "./format.ts";
 import type { InspectJob, JobStore } from "./store.ts";
 
 /** The /delegate command: a full-screen inspector over the job store. */
@@ -108,7 +116,10 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                 ]
                               : [];
                         return [
-                            truncateToWidth(`${statusText(theme, job.status)} ${jobIdentity(theme, job)}`, width),
+                            truncateToWidth(
+                                `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", usageStats(job, (job.endedAt ?? Date.now()) - job.startedAt))}`,
+                                width,
+                            ),
                             truncateToWidth(theme.fg("dim", job.model), width),
                             ...tools,
                             truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
@@ -136,7 +147,10 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                             const title = truncateToWidth(
                                 `${theme.fg(focus === "list" ? "accent" : "muted", focus === "list" ? "[Jobs]" : "Jobs")}  ` +
                                     `${theme.fg(focus === "history" ? "accent" : "muted", focus === "history" ? "[Activity]" : "Activity")}` +
-                                    theme.fg("dim", ` · ${store.live().length} running · ${items.length} total`),
+                                    theme.fg(
+                                        "dim",
+                                        ` · ${store.live().length} running · ${items.length} total · ${formatDuration(totalElapsedMs(items))}`,
+                                    ),
                                 width,
                             );
                             const footer = truncateToWidth(

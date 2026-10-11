@@ -72,7 +72,7 @@ function formatTokens(count: number): string {
     return `${Math.round(count / 1000000)}M`;
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
     const seconds = Math.max(0, Math.floor(ms / 1000));
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
@@ -87,6 +87,10 @@ export function usageStats(usage: UsageInfo, elapsedMs: number): string {
             : formatTokens(usage.contextTokens)
         : "";
     return [tokens, formatDuration(elapsedMs)].filter(Boolean).join(" · ");
+}
+/** Summed wall-clock across jobs; running jobs tick from `now`. Parallel jobs each count their full span. */
+export function totalElapsedMs(jobs: { startedAt: number; endedAt?: number }[], now = Date.now()): number {
+    return jobs.reduce((sum, job) => sum + (job.endedAt ?? now) - job.startedAt, 0);
 }
 
 export function toolCallDetail(toolName: string, args: unknown): string {
