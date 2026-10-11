@@ -244,21 +244,25 @@ export default function (pi: ExtensionAPI) {
 
         renderCall(args, theme, context) {
             const model = readImagesSettings(context.cwd).generate;
-            // One squashed line keeps multi-paragraph prompts readable in the tool box.
-            const prompt = String(args?.prompt ?? "")
-                .replace(/\s+/g, " ")
-                .trim();
+            const lines = String(args?.prompt ?? "")
+                .trim()
+                .split("\n");
+            const shown = context.expanded ? lines : lines.slice(0, 5);
+            const more = lines.length - shown.length;
             const container = new Container();
             container.addChild(
                 new TruncatedText(
                     `${theme.fg("toolTitle", theme.bold("image_generate"))}${model ? ` ${theme.fg("muted", model)}` : ""}`,
                 ),
             );
-            if (prompt)
+            if (shown.join("").trim())
                 container.addChild(
-                    context.expanded
-                        ? new Text(theme.fg("toolOutput", prompt), 0, 0)
-                        : new TruncatedText(theme.fg("toolOutput", prompt)),
+                    new Text(
+                        theme.fg("toolOutput", shown.join("\n")) +
+                            (more > 0 ? `\n${theme.fg("muted", `... (${more} more lines, ctrl+o to expand)`)}` : ""),
+                        0,
+                        0,
+                    ),
                 );
             return container;
         },

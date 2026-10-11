@@ -229,7 +229,7 @@ try {
         },
         bold: (text) => text,
     };
-    const longPrompt = "START " + "a very detailed prompt ".repeat(60) + "END";
+    const longPrompt = "START\n" + "a very detailed prompt\n".repeat(10) + "END";
     const callCtx = { expanded: false, cwd: project };
     const collapsedRows = tools.image_generate
         .renderCall({ prompt: longPrompt }, theme, callCtx)
@@ -242,6 +242,7 @@ try {
     );
     assert.match(collapsedRows.join("\n"), /START/);
     assert.doesNotMatch(collapsedRows.join("\n"), /END/, "collapsed prompt must be truncated");
+    assert.match(collapsedRows.join("\n"), /7 more lines/);
     assert.ok(
         tools.image_generate
             .renderCall({ prompt: longPrompt }, theme, { ...callCtx, expanded: true })
