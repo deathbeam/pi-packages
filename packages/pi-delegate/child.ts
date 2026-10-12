@@ -1,4 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { limitOutput, resultPreview, toolCallDetail } from "./format.ts";
 
 type Child = ChildProcessWithoutNullStreams;
@@ -298,4 +300,82 @@ export function runChild(
         done,
         steer: (message) => send({ type: "steer", message }),
     };
+}
+
+/** Text content of a persisted transcript message, in part order. */
+function transcriptText(content: unknown): string[] {
+    if (typeof content === "string") return [content];
+    if (!Array.isArray(content)) return [];
+    return content
+        .map((part) => (part && typeof part === "object" ? (part as { type?: string; text?: string }) : {}))
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text!);
+}
+
+/**
+ * Replays the child's persisted transcript as the activity a resumed job continues from, so the
+ * inspector keeps the old history. A missing or unreadable transcript seeds nothing: the resume
+ * itself still works.
+ */
+export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
+    let sessionFile: string | undefined;
+    try {
+        // Sessions are <timestamp>_<sessionId>.jsonl; a recreated pinned session is the newest one.
+        sessionFile = readdirSync(sessionDir)
+            .filter((name) => name.endsWith(`_delegate-${id}.jsonl`))
+            .sort()
+            .at(-1);
+    } catch {
+        return [];
+    }
+    if (!sessionFile) return [];
+    let lines: string[] = [];
+    try {
+        lines = readFileSync(join(sessionDir, sessionFile), "utf8").split("\n");
+    } catch {
+        return [];
+    }
+    const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+    const activity: ChildActivity[] = [];
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        let entry: { type?: string; message?: unknown };
+        try {
+            entry = JSON.parse(line);
+        } catch {
+            continue; // Same tolerance pi's session reader has for malformed lines.
+        }
+        const message =
+            entry?.type === "message"
+                ? (entry.message as {
+                      role?: "assistant" | "user" | "toolResult";
+                      content?: unknown;
+                      toolName?: string;
+                  })
+                : undefined;
+        if (!message?.role) continue;
+        if (message.role === "toolResult") {
+            const preview = resultPreview({ content: message.content });
+            activity.push({
+                kind: "result",
+                text: normalize(`↳ ${message.toolName ?? "tool"}: ${preview ?? "(no text output)"}`),
+            });
+            continue;
+        }
+        // Assistant text lands before its tool calls, matching the live event order.
+        const text = transcriptText(message.content).join("");
+        if (text) activity.push({ kind: message.role, text });
+        if (message.role !== "assistant") continue;
+        for (const part of Array.isArray(message.content) ? message.content : []) {
+            const call =
+                part && typeof part === "object" ? (part as { type?: string; name?: string; arguments?: unknown }) : {};
+            if (call.type !== "toolCall" || !call.name) continue;
+            activity.push({
+                kind: "tool",
+                text: normalize(call.name),
+                detail: normalize(toolCallDetail(call.name, call.arguments)) || undefined,
+            });
+        }
+    }
+    return activity;
 }

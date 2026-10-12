@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -25,9 +25,12 @@ import {
     usageStats,
     widgetJobs,
 } from "./format.ts";
-import { runChild } from "./child.ts";
+import { priorActivity, runChild } from "./child.ts";
 import { resolveModel } from "./agents.ts";
 import { createJobStore, resumeDecision } from "./store.ts";
+// Hermetic: configFor and the pinned session dir must not read the host's real agent settings.
+const agentDir = mkdtempSync(join(tmpdir(), "pi-delegate-check-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
 
 initTheme("dark");
 
@@ -400,6 +403,44 @@ await assert.rejects(active.done, /aborted/);
 assert.equal(abortRequested, true);
 assert.equal(stopping.stdin.writableEnded, true);
 
+// A resumed job's inspector history replays the child's persisted transcript, malformed lines and all.
+const seedDir = mkdtempSync(join(tmpdir(), "pi-delegate-seed-"));
+writeFileSync(
+    join(seedDir, "2026-01-01T00-00-00-000Z_delegate-seed1.jsonl"),
+    [
+        JSON.stringify({ type: "session", id: "delegate-seed1" }),
+        JSON.stringify({ type: "message", message: { role: "user", content: "trace it" } }),
+        JSON.stringify({
+            type: "message",
+            message: {
+                role: "assistant",
+                content: [
+                    { type: "text", text: "Reading files." },
+                    { type: "toolCall", id: "t1", name: "read", arguments: { path: "src/a.ts" } },
+                ],
+            },
+        }),
+        JSON.stringify({
+            type: "message",
+            message: {
+                role: "toolResult",
+                toolCallId: "t1",
+                toolName: "read",
+                content: [{ type: "text", text: "const a = 1;" }],
+            },
+        }),
+        "{not json",
+    ].join("\n") + "\n",
+);
+assert.deepEqual(priorActivity(seedDir, "seed1"), [
+    { kind: "user", text: "trace it" },
+    { kind: "assistant", text: "Reading files." },
+    { kind: "tool", text: "read", detail: "src/a.ts" },
+    { kind: "result", text: "↳ read: const a = 1;" },
+]);
+assert.deepEqual(priorActivity(seedDir, "nope"), [], "unknown session id must seed nothing");
+assert.deepEqual(priorActivity(join(seedDir, "missing"), "seed1"), [], "missing session dir must seed nothing");
+
 // The command is TUI-only; an empty session should explain why there is no view.
 const { default: extension } = await import(new URL("index.ts", root).href);
 const registered = [];
@@ -750,6 +791,22 @@ try {
         new RegExp(`^delegate_steer ${first.details.id} explore`),
         "finished delegate identity lost from call header",
     );
+    // A resume call carries only the job id; the header must still identify the job and show its task.
+    assert.match(
+        stripVTControlCharacters(
+            delegate.renderCall({ resume: `job ${first.details.id}` }, theme, { expanded: false }).render(120)[0],
+        ),
+        /^delegate explore first run \(resumed\)/,
+        "resumed delegate identity missing from call header",
+    );
+    assert.match(
+        delegate
+            .renderCall({ resume: `job ${first.details.id}` }, theme, { expanded: true })
+            .render(120)
+            .join("\n"),
+        /trace it/,
+        "resumed delegate task missing from call body",
+    );
     assert.match(
         renderReport(firstReport, { expanded: false }, theme).render(120).join("\n"),
         new RegExp(`✓ ${first.details.id} explore first run`),
@@ -1000,12 +1057,26 @@ try {
     assert.equal(interruptedNotice.customType, "delegate-interrupted");
     assert.match(interruptedNotice.content, /orphan1 .*explore: orphaned run/);
     assert.match(interruptedNotice.content, /resume/);
+    // The pinned transcript replays into the resumed job's activity, so the inspector keeps the old history.
+    mkdirSync(join(agentDir, "sessions", "delegates"), { recursive: true });
+    writeFileSync(
+        join(agentDir, "sessions", "delegates", "2026-01-01T00-00-00-000Z_delegate-orphan1.jsonl"),
+        `${JSON.stringify({ type: "session", id: "delegate-orphan1" })}\n${JSON.stringify({
+            type: "message",
+            message: { role: "user", content: "orphan task" },
+        })}\n`,
+    );
     const resumed = await resumeTool.execute("call", { resume: "job orphan1" }, undefined, () => {}, {
         ...ctx,
         hasUI: false,
     });
     assert.match(resumed.content[0].text, /Resumed and finished\./);
     assert.equal(resumed.details.id, "orphan1");
+    const orphanLaunch = savedEntries.find((entry) => entry.data?.id === "orphan1" && entry.data.status === "running");
+    assert.ok(
+        orphanLaunch?.data.activity.some((item) => item.kind === "user" && item.text === "orphan task"),
+        "resumed job did not replay the prior transcript",
+    );
     const orphanEntries = savedEntries.filter((entry) => entry.data?.id === "orphan1");
     assert.deepEqual(
         orphanEntries.map((entry) => entry.data.status),
@@ -1126,11 +1197,30 @@ try {
         tuiCtx,
     );
     await cancel.execute("call", { id: nulled.details.id }, undefined, () => {}, tuiCtx);
+    // The launch text and result header mark a resume, not just a fresh start.
+    const resumedLaunch = await delegate.execute(
+        "call",
+        { resume: `job ${cancelled.details.id}` },
+        undefined,
+        () => {},
+        tuiCtx,
+    );
+    assert.equal(resumedLaunch.details.resumed, true);
+    assert.match(resumedLaunch.content[0].text, /^Resumed delegate "explore" in the background/);
+    assert.match(
+        stripVTControlCharacters(
+            delegate.renderResult(resumedLaunch, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
+        ),
+        new RegExp(`${cancelled.details.id} explore resumed in background`),
+        "resumed launch missing its mark in the result header",
+    );
 } finally {
     clearTimeout(timer);
     process.argv = argv;
     rmSync(fakeCliDir, { recursive: true, force: true });
     rmSync("/tmp/pi-delegate-fake-empty", { force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+    rmSync(seedDir, { recursive: true, force: true });
 }
 
 console.log("pi-delegate check passed");

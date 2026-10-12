@@ -29,13 +29,14 @@ import {
     usageStats,
     widgetJobs,
 } from "./format.ts";
-import { runChild } from "./child.ts";
+import { priorActivity, runChild } from "./child.ts";
 import { createJobStore, resumeDecision, type DelegateJob } from "./store.ts";
 import { registerInspector } from "./inspector.ts";
 import { configFor, contextWindowFor, discoverAgents, resolveModel } from "./agents.ts";
 
 type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "description" | "task" | "model" | "tools"> & {
     background: boolean;
+    resumed: boolean;
 };
 
 type SteerDetails = Pick<
@@ -354,7 +355,8 @@ export default function (pi: ExtensionAPI) {
                 task: prior?.task ?? params.task ?? "",
                 model: displayModel,
                 status: "running",
-                activity: [],
+                // A resume continues the pinned transcript, so the inspector replays the child's own history.
+                activity: prior ? priorActivity(DELEGATE_SESSION_DIR, prior.id) : [],
                 tools,
                 toolCalls: 0,
                 startedAt: Date.now(),
@@ -369,6 +371,7 @@ export default function (pi: ExtensionAPI) {
                 model: displayModel,
                 tools,
                 background: ctx.hasUI,
+                resumed: Boolean(prior),
             };
             const args = [
                 "--session-id",
@@ -426,7 +429,7 @@ export default function (pi: ExtensionAPI) {
                 content: [
                     {
                         type: "text",
-                        text: `Started delegate "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
+                        text: `${prior ? "Resumed" : "Started"} delegate "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
                     },
                 ],
                 details,
@@ -434,18 +437,21 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            const agent = argText(args?.agent).trim();
-            const description = argText(args?.description).trim();
+            // A resume passes only the job id; recover the identity and task from the stored job.
+            const resumed = args?.resume ? store.find(jobId(args.resume)) : undefined;
+            const agent = argText(args?.agent).trim() || resumed?.agent || "";
+            const description = argText(args?.description).trim() || resumed?.description || "";
             const identity = [
                 agent ? theme.fg("toolTitle", theme.bold(agent)) : "",
                 description ? theme.fg("accent", description) : "",
+                resumed ? theme.fg("muted", "(resumed)") : "",
             ]
                 .filter(Boolean)
                 .join(" ");
             return toolLayout(
                 "delegate",
                 identity || theme.fg("muted", "…"),
-                argText(args?.task),
+                argText(args?.task) || resumed?.task || "",
                 theme,
                 context.expanded,
             );
@@ -455,7 +461,9 @@ export default function (pi: ExtensionAPI) {
             const details = result.details as DelegateDetails | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            const status = details.background ? "started in background" : "completed";
+            const status = details.background
+                ? `${details.resumed ? "resumed" : "started"} in background`
+                : "completed";
             // The done icon means actual completion; a background launch reports its status without it.
             const header = details.background
                 ? `${jobIdentity(theme, details)} ${theme.fg("muted", status)}`
