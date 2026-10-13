@@ -23,6 +23,7 @@ export type DelegateJob = InspectJob & {
     lastResult?: string;
     controller: AbortController;
     steer?: (message: string) => Promise<void>;
+    swapModel?: (provider: string, modelId: string, level?: string, onModelSet?: () => void) => Promise<void>;
 };
 
 const JOB_ENTRY = "delegate-job";
@@ -42,25 +43,6 @@ function restoredJobs(entries: readonly unknown[]): InspectJob[] {
     return jobs;
 }
 
-/** Whether and how a delegate call may resume an interrupted, failed, or cancelled job. */
-export function resumeDecision(
-    id: string,
-    jobs: readonly InspectJob[],
-    live: ReadonlySet<string>,
-): { job?: InspectJob; error?: string } {
-    if (!id) return { error: "No job id given for resume." };
-    if (live.has(id))
-        return { error: `Delegate job "${id}" is still running; steer or cancel it instead of resuming.` };
-    const job = jobs.find((candidate) => candidate.id === id);
-    if (!job) return { error: `Unknown delegate job "${id}".` };
-    if (job.status === "interrupted" || job.status === "failed" || job.status === "cancelled") return { job };
-    if (job.status === "done")
-        return { error: `Delegate job "${id}" is already done; its report is in this session, no resume needed.` };
-    return {
-        error: `Delegate job "${id}" is ${job.status}; only interrupted, failed or cancelled jobs can be resumed.`,
-    };
-}
-
 /** One owner for live jobs, history, and the delegate-job session entries they write. */
 export function createJobStore(append: (customType: string, data: InspectJob) => void) {
     const running = new Map<string, DelegateJob>();
@@ -75,7 +57,7 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         if (stale >= 0) history.splice(stale, 1);
     };
     const entryData = (job: DelegateJob): InspectJob => {
-        const { controller, steer, lastTool, lastDetail, lastResult, ...snapshot } = job;
+        const { controller, steer, swapModel, lastTool, lastDetail, lastResult, ...snapshot } = job;
         // Copy activity: the live job keeps appending to its own array after the launch snapshot.
         return { ...snapshot, activity: [...snapshot.activity] };
     };

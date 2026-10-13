@@ -21,7 +21,7 @@ import {
     launchDetails,
     outputPreview,
     reportText,
-    resumeHint,
+    reviveHint,
     SPINNER_INTERVAL_MS,
     formatDuration,
     statusText,
@@ -30,13 +30,12 @@ import {
     widgetJobs,
 } from "./format.ts";
 import { priorActivity, runChild } from "./child.ts";
-import { createJobStore, resumeDecision, type DelegateJob } from "./store.ts";
+import { createJobStore, type DelegateJob, type InspectJob } from "./store.ts";
 import { registerInspector } from "./inspector.ts";
-import { configFor, contextWindowFor, discoverAgents, resolveModel } from "./agents.ts";
+import { configFor, contextWindowFor, discoverAgents, resolveModel, type AgentFile } from "./agents.ts";
 
 type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "description" | "task" | "model" | "tools"> & {
     background: boolean;
-    resumed: boolean;
 };
 
 type SteerDetails = Pick<
@@ -54,7 +53,6 @@ const REMINDER_MESSAGE = "delegate-reminder";
 const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powershell", "web_search", "web_fetch"]);
 const FIRST_REMINDER_AT = 5;
 const DELEGATE_SESSION_DIR = join(getAgentDir(), "sessions", "delegates");
-const RESUME_PROMPT = "Continue the task above from where you left off.";
 const INTERRUPTED_MESSAGE = "delegate-interrupted";
 
 function argText(value: unknown): string {
@@ -66,18 +64,37 @@ function jobId(value: unknown): string {
         .trim()
         .replace(/^job\s+/i, "");
 }
+/** Strict models inject literal "null" for optional params they omit; drop it before reading any. */
+function dropNulls<T extends Record<string, unknown>>(raw: T): T {
+    return Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== null && value !== "null")) as T;
+}
 
 function resultText(result: { content: readonly { type: string; text?: string }[] }): string {
     return result.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
 }
 
 function resultFallback(body: string, theme: Theme, isError: boolean): Text {
-    return new Text(`\n${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
+    const mark = statusText(theme, isError ? "failed" : "done");
+    return new Text(`\n${mark} ${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
+}
+
+/** Shared foreground output preview: delegate results, steer revives, and follow-up reports. */
+function appendOutput(container: Container, body: string, expanded: boolean, theme: Theme): void {
+    const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
+    container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
+    if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
 }
 
 /** Shared collapsed-output note so all three preview sites phrase it identically. */
 function moreLines(theme: Theme, hidden: number): string {
     return theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand");
+}
+
+/** One resolution path for launches and swaps; the error names the requested model. */
+function mustResolveModel(request: string | undefined, ctx: ExtensionContext, fallback?: string) {
+    const { model, thinking } = resolveModel(request ?? fallback, configFor(ctx.cwd).models ?? {}, ctx);
+    if (!model) throw new Error(`No model found for "${request ?? fallback}".`);
+    return { model, thinking };
 }
 
 /** Shared tool layout: an optional identity header, then a width-aware payload preview. */
@@ -112,6 +129,29 @@ function toolLayout(toolName: string, identity: string, payload: string, theme: 
     return container;
 }
 
+/** Shared launch-result card: delegate launches and steer revives render identically. */
+function launchResult(
+    details: DelegateDetails,
+    body: string,
+    status: string,
+    expanded: boolean,
+    theme: Theme,
+): Component {
+    const container = new Container();
+    // The mark is the call's outcome (launch succeeded); job progress stays in the widget and report.
+    container.addChild(
+        new Text(`\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", status)}`, 0, 0),
+    );
+    // The call body already carries the task; only the launch metadata is new here.
+    if (expanded)
+        container.addChild(
+            new Text(theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")), 0, 0),
+        );
+    // Background results arrive as their own message; headless runs still show the output here.
+    if (!details.background && body) appendOutput(container, body, expanded, theme);
+    return container;
+}
+
 export default function (pi: ExtensionAPI) {
     const store = createJobStore(pi.appendEntry);
     let ticker: ReturnType<typeof setInterval> | undefined;
@@ -119,13 +159,15 @@ export default function (pi: ExtensionAPI) {
     let directCalls = 0;
     let nextReminder = FIRST_REMINDER_AT;
 
-    const jobSnapshot = (job: DelegateJob) => ({
+    const jobSnapshot = (job: InspectJob) => ({
         id: job.id,
         agent: job.agent,
         description: job.description,
         contextTokens: job.contextTokens,
         contextWindow: job.contextWindow,
         startedAt: job.startedAt,
+        status: job.status,
+        endedAt: job.endedAt,
     });
 
     const jobTarget = (rawId: unknown, theme: Theme): string => {
@@ -197,6 +239,125 @@ export default function (pi: ExtensionAPI) {
         );
     };
 
+    /** Runs one delegate child: foreground runs return their output, background ones report on completion. */
+    const runDelegate = async (
+        ctx: ExtensionContext,
+        agent: AgentFile,
+        prior: InspectJob | undefined,
+        fields: { description: string; model?: string },
+        task: string,
+        signal: AbortSignal | undefined,
+        prompt = task,
+    ) => {
+        const { model, thinking } = mustResolveModel(fields.model, ctx, agent.model);
+        const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
+            (tool) => !DELEGATION_TOOLS.has(tool),
+        );
+        const displayModel = thinking ? `${model}:${thinking}` : model;
+        const job: DelegateJob = {
+            // A revived job keeps its id: the pinned child session id reopens the old transcript.
+            id: prior?.id ?? randomUUID().slice(0, 8),
+            agent: agent.name,
+            description: fields.description.trim(),
+            task,
+            model: displayModel,
+            status: "running",
+            // A revive continues the pinned transcript, so the inspector replays the child's own history.
+            activity: prior ? priorActivity(DELEGATE_SESSION_DIR, prior.id) : [],
+            tools,
+            toolCalls: 0,
+            startedAt: Date.now(),
+            contextWindow: contextWindowFor(ctx, model),
+            controller: new AbortController(),
+        };
+        const details: DelegateDetails = {
+            id: job.id,
+            agent: job.agent,
+            description: job.description,
+            task: job.task,
+            model: displayModel,
+            tools,
+            background: ctx.hasUI,
+        };
+        const args = [
+            "--session-id",
+            `delegate-${job.id}`,
+            "--session-dir",
+            DELEGATE_SESSION_DIR,
+            "--model",
+            model,
+            "--tools",
+            tools.join(","),
+        ];
+        if (thinking) args.push("--thinking", thinking);
+        if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
+        const entrypoint = process.argv[1];
+        if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
+        const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
+            cwd: ctx.cwd,
+            shell: false,
+            stdio: "pipe",
+        });
+        store.launch(job, details.background);
+        const run = runChild(
+            child,
+            prompt,
+            details.background ? job.controller.signal : signal,
+            (update) => store.record(job, update),
+            Boolean(prior),
+        );
+        job.steer = run.steer;
+        job.swapModel = run.swapModel;
+        if (!details.background) {
+            try {
+                const output = await run.done;
+                store.finish(job, "done");
+                return { content: [{ type: "text" as const, text: output }], details };
+            } catch (error) {
+                // Record the outcome so the launch entry cannot linger as "running".
+                const cancelled = error instanceof Error && error.message === "Delegate was aborted";
+                store.finish(job, cancelled ? "cancelled" : "failed");
+                // Failed jobs are revivable; mirror the failed background report's hint on the thrown error.
+                if (!cancelled && error instanceof Error) error.message += `\n${reviveHint(job.id)}`;
+                throw error;
+            }
+        }
+
+        syncTicker(ctx);
+        refreshWidget(ctx);
+        void run.done
+            .then(
+                (output) => finishJob(ctx, job, output),
+                (error) => finishJob(ctx, job, undefined, error instanceof Error ? error.message : String(error)),
+            )
+            .catch(() => {});
+        return {
+            content: [
+                {
+                    type: "text" as const,
+                    text: `${prior ? "Revived" : "Started"} delegate "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
+                },
+            ],
+            details,
+        };
+    };
+
+    /** Swaps a running child's model over the RPC; the child confirms or rejects it, and never restarts. */
+    const swapModel = async (job: DelegateJob, request: string, ctx: ExtensionContext) => {
+        if (!job.swapModel) throw new Error(`Delegate job "${job.id}" cannot switch models.`);
+        const { model } = mustResolveModel(request, ctx);
+        const [provider, ...rest] = model.split("/");
+        if (!rest.length) throw new Error(`Model "${model}" has no provider prefix.`);
+        // Only an explicit :thinking suffix changes the level; an inherited one must not silently reset it.
+        const level = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(request)?.[1];
+        // The display lands on the set_model ack, so a thinking-level failure cannot leave it stale.
+        await job.swapModel(provider, rest.join("/"), level, () => {
+            job.model = model;
+            job.contextWindow = contextWindowFor(ctx, model);
+        });
+        if (level) job.model = `${model}:${level}`;
+    };
+
     pi.on("session_shutdown", () => {
         if (ticker) clearInterval(ticker);
         for (const job of store.live()) job.controller.abort();
@@ -211,7 +372,7 @@ export default function (pi: ExtensionAPI) {
             pi.sendMessage(
                 {
                     customType: INTERRUPTED_MESSAGE,
-                    content: `<system-reminder>These delegate jobs were interrupted by a restart or crash; their transcripts survive. Resume each with the delegate tool's resume parameter (job id only):\n${interrupted.map((job) => `- ${job.id} ${job.agent}: ${job.description}`).join("\n")}</system-reminder>`,
+                    content: `<system-reminder>These delegate jobs were interrupted by a restart or crash; their transcripts survive. Continue each with delegate_steer (job id plus your guidance):\n${interrupted.map((job) => `- ${job.id} ${job.agent}: ${job.description}`).join("\n")}</system-reminder>`,
                     display: false,
                 },
                 { deliverAs: "steer" },
@@ -261,11 +422,7 @@ export default function (pi: ExtensionAPI) {
             ),
         );
         if (report.error) container.addChild(new Text(theme.fg("error", report.error), 0, 0));
-        else if (report.output) {
-            const { shown, hidden } = outputPreview(report.output, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
-            container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
-            if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
-        }
+        else if (report.output) appendOutput(container, report.output, expanded, theme);
         return container;
     });
 
@@ -287,7 +444,7 @@ export default function (pi: ExtensionAPI) {
             "",
             "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
             "",
-            "An interrupted, failed, or cancelled job can be continued by passing its job id as `resume`. The agent, task, and description come from the original job, and the model may be overridden. Done jobs need no resume: their reports are already in this session.",
+            "Use delegate_steer to continue or redirect any job by its id: a running job takes the guidance mid-run, and a finished job continues its own transcript with the message as its next instruction.",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
@@ -300,158 +457,44 @@ export default function (pi: ExtensionAPI) {
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
-            agent: Type.Optional(Type.String({ description: "Agent name from the list in this tool's description." })),
-            description: Type.Optional(
-                Type.String({ description: "Short 3-8 word summary of this delegation, shown in the transcript." }),
-            ),
-            task: Type.Optional(
-                Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
-            ),
+            agent: Type.String({ description: "Agent name from the list in this tool's description." }),
+            description: Type.String({
+                description: "Short 3-8 word summary of this delegation, shown in the transcript.",
+            }),
+            task: Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
             model: Type.Optional(
                 Type.String({
                     description:
                         "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix.",
                 }),
             ),
-            resume: Type.Optional(
-                Type.String({
-                    description:
-                        "Job id of an interrupted, failed, or cancelled delegate to continue; it reuses the original agent, description and task (model may be overridden).",
-                }),
-            ),
         }),
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
-            const params = Object.fromEntries(
-                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
-            ) as typeof rawParams;
-            const config = configFor(ctx.cwd);
-            const agents = discoverAgents(ctx.cwd, config.agentDirs);
-            const resuming = params.resume
-                ? resumeDecision(jobId(params.resume), store.all(), new Set(store.live().map((job) => job.id)))
-                : undefined;
-            if (resuming?.error) throw new Error(resuming.error);
-            const prior = resuming?.job;
-            if (!prior && (!params.agent || !params.description || !params.task))
-                throw new Error(
-                    "agent, description and task are required unless resuming an interrupted, failed, or cancelled job.",
-                );
-            const agent = agents.find((candidate) => candidate.name === (prior?.agent ?? params.agent));
+            const params = dropNulls(rawParams);
+            const { agent: agentName, description, task, model } = params;
+            if (!agentName || !description || !task) throw new Error("agent, description and task are required.");
+            const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
+            const agent = agents.find((candidate) => candidate.name === agentName);
             if (!agent) {
                 const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
-                throw new Error(`Unknown agent "${prior?.agent ?? params.agent}". Available agents: ${names}.`);
+                throw new Error(`Unknown agent "${agentName}". Available agents: ${names}.`);
             }
-            const { model, thinking } = resolveModel(params.model ?? agent.model, config.models ?? {}, ctx);
-            if (!model) throw new Error(`No model found for "${agent.name}".`);
-            const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
-                (tool) => !DELEGATION_TOOLS.has(tool),
-            );
-            const displayModel = thinking ? `${model}:${thinking}` : model;
-            const job: DelegateJob = {
-                // A resumed job keeps its id: the pinned child session id reopens the old transcript.
-                id: prior?.id ?? randomUUID().slice(0, 8),
-                agent: agent.name,
-                description: (prior?.description ?? params.description ?? "").trim(),
-                task: prior?.task ?? params.task ?? "",
-                model: displayModel,
-                status: "running",
-                // A resume continues the pinned transcript, so the inspector replays the child's own history.
-                activity: prior ? priorActivity(DELEGATE_SESSION_DIR, prior.id) : [],
-                tools,
-                toolCalls: 0,
-                startedAt: Date.now(),
-                contextWindow: contextWindowFor(ctx, model),
-                controller: new AbortController(),
-            };
-            const details: DelegateDetails = {
-                id: job.id,
-                agent: job.agent,
-                description: job.description,
-                task: job.task,
-                model: displayModel,
-                tools,
-                background: ctx.hasUI,
-                resumed: Boolean(prior),
-            };
-            const args = [
-                "--session-id",
-                `delegate-${job.id}`,
-                "--session-dir",
-                DELEGATE_SESSION_DIR,
-                "--model",
-                model,
-                "--tools",
-                tools.join(","),
-            ];
-            if (thinking) args.push("--thinking", thinking);
-            if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
-            const entrypoint = process.argv[1];
-            if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
-            const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
-                cwd: ctx.cwd,
-                shell: false,
-                stdio: "pipe",
-            });
-            store.launch(job, details.background);
-            const run = runChild(
-                child,
-                prior ? RESUME_PROMPT : job.task,
-                details.background ? job.controller.signal : signal,
-                (update) => store.record(job, update),
-                Boolean(prior),
-            );
-            job.steer = run.steer;
-
-            if (!details.background) {
-                try {
-                    const output = await run.done;
-                    store.finish(job, "done");
-                    return { content: [{ type: "text", text: output }], details };
-                } catch (error) {
-                    // Record the outcome so the launch entry cannot linger as "running".
-                    const cancelled = error instanceof Error && error.message === "Delegate was aborted";
-                    store.finish(job, cancelled ? "cancelled" : "failed");
-                    // Failed jobs are resumable; mirror the failed background report's hint on the thrown error.
-                    if (!cancelled && error instanceof Error) error.message += `\n${resumeHint(job.id)}`;
-                    throw error;
-                }
-            }
-
-            syncTicker(ctx);
-            refreshWidget(ctx);
-            void run.done
-                .then(
-                    (output) => finishJob(ctx, job, output),
-                    (error) => finishJob(ctx, job, undefined, error instanceof Error ? error.message : String(error)),
-                )
-                .catch(() => {});
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `${prior ? "Resumed" : "Started"} delegate "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
-                    },
-                ],
-                details,
-            };
+            return runDelegate(ctx, agent, undefined, { description, model }, task, signal);
         },
 
         renderCall(args, theme, context) {
-            // A resume passes only the job id; recover the identity and task from the stored job.
-            const resumed = args?.resume ? store.find(jobId(args.resume)) : undefined;
-            const agent = argText(args?.agent).trim() || resumed?.agent || "";
-            const description = argText(args?.description).trim() || resumed?.description || "";
+            const agent = argText(args?.agent).trim();
+            const description = argText(args?.description).trim();
             const identity = [
                 agent ? theme.fg("toolTitle", theme.bold(agent)) : "",
                 description ? theme.fg("accent", description) : "",
-                resumed ? theme.fg("muted", "(resumed)") : "",
             ]
                 .filter(Boolean)
                 .join(" ");
             return toolLayout(
                 "delegate",
                 identity || theme.fg("muted", "…"),
-                argText(args?.task) || resumed?.task || "",
+                argText(args?.task),
                 theme,
                 context.expanded,
             );
@@ -461,31 +504,13 @@ export default function (pi: ExtensionAPI) {
             const details = result.details as DelegateDetails | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            const status = details.background
-                ? `${details.resumed ? "resumed" : "started"} in background`
-                : "completed";
-            // The done icon means actual completion; a background launch reports its status without it.
-            const header = details.background
-                ? `${jobIdentity(theme, details)} ${theme.fg("muted", status)}`
-                : `${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", status)}`;
-            const container = new Container();
-            container.addChild(new Text(`\n${header}`, 0, 0));
-            // The call body already carries the task; only the launch metadata is new here.
-            if (expanded)
-                container.addChild(
-                    new Text(
-                        theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")),
-                        0,
-                        0,
-                    ),
-                );
-            // Background results arrive as their own message; headless runs still show the output here.
-            if (!details.background && body) {
-                const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
-                container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
-                if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
-            }
-            return container;
+            return launchResult(
+                details,
+                body,
+                details.background ? "started in background" : "completed",
+                expanded,
+                theme,
+            );
         },
     });
 
@@ -493,35 +518,78 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_steer",
         label: "Steer delegate",
         description:
-            "Send guidance to a running background delegate. The child receives it after its current tool calls and before its next model request; it cannot revive a finished job. Use delegate_list for the ids of running jobs.",
-        promptSnippet: "Send guidance to a running background delegate by job id",
+            "Send guidance to a delegate by job id. A running job receives it after its current tool calls, before its next model request. A finished job (done, failed, cancelled, or interrupted) continues its own transcript with the message as its next instruction and reports again as a follow-up.",
+        promptSnippet: "Send guidance to a delegate by job id, or continue a finished one",
         parameters: Type.Object({
             id: Type.String({
                 description: 'Job id from a delegate tool result or a delegate-result message, such as "38631a01".',
             }),
-            message: Type.String({ description: "The guidance to deliver to the running child." }),
+            message: Type.String({
+                description:
+                    "The guidance to deliver: queued on a running child, or the next instruction when it revives a finished job.",
+            }),
+            model: Type.Optional(
+                Type.String({
+                    description:
+                        "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix. Switches a running job's model live, without a restart.",
+                }),
+            ),
         }),
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
+            const params = dropNulls(rawParams);
             const id = jobId(params.id);
-            const job = store.live().find((candidate) => candidate.id === id);
-            if (!job?.steer) throw new Error(`No running delegate job "${id}".`);
-            await job.steer(params.message);
-            const details: SteerDetails = {
-                id: job.id,
-                agent: job.agent,
-                description: job.description,
-                message: params.message,
-                toolCalls: job.toolCalls,
-                contextTokens: job.contextTokens,
-                contextWindow: job.contextWindow,
-                elapsedMs: Date.now() - job.startedAt,
-            };
-            return {
-                content: [
-                    { type: "text", text: `Steering message delivered to delegate "${job.agent}" (job ${job.id}).` },
-                ],
-                details,
-            };
+            const running = store.live().find((candidate) => candidate.id === id);
+            if (running) {
+                // A live job without steer would fall into the revive path and double-spawn its pinned session.
+                if (!running.steer) throw new Error(`No steerable delegate job "${id}".`);
+                try {
+                    if (params.model) await swapModel(running, params.model, ctx);
+                    await running.steer(params.message);
+                } catch (error) {
+                    // The swap or steer await can outlast the job (a model ack waits up to 30s); raw child errors are cryptic.
+                    if (!store.live().some((candidate) => candidate.id === id))
+                        throw new Error(
+                            `Delegate job "${id}" just finished; call delegate_steer again to continue it.`,
+                        );
+                    throw error;
+                }
+                const details: SteerDetails = {
+                    id: running.id,
+                    agent: running.agent,
+                    description: running.description,
+                    message: params.message,
+                    toolCalls: running.toolCalls,
+                    contextTokens: running.contextTokens,
+                    contextWindow: running.contextWindow,
+                    elapsedMs: Date.now() - running.startedAt,
+                };
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Steering message delivered to delegate "${running.agent}" (job ${running.id}).`,
+                        },
+                    ],
+                    details,
+                };
+            }
+            const prior = store.find(id);
+            if (!id || !prior) throw new Error(`Unknown delegate job "${id}".`);
+            const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
+            const agent = agents.find((candidate) => candidate.name === prior.agent);
+            if (!agent) {
+                const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
+                throw new Error(`Unknown agent "${prior.agent}". Available agents: ${names}.`);
+            }
+            return runDelegate(
+                ctx,
+                agent,
+                prior,
+                { description: prior.description, model: params.model ?? prior.model },
+                prior.task,
+                signal,
+                params.message,
+            );
         },
 
         renderCall(args, theme, context) {
@@ -534,14 +602,22 @@ export default function (pi: ExtensionAPI) {
             );
         },
 
-        renderResult(result, _options, theme, context) {
-            const details = result.details as SteerDetails | undefined;
+        renderResult(result, { expanded }, theme, context) {
+            const details = result.details as SteerDetails | DelegateDetails | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            return new Text(
-                `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("muted", usageStats(details, details.elapsedMs))}`,
-                0,
-                0,
+            if ("message" in details)
+                return new Text(
+                    `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("muted", usageStats(details, details.elapsedMs))}`,
+                    0,
+                    0,
+                );
+            return launchResult(
+                details,
+                body,
+                details.background ? "revived in background" : "revived",
+                expanded,
+                theme,
             );
         },
     });
@@ -550,7 +626,7 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_cancel",
         label: "Cancel delegate",
         description:
-            "Cancel a running background delegate by job id. Requests abort now and forcibly kills the child after five seconds if needed. Cancelled jobs send no follow-up report, but can be resumed later with the delegate tool's `resume` parameter.",
+            "Cancel a running background delegate by job id. Requests abort now and force-kills the child after five seconds if needed. A cancelled job sends no report; continue it later with delegate_steer.",
         promptSnippet: "Cancel a running background delegate by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id from delegate or delegate_list." }),
@@ -580,7 +656,8 @@ export default function (pi: ExtensionAPI) {
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
             return new Text(
-                `\n${statusText(theme, "cancelled")} ${jobIdentity(theme, details)} ${theme.fg("muted", "cancellation requested")}`,
+                // The mark is the call's outcome (cancellation requested), not the job's cancelled status.
+                `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", "cancellation requested")}`,
                 0,
                 0,
             );
@@ -591,21 +668,28 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_list",
         label: "List delegates",
         description:
-            "List the background delegates still running, with their job ids and progress, for steering or checking. Finished delegates are not listed; their results arrive as follow-up messages.",
-        promptSnippet: "List running background delegates and their job ids",
+            "List delegates with their job ids, status, and progress. Finished jobs stay listed; continue one with delegate_steer.",
+        promptSnippet: "List delegates and their job ids",
         parameters: Type.Object({}),
         async execute() {
             const now = Date.now();
-            const jobs = store.live();
-            if (!jobs.length)
-                return { content: [{ type: "text", text: "No delegates are running." }], details: undefined };
-            const lastActivity = (job: DelegateJob) =>
-                job.lastTool ? ` · ${job.lastTool}${job.lastDetail ? ` ${job.lastDetail}` : ""}` : "";
+            const jobs = store.all();
+            if (!jobs.length) return { content: [{ type: "text", text: "No delegates yet." }], details: undefined };
+            const running = jobs.filter((job) => job.status === "running").length;
+            const lastActivity = (job: InspectJob) => {
+                const { lastTool, lastDetail } = job as DelegateJob;
+                return job.status === "running" && lastTool
+                    ? ` · ${lastTool}${lastDetail ? ` ${lastDetail}` : ""}`
+                    : "";
+            };
             const lines = jobs.map(
-                (job) => `- ${job.id} ${job.agent} · ${jobLine(job, now - job.startedAt)}${lastActivity(job)}`,
+                (job) =>
+                    `- ${job.id} ${job.agent} · ${job.status} · ${jobLine(job, (job.endedAt ?? now) - job.startedAt)}${lastActivity(job)}`,
             );
             return {
-                content: [{ type: "text", text: `${jobs.length} running:\n${lines.join("\n")}` }],
+                content: [
+                    { type: "text", text: `${jobs.length} delegates (${running} running):\n${lines.join("\n")}` },
+                ],
                 details: { jobs: jobs.map(jobSnapshot) },
             };
         },
@@ -614,8 +698,11 @@ export default function (pi: ExtensionAPI) {
             if (!jobs?.length || context.isError) return resultFallback(resultText(result), theme, context.isError);
             const now = Date.now();
             return new Text(
-                `\n${jobs
-                    .map((job) => `${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`)
+                `\n${statusText(theme, "done")} ${theme.fg("muted", `${jobs.length} delegates`)}\n${jobs
+                    .map(
+                        (job) =>
+                            `${statusText(theme, job.status, now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, (job.endedAt ?? now) - job.startedAt))}`,
+                    )
                     .join("\n")}`,
                 0,
                 0,

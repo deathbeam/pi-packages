@@ -27,7 +27,7 @@ import {
 } from "./format.ts";
 import { priorActivity, runChild } from "./child.ts";
 import { resolveModel } from "./agents.ts";
-import { createJobStore, resumeDecision } from "./store.ts";
+import { createJobStore } from "./store.ts";
 // Hermetic: configFor and the pinned session dir must not read the host's real agent settings.
 const agentDir = mkdtempSync(join(tmpdir(), "pi-delegate-check-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -71,7 +71,7 @@ assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).so
     "delegate_steer",
 ]);
 assert.match(sources, /!DELEGATION_TOOLS\.has\(tool\)/);
-// Pinned child sessions: every spawn and resume reopens the same deterministic transcript.
+// Pinned child sessions: every spawn and revive reopens the same deterministic transcript.
 assert.doesNotMatch(sources, /--no-session/);
 assert.match(sources, /const DELEGATE_SESSION_DIR = join\(getAgentDir\(\), "sessions", "delegates"\)/);
 assert.match(sources, /"--session-id",\s*`delegate-\$\{job\.id\}`,\s*"--session-dir",\s*DELEGATE_SESSION_DIR/);
@@ -103,7 +103,7 @@ assert.deepEqual(resolveModel("cheap", { cheap: { model: "x/y" } }, session), {
 });
 assert.deepEqual(resolveModel(undefined, {}, {}), { model: undefined, thinking: undefined });
 assert.match(child, /case "agent_settled"/);
-// get_state exists only for the resume guard: verifying the pinned transcript is not empty.
+// get_state exists only for the revive guard: verifying the pinned transcript is not empty.
 assert.match(child, /type: "get_state"/);
 assert.match(child, /type: "steer", message/);
 // pi skips before_agent_start in runs a delegate report starts, so a prompt section would vanish exactly then.
@@ -138,7 +138,7 @@ for (const { file, text } of agentFiles) {
         );
 }
 
-// Crash recovery: entry dedupe runs through the store's restore seam; resume decisions are pure and tested directly.
+// Crash recovery: entry dedupe runs through the store's restore seam.
 const jobEntry = (id, status, extra = {}) => ({
     id,
     agent: "explore",
@@ -171,18 +171,6 @@ assert.deepEqual(
     restoredIds([{ type: "custom", customType: "other", data: jobEntry("a", "running") }, { type: "message" }]),
     [],
 );
-const resumable = [
-    jobEntry("i", "interrupted"),
-    jobEntry("d", "done"),
-    jobEntry("f", "failed"),
-    jobEntry("c", "cancelled"),
-];
-assert.deepEqual(resumeDecision("i", resumable, new Set()), { job: jobEntry("i", "interrupted") });
-assert.deepEqual(resumeDecision("f", resumable, new Set()), { job: jobEntry("f", "failed") });
-assert.deepEqual(resumeDecision("c", resumable, new Set()), { job: jobEntry("c", "cancelled") });
-assert.match(resumeDecision("d", resumable, new Set()).error, /already done.*report/);
-assert.match(resumeDecision("zz", resumable, new Set()).error, /Unknown delegate job/);
-assert.match(resumeDecision("i", resumable, new Set(["i"])).error, /still running/);
 
 assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "failed", "interrupted", "running"]);
 // One vocabulary: every status renders through statusText; only running spins with the clock.
@@ -230,7 +218,7 @@ assert.equal(
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 1, elapsedMs: 1000, error: "boom" }),
-    'Delegate "explore" (job a1b2c3d4) failed: boom\nTo continue this job, call delegate with resume: a1b2c3d4.',
+    'Delegate "explore" (job a1b2c3d4) failed: boom\nTo continue this job, call delegate_steer with id a1b2c3d4 and a message.',
 );
 assert.equal(jobLine({ description: "find callers" }, 42000), "find callers · 42s");
 assert.equal(jobLine({}, 0), "0s");
@@ -364,7 +352,7 @@ rejected.stdin.on("data", (chunk) => {
 await assert.rejects(runChild(rejected, "bad task", undefined).done, /prompt rejected/);
 assert.equal(killed, true);
 assert.equal(rejected.stdin.writableEnded, true);
-// A resume whose get_state fails must fail the run, not prompt into an unverifiable transcript.
+// A revive whose get_state fails must fail the run, not prompt into an unverifiable transcript.
 const unverifiable = fakeChild();
 unverifiable.stdin.on("data", (chunk) => {
     const command = JSON.parse(chunk.toString());
@@ -373,6 +361,60 @@ unverifiable.stdin.on("data", (chunk) => {
     );
 });
 await assert.rejects(runChild(unverifiable, "task", undefined, undefined, true).done, /state unavailable/);
+// A live model swap speaks set_model, and set_thinking_level only for an explicit level.
+const swapping = fakeChild();
+const spoken = [];
+swapping.stdin.on("data", (chunk) => {
+    for (const line of chunk.toString().trim().split("\n")) {
+        if (!line) continue;
+        const command = JSON.parse(line);
+        spoken.push(command);
+        swapping.stdout.write(
+            `${JSON.stringify({ type: "response", id: command.id, command: command.type, success: true })}\n`,
+        );
+    }
+});
+const swappingRun = runChild(swapping, "task", undefined);
+await swappingRun.swapModel("anthropic", "flash");
+await swappingRun.swapModel("google", "gemini", "high");
+assert.deepEqual(
+    spoken
+        .filter((command) => command.type !== "prompt")
+        .map((command) => [command.type, command.provider ?? command.level, command.modelId]),
+    [
+        ["set_model", "anthropic", "flash"],
+        ["set_model", "google", "gemini"],
+        ["set_thinking_level", "high", undefined],
+    ],
+);
+// A rejected set_model must surface the child's error instead of passing silently.
+const refusing = fakeChild();
+refusing.stdin.on("data", (chunk) => {
+    const command = JSON.parse(chunk.toString());
+    refusing.stdout.write(
+        `${JSON.stringify({ type: "response", id: command.id, command: command.type, success: command.type !== "set_model", error: command.type === "set_model" ? "Model not found: nope/x" : undefined })}\n`,
+    );
+});
+const refusingRun = runChild(refusing, "task", undefined);
+await assert.rejects(refusingRun.swapModel("nope", "x"), /Model not found/);
+// A set_thinking_level failure must not hide the already-applied swap: the ack callback still ran.
+const halfSwapped = fakeChild();
+let applied = false;
+halfSwapped.stdin.on("data", (chunk) => {
+    for (const line of chunk.toString().trim().split("\n")) {
+        if (!line) continue;
+        const command = JSON.parse(line);
+        halfSwapped.stdout.write(
+            `${JSON.stringify({ type: "response", id: command.id, command: command.type, success: command.type !== "set_thinking_level", error: command.type === "set_thinking_level" ? "level rejected" : undefined })}\n`,
+        );
+    }
+});
+const halfRun = runChild(halfSwapped, "task", undefined);
+await assert.rejects(
+    halfRun.swapModel("anthropic", "flash", "high", () => (applied = true)),
+    /level rejected/,
+);
+assert.equal(applied, true);
 
 const signal = new AbortController();
 signal.abort();
@@ -403,7 +445,7 @@ await assert.rejects(active.done, /aborted/);
 assert.equal(abortRequested, true);
 assert.equal(stopping.stdin.writableEnded, true);
 
-// A resumed job's inspector history replays the child's persisted transcript, malformed lines and all.
+// A revived job's inspector history replays the child's persisted transcript, malformed lines and all.
 const seedDir = mkdtempSync(join(tmpdir(), "pi-delegate-seed-"));
 writeFileSync(
     join(seedDir, "2026-01-01T00-00-00-000Z_delegate-seed1.jsonl"),
@@ -474,8 +516,9 @@ assert.match(notice, /No delegates/);
 const delegate = registered.find((tool) => tool.name === "delegate");
 // User agent dirs can override bundled agents, so check the tier format rather than one agent.
 assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
-// The model must learn from the tool description which jobs are resumable and how to resume them.
-assert.match(delegate.description, /interrupted, failed, or cancelled job.*`resume`/s);
+// The model must learn from the tool description that steering continues or redirects any job.
+assert.match(delegate.description, /delegate_steer to continue or redirect any job/);
+assert.doesNotMatch(delegate.description, /resume/);
 assert.match(delegate.promptGuidelines.join("\n"), /You are the orchestrator/);
 // Drift reminder: only the orchestrating session, at 5 then 10 direct calls, and a delegate call resets it.
 const nudged = (activeTools) => {
@@ -553,7 +596,8 @@ const fakeCli = join(fakeCliDir, "pi.mjs");
 writeFileSync(
     fakeCli,
     `
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
+const COMMANDS_LOG = '${join(fakeCliDir, "commands.log")}';
 let stage = 0;
 const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
 process.stdin.on("data", (data) => {
@@ -564,10 +608,13 @@ process.stdin.on("data", (data) => {
         } else if (command.type === "prompt") {
             send({ type: "response", command: "prompt", id: command.id, success: true });
             send({ type: "message_end", message: { role: "user", content: [{ type: "text", text: command.message }], timestamp: Date.now() } });
-            if (command.message === "Continue the task above from where you left off.") {
-                send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Resumed and finished." }], timestamp: Date.now() } });
+            if (command.message.startsWith("revive")) {
+                send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Revived and finished." }], timestamp: Date.now() } });
                 send({ type: "agent_settled" });
             }
+        } else if (command.type === "set_model" || command.type === "set_thinking_level") {
+            appendFileSync(COMMANDS_LOG, command.type + " " + (command.provider || "") + " " + (command.modelId || command.level || "") + "\\n");
+            send({ type: "response", command: command.type, id: command.id, success: command.provider !== "nope", error: command.provider === "nope" ? "Model not found: nope/x" : undefined });
         } else if (command.type === "steer") {
             if (++stage === 1) {
                 for (let i = 0; i < 105; i++) {
@@ -616,6 +663,7 @@ for (const tool of registered.filter((entry) => entry.name !== "delegate_list"))
         { isError: true },
     );
     assert.match(failure.render(80).join("\n"), /Specific failure/);
+    assert.match(failure.render(80).join("\n"), /✗/, "thrown errors must show the failure mark");
     assert.ok(colored.some(([color, text]) => color === "error" && text.includes("Specific failure")));
     colored.length = 0;
     const fallback = tool.renderResult(
@@ -741,10 +789,10 @@ try {
         delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
         new RegExp(`${first.details.id} explore started in background`),
     );
-    assert.doesNotMatch(
+    assert.match(
         delegate.renderResult(first, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
         /✓/,
-        "background launch must not show the completion icon",
+        "background launch missing its call-success mark",
     );
     const steer = registered.find((tool) => tool.name === "delegate_steer");
     const steerArgs = { id: `job ${first.details.id}`, message: guidance };
@@ -790,22 +838,6 @@ try {
         stripVTControlCharacters(steer.renderCall(steerArgs, theme, { expanded: false }).render(120)[0]),
         new RegExp(`^delegate_steer ${first.details.id} explore`),
         "finished delegate identity lost from call header",
-    );
-    // A resume call carries only the job id; the header must still identify the job and show its task.
-    assert.match(
-        stripVTControlCharacters(
-            delegate.renderCall({ resume: `job ${first.details.id}` }, theme, { expanded: false }).render(120)[0],
-        ),
-        /^delegate explore first run \(resumed\)/,
-        "resumed delegate identity missing from call header",
-    );
-    assert.match(
-        delegate
-            .renderCall({ resume: `job ${first.details.id}` }, theme, { expanded: true })
-            .render(120)
-            .join("\n"),
-        /trace it/,
-        "resumed delegate task missing from call body",
     );
     assert.match(
         renderReport(firstReport, { expanded: false }, theme).render(120).join("\n"),
@@ -937,6 +969,12 @@ try {
         listed.details.jobs.some((job) => job.id === second.details.id && job.agent === "explore"),
         "running job missing from list details",
     );
+    // The list shows finished jobs too, each with its terminal status.
+    assert.ok(
+        listed.details.jobs.some((job) => job.id === first.details.id && job.status === "done"),
+        "finished job missing from list details",
+    );
+    assert.match(listed.content[0].text, new RegExp(`${first.details.id} explore · done`));
     const listCard = list
         .renderResult(listed, { expanded: false }, theme, { isError: false })
         .render(120)
@@ -950,14 +988,14 @@ try {
     assert.match(
         list
             .renderResult(
-                { content: [{ type: "text", text: "No delegates are running." }], details: undefined },
+                { content: [{ type: "text", text: "No delegates yet." }], details: undefined },
                 { expanded: false },
                 theme,
                 { isError: false },
             )
             .render(80)
             .join("\n"),
-        /No delegates are running\./,
+        /No delegates yet\./,
     );
     assert.ok(colors.includes("toolTitle") && colors.includes("accent") && colors.includes("text"));
     for (let i = 0; i < 3; i++) view.handleInput("up");
@@ -1020,11 +1058,12 @@ try {
     tui.terminal.rows = 24;
     assert.equal(screens, 3);
 
-    // Crash recovery end to end: a restored "running" job is interrupted and announced, then resumable.
+    // Crash recovery end to end: a restored "running" job is interrupted and announced, then revivable.
     let recoverSession;
     let treeSession;
-    let resumeTool;
-    let resumeCancel;
+    let launchTool;
+    let steerTool;
+    let cancelTool;
     let recoverInspect;
     let interruptedNotice;
     extension({
@@ -1034,8 +1073,9 @@ try {
                 : event === "session_tree" && (treeSession = handler),
         registerCommand: (name, command) => name === "delegate" && (recoverInspect = command),
         registerTool: (tool) => {
-            if (tool.name === "delegate") resumeTool = tool;
-            else if (tool.name === "delegate_cancel") resumeCancel = tool;
+            if (tool.name === "delegate") launchTool = tool;
+            else if (tool.name === "delegate_steer") steerTool = tool;
+            else if (tool.name === "delegate_cancel") cancelTool = tool;
         },
         registerMessageRenderer() {},
         sendMessage: (message) => (interruptedNotice = message),
@@ -1056,8 +1096,8 @@ try {
     assert.equal(savedEntries.at(-1).data.id, "orphan1");
     assert.equal(interruptedNotice.customType, "delegate-interrupted");
     assert.match(interruptedNotice.content, /orphan1 .*explore: orphaned run/);
-    assert.match(interruptedNotice.content, /resume/);
-    // The pinned transcript replays into the resumed job's activity, so the inspector keeps the old history.
+    assert.match(interruptedNotice.content, /delegate_steer/);
+    // The pinned transcript replays into the revived job's activity, so the inspector keeps the old history.
     mkdirSync(join(agentDir, "sessions", "delegates"), { recursive: true });
     writeFileSync(
         join(agentDir, "sessions", "delegates", "2026-01-01T00-00-00-000Z_delegate-orphan1.jsonl"),
@@ -1066,29 +1106,55 @@ try {
             message: { role: "user", content: "orphan task" },
         })}\n`,
     );
-    const resumed = await resumeTool.execute("call", { resume: "job orphan1" }, undefined, () => {}, {
-        ...ctx,
-        hasUI: false,
-    });
-    assert.match(resumed.content[0].text, /Resumed and finished\./);
-    assert.equal(resumed.details.id, "orphan1");
+    const revived = await steerTool.execute(
+        "call",
+        { id: "job orphan1", message: "revive: finish it" },
+        undefined,
+        () => {},
+        { ...ctx, hasUI: false },
+    );
+    assert.match(revived.content[0].text, /Revived and finished\./);
+    assert.equal(revived.details.id, "orphan1");
+    assert.match(
+        stripVTControlCharacters(
+            steerTool.renderResult(revived, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
+        ),
+        new RegExp(`✓ orphan1 explore revived[\\s\\S]*Revived and finished\\.`),
+        "foreground revive missing its mark and child output",
+    );
     const orphanLaunch = savedEntries.find((entry) => entry.data?.id === "orphan1" && entry.data.status === "running");
     assert.ok(
         orphanLaunch?.data.activity.some((item) => item.kind === "user" && item.text === "orphan task"),
-        "resumed job did not replay the prior transcript",
+        "revived job did not replay the prior transcript",
     );
     const orphanEntries = savedEntries.filter((entry) => entry.data?.id === "orphan1");
     assert.deepEqual(
         orphanEntries.map((entry) => entry.data.status),
         ["interrupted", "running", "done"],
     );
+    // A done job revives too, and a model override reaches the relaunched child.
+    const revivedAgain = await steerTool.execute(
+        "call",
+        { id: "job orphan1", message: "revive: once more", model: "anthropic/flash:high" },
+        undefined,
+        () => {},
+        { ...ctx, hasUI: false },
+    );
+    assert.match(revivedAgain.content[0].text, /Revived and finished\./);
+    assert.equal(revivedAgain.details.model, "anthropic/flash:high");
+    // A foreground revive inherits the tool's abort signal, so Esc can stop it mid-run.
+    const aborting = new AbortController();
+    aborting.abort();
     await assert.rejects(
-        resumeTool.execute("call", { resume: "job orphan1" }, undefined, () => {}, { ...ctx, hasUI: false }),
-        /already done/,
+        steerTool.execute("call", { id: "job orphan1", message: "revive: abort me" }, aborting.signal, () => {}, {
+            ...ctx,
+            hasUI: false,
+        }),
+        /aborted/,
     );
     // A mid-run session_tree rebuild restores the live job's launch entry. The restore must not double it, and
     // finishing the job must not leave a phantom running row behind.
-    const phantom = await resumeTool.execute(
+    const phantom = await launchTool.execute(
         "call",
         { agent: "explore", description: "phantom run", task: "trace it" },
         undefined,
@@ -1105,7 +1171,32 @@ try {
         /1 running · 4 total/,
         "restored launch entry doubled the live job",
     );
-    await resumeCancel.execute("call", { id: phantom.details.id }, undefined, () => {}, {
+    // A running job swaps its model live: set_model (and set_thinking_level for an explicit level) reach
+    // the child over the RPC, without a restart, before the steer message is queued.
+    const swappedLive = await steerTool.execute(
+        "call",
+        { id: phantom.details.id, message: "use a cheaper model", model: "anthropic/flash:high" },
+        undefined,
+        () => {},
+        { ...ctx, mode: "tui", hasUI: true, ui },
+    );
+    assert.match(swappedLive.content[0].text, /delivered/);
+    assert.match(
+        readFileSync(join(fakeCliDir, "commands.log"), "utf8"),
+        /set_model anthropic flash\nset_thinking_level +high/,
+    );
+    // A rejected live swap surfaces the child's error; the job stays live and cancellable.
+    await assert.rejects(
+        steerTool.execute(
+            "call",
+            { id: phantom.details.id, message: "no swap", model: "nope/x" },
+            undefined,
+            () => {},
+            { ...ctx, mode: "tui", hasUI: true, ui },
+        ),
+        /Model not found/,
+    );
+    await cancelTool.execute("call", { id: phantom.details.id }, undefined, () => {}, {
         ...ctx,
         mode: "tui",
         hasUI: true,
@@ -1118,11 +1209,11 @@ try {
     phantomView.handleInput("\x1b");
     await openingPhantom;
     tui.terminal.rows = 24;
-    // Resuming a recreated (empty) pinned transcript must fail instead of prompting into a blank session.
+    // Reviving a recreated (empty) pinned transcript must fail instead of prompting into a blank session.
     const orphan2 = {
         ...jobEntry("orphan2", "running"),
         agent: "explore",
-        description: "empty resume",
+        description: "empty revive",
     };
     recoverSession(
         {},
@@ -1135,18 +1226,24 @@ try {
     assert.equal(savedEntries.at(-1).data.status, "interrupted");
     writeFileSync("/tmp/pi-delegate-fake-empty", "");
     await assert.rejects(
-        resumeTool.execute("call", { resume: "job orphan2" }, undefined, () => {}, { ...ctx, hasUI: false }),
-        /transcript is empty[\s\S]*resume: orphan2/,
+        steerTool.execute("call", { id: "job orphan2", message: "revive: try again" }, undefined, () => {}, {
+            ...ctx,
+            hasUI: false,
+        }),
+        /transcript is empty[\s\S]*delegate_steer with id orphan2/,
     );
     rmSync("/tmp/pi-delegate-fake-empty", { force: true });
     assert.equal(savedEntries.filter((entry) => entry.data?.id === "orphan2").at(-1).data.status, "failed");
-    // A failed job is resumable: the pinned transcript reopens and the continuation prompt settles it.
-    const resumedFailed = await resumeTool.execute("call", { resume: "job orphan2" }, undefined, () => {}, {
-        ...ctx,
-        hasUI: false,
-    });
-    assert.match(resumedFailed.content[0].text, /Resumed and finished\./);
-    assert.equal(resumedFailed.details.id, "orphan2");
+    // A failed job is revivable: the pinned transcript reopens and the continuation prompt settles it.
+    const revivedFailed = await steerTool.execute(
+        "call",
+        { id: "job orphan2", message: "revive: try again" },
+        undefined,
+        () => {},
+        { ...ctx, hasUI: false },
+    );
+    assert.match(revivedFailed.content[0].text, /Revived and finished\./);
+    assert.equal(revivedFailed.details.id, "orphan2");
     assert.deepEqual(
         savedEntries.filter((entry) => entry.data?.id === "orphan2").map((entry) => entry.data.status),
         ["interrupted", "running", "failed", "running", "done"],
@@ -1173,10 +1270,10 @@ try {
         .renderResult(cancellation, { expanded: false }, theme, { isError: false })
         .render(120)
         .join("\n");
-    assert.match(cancelledResult, new RegExp(`✗ ${cancelled.details.id} explore cancellation requested`));
+    assert.match(cancelledResult, new RegExp(`✓ ${cancelled.details.id} explore cancellation requested`));
     assert.ok(
-        colored.some(([color, text]) => color === STATUS_COLORS.cancelled && text === "✗"),
-        "cancellation icon must be muted, not an error",
+        colored.some(([color, text]) => color === STATUS_COLORS.done && text === "✓"),
+        "cancellation mark must show the call's success, not the job's cancelled status",
     );
     const remaining = await delegate.execute(
         "call",
@@ -1191,29 +1288,33 @@ try {
     // it must not read as job id "null" and fail the call.
     const nulled = await delegate.execute(
         "call",
-        { agent: "explore", description: "null params", task: "trace it", resume: "null", model: null },
+        { agent: "explore", description: "null params", task: "trace it", model: null },
         undefined,
         () => {},
         tuiCtx,
     );
     await cancel.execute("call", { id: nulled.details.id }, undefined, () => {}, tuiCtx);
-    // The launch text and result header mark a resume, not just a fresh start.
-    const resumedLaunch = await delegate.execute(
+    // Steering a finished job revives it in the background under the same id, with a fresh report to come.
+    const deliveredRevived = new Promise((resolve) => deliveries.push(resolve));
+    const revivedLaunch = await steer.execute(
         "call",
-        { resume: `job ${cancelled.details.id}` },
+        { id: `job ${cancelled.details.id}`, message: "revive: finish it" },
         undefined,
         () => {},
         tuiCtx,
     );
-    assert.equal(resumedLaunch.details.resumed, true);
-    assert.match(resumedLaunch.content[0].text, /^Resumed delegate "explore" in the background/);
+    assert.equal(revivedLaunch.details.id, cancelled.details.id);
+    assert.match(revivedLaunch.content[0].text, /^Revived delegate "explore" in the background/);
     assert.match(
         stripVTControlCharacters(
-            delegate.renderResult(resumedLaunch, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
+            steer.renderResult(revivedLaunch, { expanded: false }, theme, { isError: false }).render(120).join("\n"),
         ),
-        new RegExp(`${cancelled.details.id} explore resumed in background`),
-        "resumed launch missing its mark in the result header",
+        new RegExp(`${cancelled.details.id} explore revived in background`),
+        "revived launch missing its mark in the result header",
     );
+    const revivedReport = await Promise.race([deliveredRevived, timeout]);
+    assert.equal(revivedReport.details.id, cancelled.details.id);
+    assert.equal(revivedReport.details.error, undefined);
 } finally {
     clearTimeout(timer);
     process.argv = argv;

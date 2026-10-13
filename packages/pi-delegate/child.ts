@@ -29,6 +29,7 @@ type ChildUpdateHandler = (update: ChildUpdate) => void;
 type ChildRun = {
     done: Promise<string>;
     steer: (message: string) => Promise<void>;
+    swapModel: (provider: string, modelId: string, level?: string, onModelSet?: () => void) => Promise<void>;
 };
 
 /** Run one RPC child, keeping its writer serialized so backpressure and EPIPE reach the caller. */
@@ -37,7 +38,7 @@ export function runChild(
     task: string,
     signal: AbortSignal | undefined,
     onUpdate?: ChildUpdateHandler,
-    resume?: boolean,
+    revive?: boolean,
 ): ChildRun {
     let buffer = "";
     let liveText = "";
@@ -272,21 +273,21 @@ export function runChild(
                     if (!settled) fail(error);
                 });
             };
-            if (resume) {
+            if (revive) {
                 // An empty transcript means the pinned session was recreated (e.g. a different cwd) and the task is gone; fail rather than prompt into a blank session.
                 void send({ type: "get_state" })
                     .then((data) => {
                         if (!settled && !aborted && !data?.messageCount) {
                             fail(
                                 new Error(
-                                    "Resumed delegate transcript is empty; the pinned session was recreated. Start a fresh delegate instead.",
+                                    "Revived delegate transcript is empty; the pinned session was recreated. Start a fresh delegate instead.",
                                 ),
                             );
                             return;
                         }
                         prompt();
                     })
-                    // A resume we cannot verify must not prompt into an unknown transcript.
+                    // A revive we cannot verify must not prompt into an unknown transcript.
                     .catch((error) => {
                         if (!settled && !aborted) fail(error);
                     });
@@ -299,6 +300,12 @@ export function runChild(
     return {
         done,
         steer: (message) => send({ type: "steer", message }),
+        // The callback lands between the two acks, so a thinking-level failure cannot hide the applied model.
+        swapModel: async (provider, modelId, level, onModelSet) => {
+            await send({ type: "set_model", provider, modelId });
+            onModelSet?.();
+            if (level !== undefined) await send({ type: "set_thinking_level", level });
+        },
     };
 }
 
@@ -313,8 +320,8 @@ function transcriptText(content: unknown): string[] {
 }
 
 /**
- * Replays the child's persisted transcript as the activity a resumed job continues from, so the
- * inspector keeps the old history. A missing or unreadable transcript seeds nothing: the resume
+ * Replays the child's persisted transcript as the activity a revived job continues from, so the
+ * inspector keeps the old history. A missing or unreadable transcript seeds nothing: the revive
  * itself still works.
  */
 export function priorActivity(sessionDir: string, id: string): ChildActivity[] {

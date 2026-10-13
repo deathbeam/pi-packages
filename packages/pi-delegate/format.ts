@@ -156,14 +156,14 @@ export function resultPreview(result: unknown, maxChars = 120): string | undefin
     return line.length > maxChars ? `${line.slice(0, maxChars - 1)}…` : line;
 }
 
-/** Shared so failed reports and thrown errors phrase the resume hint identically. */
-export function resumeHint(id: string): string {
-    return `To continue this job, call delegate with resume: ${id}.`;
+/** Shared so failed reports and thrown errors phrase the revive hint identically. */
+export function reviveHint(id: string): string {
+    return `To continue this job, call delegate_steer with id ${id} and a message.`;
 }
 
 export function reportText(report: DelegateReport): string {
     if (report.error)
-        return `Delegate "${report.agent}" (job ${report.id}) failed: ${report.error}\n${resumeHint(report.id)}`;
+        return `Delegate "${report.agent}" (job ${report.id}) failed: ${report.error}\n${reviveHint(report.id)}`;
     const output = (report.output ?? "").trim();
     return `Delegate "${report.agent}" (job ${report.id}) finished.${output ? `\n\n${output}` : ""}`;
 }

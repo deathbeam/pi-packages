@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-type AgentFile = {
+export type AgentFile = {
     name: string;
     description: string;
     tools?: string[];
