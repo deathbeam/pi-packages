@@ -207,18 +207,20 @@ assert.equal(
         agent: "explore",
         description: "find callers",
         toolCalls: 2,
+        contextTokens: 2400,
+        contextWindow: 200000,
         elapsedMs: 65000,
         output: "done",
     }),
-    'Delegate "explore" (job a1b2c3d4) finished.\n\ndone',
+    'Delegate "explore" (job a1b2c3d4, 2.4k/200k · 1m 05s) finished.\n\ndone',
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 0, elapsedMs: 1000 }),
-    'Delegate "explore" (job a1b2c3d4) finished.',
+    'Delegate "explore" (job a1b2c3d4, 1s) finished.',
 );
 assert.equal(
     reportText({ id: "a1b2c3d4", agent: "explore", description: "x", toolCalls: 1, elapsedMs: 1000, error: "boom" }),
-    'Delegate "explore" (job a1b2c3d4) failed: boom\nTo continue this job, call delegate_steer with id a1b2c3d4 and a message.',
+    'Delegate "explore" (job a1b2c3d4, 1s) failed: boom\nTo continue this job, call delegate_steer with id a1b2c3d4 and a message.',
 );
 assert.equal(jobLine({ description: "find callers" }, 42000), "find callers · 42s");
 assert.equal(jobLine({}, 0), "0s");
@@ -517,7 +519,7 @@ const delegate = registered.find((tool) => tool.name === "delegate");
 // User agent dirs can override bundled agents, so check the tier format rather than one agent.
 assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
 // The model must learn from the tool description that steering continues or redirects any job.
-assert.match(delegate.description, /delegate_steer to continue or redirect any job/);
+assert.match(delegate.description, /follow up on or redirect an existing job, see delegate_steer/);
 assert.doesNotMatch(delegate.description, /resume/);
 assert.match(delegate.promptGuidelines.join("\n"), /You are the orchestrator/);
 // Drift reminder: only the orchestrating session, at 5 then 10 direct calls, and a delegate call resets it.

@@ -162,10 +162,11 @@ export function reviveHint(id: string): string {
 }
 
 export function reportText(report: DelegateReport): string {
-    if (report.error)
-        return `Delegate "${report.agent}" (job ${report.id}) failed: ${report.error}\n${reviveHint(report.id)}`;
+    // Context usage lets the parent judge whether to continue this job or start a fresh one.
+    const head = `Delegate "${report.agent}" (job ${report.id}, ${usageStats(report, report.elapsedMs)})`;
+    if (report.error) return `${head} failed: ${report.error}\n${reviveHint(report.id)}`;
     const output = (report.output ?? "").trim();
-    return `Delegate "${report.agent}" (job ${report.id}) finished.${output ? `\n\n${output}` : ""}`;
+    return `${head} finished.${output ? `\n\n${output}` : ""}`;
 }
 
 export function jobLine(info: { description?: string } & UsageInfo, elapsedMs: number): string {

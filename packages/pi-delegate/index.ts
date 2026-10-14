@@ -444,7 +444,7 @@ export default function (pi: ExtensionAPI) {
             "",
             "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
             "",
-            "Use delegate_steer to continue or redirect any job by its id: a running job takes the guidance mid-run, and a finished job continues its own transcript with the message as its next instruction.",
+            "To follow up on or redirect an existing job, see delegate_steer.",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
@@ -518,20 +518,19 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_steer",
         label: "Steer delegate",
         description:
-            "Send guidance to a delegate by job id. A running job receives it after its current tool calls, before its next model request. A finished job (done, failed, cancelled, or interrupted) continues its own transcript with the message as its next instruction and reports again as a follow-up.",
+            "Send a message to a delegate job. A running job reads it before its next model request. A finished job, whatever its status, continues its own transcript with the message as its next instruction and reports again. Continue a job for follow-up on the same work. For a new task, or a job past half its context window (shown in its report), start a fresh delegate with a condensed brief of what the old job found.",
         promptSnippet: "Send guidance to a delegate by job id, or continue a finished one",
         parameters: Type.Object({
             id: Type.String({
                 description: 'Job id from a delegate tool result or a delegate-result message, such as "38631a01".',
             }),
             message: Type.String({
-                description:
-                    "The guidance to deliver: queued on a running child, or the next instruction when it revives a finished job.",
+                description: "Guidance for a running job, or the next instruction for a finished one.",
             }),
             model: Type.Optional(
                 Type.String({
                     description:
-                        "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix. Switches a running job's model live, without a restart.",
+                        "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix. A running job switches live.",
                 }),
             ),
         }),
@@ -625,8 +624,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "delegate_cancel",
         label: "Cancel delegate",
-        description:
-            "Cancel a running background delegate by job id. Requests abort now and force-kills the child after five seconds if needed. A cancelled job sends no report; continue it later with delegate_steer.",
+        description: "Cancel a running delegate by job id. It sends no report; delegate_steer can continue it later.",
         promptSnippet: "Cancel a running background delegate by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id from delegate or delegate_list." }),
@@ -667,8 +665,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "delegate_list",
         label: "List delegates",
-        description:
-            "List delegates with their job ids, status, and progress. Finished jobs stay listed; continue one with delegate_steer.",
+        description: "List delegate jobs with their ids, status, context usage, and elapsed time.",
         promptSnippet: "List delegates and their job ids",
         parameters: Type.Object({}),
         async execute() {
