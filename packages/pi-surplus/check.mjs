@@ -26,6 +26,9 @@ const catalog = {
             supported_parameters: [],
             supported_features: ["streaming"],
         }),
+        entry("claude-x", ["text"], ["text"], { provider: "Anthropic" }),
+        entry("gpt-6.1-sol", ["text"], ["text"], { provider: "OpenAI" }),
+        entry("openai-gpt-oss-20b", ["text"], ["text"], { provider: "OpenAI" }),
         entry("image-gen", ["text"], ["image"]),
         entry("whisper", ["audio"], ["text"]),
         entry("embed", ["text"], ["embedding"]),
@@ -60,9 +63,17 @@ try {
     // Only text-in, text-out chat models become models.
     assert.deepEqual(
         config.models.map((model) => model.id),
-        ["vision-reasoner", "plain"],
+        ["vision-reasoner", "plain", "claude-x", "gpt-6.1-sol", "openai-gpt-oss-20b"],
     );
-    const [full, plain] = config.models;
+    const [full, plain, claude, gpt, oss] = config.models;
+
+    // Claude rides the Anthropic skin and GPT the Responses API; others inherit the provider default.
+    assert.equal(claude.api, "anthropic-messages");
+    assert.equal(claude.baseUrl, "https://api.surplusintelligence.ai/anthropic");
+    assert.equal(gpt.api, "openai-responses");
+    assert.equal(gpt.baseUrl, undefined);
+    assert.equal(oss.api, undefined);
+    assert.equal(full.api, undefined);
 
     // Per-token prices convert to per-million; limits prefer top_provider; capabilities follow the catalog.
     assert.equal(full.name, "VISION-REASONER");
@@ -106,7 +117,12 @@ try {
     assert.equal(calls.length, beforeRefresh);
 
     // A keyed network refresh fetches, persists, and replaces the known catalog.
-    stub({ data: [entry("fresh", ["text"], ["text"])] });
+    stub({
+        data: [
+            entry("fresh", ["text"], ["text"]),
+            entry("claude-fresh", ["text"], ["text"], { provider: "Anthropic" }),
+        ],
+    });
     const published = [];
     const refreshed = await config.refreshModels({
         allowNetwork: true,
@@ -116,13 +132,26 @@ try {
     });
     assert.deepEqual(
         refreshed.map((model) => model.id),
-        ["fresh"],
+        ["fresh", "claude-fresh"],
     );
     assert.equal(calls.at(-1).init.headers.Authorization, "Bearer secret");
     assert.equal(published.length, 1);
     assert.deepEqual(
         published[0].persist.models.map(({ id, provider, api, baseUrl }) => ({ id, provider, api, baseUrl })),
-        [{ id: "fresh", provider: "surplus", api: "openai-completions", baseUrl: "https://api.surplusintelligence.ai/v1" }],
+        [
+            {
+                id: "fresh",
+                provider: "surplus",
+                api: "openai-completions",
+                baseUrl: "https://api.surplusintelligence.ai/v1",
+            },
+            {
+                id: "claude-fresh",
+                provider: "surplus",
+                api: "anthropic-messages",
+                baseUrl: "https://api.surplusintelligence.ai/anthropic",
+            },
+        ],
     );
     assert.ok(published[0].persist.checkedAt <= Date.now());
 

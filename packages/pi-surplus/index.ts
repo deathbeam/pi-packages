@@ -9,9 +9,13 @@ type CatalogEntry = {
     top_provider?: { context_length?: unknown; max_completion_tokens?: unknown };
     supported_parameters?: unknown;
     supported_features?: unknown;
+    provider?: unknown;
 };
 
 const BASE_URL = "https://api.surplusintelligence.ai/v1";
+// The Anthropic SDK appends /v1/messages itself; the skin lives under /anthropic, not /v1/messages.
+const ANTHROPIC_BASE_URL = "https://api.surplusintelligence.ai/anthropic";
+const API = "openai-completions";
 
 const strings = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -23,8 +27,7 @@ const perMillion = (value: unknown): number => {
 };
 
 // A 0 or missing limit is missing data, unlike a 0 price, so it falls back to the default.
-const limit = (value: unknown, fallback: number): number =>
-    typeof value === "number" && value > 0 ? value : fallback;
+const limit = (value: unknown, fallback: number): number => (typeof value === "number" && value > 0 ? value : fallback);
 
 function toPiModel(entry: CatalogEntry): ProviderModelConfig | undefined {
     const output = strings(entry.architecture?.output_modalities);
@@ -36,6 +39,8 @@ function toPiModel(entry: CatalogEntry): ProviderModelConfig | undefined {
 
     const price = entry.pricing ?? {};
     return {
+        ...(entry.provider === "Anthropic" ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
+        ...(/^gpt-\d/.test(entry.id) ? { api: "openai-responses" } : {}),
         id: entry.id,
         name: typeof entry.name === "string" && entry.name ? entry.name : entry.id,
         reasoning: strings(entry.supported_features).includes("reasoning"),
@@ -83,7 +88,7 @@ export default async function (pi: ExtensionAPI) {
         name: "Surplus",
         baseUrl: BASE_URL,
         apiKey: "$SURPLUS_API_KEY",
-        api: "openai-completions",
+        api: API,
         models: registry,
         refreshModels: async (context) => {
             const cached = context.stored?.models.map(({ provider: _provider, ...model }) => model) ?? [];
@@ -97,8 +102,8 @@ export default async function (pi: ExtensionAPI) {
                     models: registry.map((model) => ({
                         ...model,
                         provider: "surplus",
-                        api: "openai-completions",
-                        baseUrl: BASE_URL,
+                        api: model.api ?? API,
+                        baseUrl: model.baseUrl ?? BASE_URL,
                     })),
                     checkedAt: Date.now(),
                 },
