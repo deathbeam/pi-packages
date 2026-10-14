@@ -16,6 +16,7 @@
       "./packages/pi-hashline/index.ts",
       "./packages/pi-images/index.ts",
       "./packages/pi-inferhub/index.ts",
+      "./packages/pi-surplus/index.ts",
       "./packages/pi-keenable/index.ts"
     ]
   },

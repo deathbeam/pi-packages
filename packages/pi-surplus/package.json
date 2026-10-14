@@ -1,0 +1,36 @@
+{
+  "name": "@deathbeam/pi-surplus",
+  "version": "0.0.1",
+  "description": "Surplus Intelligence provider with a live model catalog for Pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deathbeam/pi-packages.git",
+    "directory": "packages/pi-surplus"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node check.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
