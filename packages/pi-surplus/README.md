@@ -7,7 +7,7 @@ Set `SURPLUS_API_KEY`.
 
 ```sh
 # Choose one:
-pi install npm:@deathbeam/pi-surplus            # this package
+pi install npm:@deathbeam/pi-surplus             # this package
 pi install git:github.com/deathbeam/pi-packages  # all my packages
 ```
 

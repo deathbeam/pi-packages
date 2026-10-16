@@ -7,3 +7,4 @@
 - [@deathbeam/pi-inferhub](packages/pi-inferhub) - InferHub provider with a live model catalog.
 - [@deathbeam/pi-surplus](packages/pi-surplus) - Surplus Intelligence provider with a live model catalog.
 - [@deathbeam/pi-keenable](packages/pi-keenable) - Minimal extension for web search and fetch using Keenable API.
+- [@deathbeam/pi-usage](packages/pi-usage) - Minimal extension for token usage and cost per provider, model and project.
