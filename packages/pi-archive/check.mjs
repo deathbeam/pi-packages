@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { Readable } from "node:stream";
-import piArchive from "./index.ts";
+import piArchive, { readCompactionModel } from "./index.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-archive-check-"));
 const projA = path.join(root, "--home-user-git-projA--");
@@ -371,6 +371,26 @@ assert.ok(
 // The retrieval rule lives in both the system guidelines and the tool schema (used with custom SYSTEM.md).
 assert.match(tool.promptGuidelines?.join("\n") ?? "", /compaction.*search_archive/is);
 assert.match(tool.description, /compaction.*search_archive/is);
+
+const settingsAt = (value) => {
+    fs.mkdirSync(path.join(root, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".pi", "settings.json"), JSON.stringify({ archive: { compaction: value } }));
+    return readCompactionModel(root);
+};
+assert.deepEqual(settingsAt("openrouter/google/gemini-flash:low"), {
+    value: "openrouter/google/gemini-flash:low",
+    provider: "openrouter",
+    id: "google/gemini-flash",
+    thinking: "low",
+});
+assert.deepEqual(settingsAt("ollama/llama3:8b"), {
+    value: "ollama/llama3:8b",
+    provider: "ollama",
+    id: "llama3:8b",
+    thinking: undefined,
+});
+assert.equal(settingsAt("no-provider").provider, "");
+assert.equal(settingsAt("no-provider").id, "no-provider");
 
 fs.rmSync(root, { recursive: true, force: true });
 console.log("pi-archive: all checks passed");

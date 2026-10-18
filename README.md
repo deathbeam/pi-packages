@@ -1,6 +1,6 @@
 # Pi packages
 
-- [@deathbeam/pi-archive](packages/pi-archive) - Minimal extension for searching past Pi conversations.
+- [@deathbeam/pi-archive](packages/pi-archive) - Minimal extension for searching past Pi conversations and improving compaction.
 - [@deathbeam/pi-delegate](packages/pi-delegate) - Minimal extension for delegating tasks to subagents.
 - [@deathbeam/pi-hashline](packages/pi-hashline) - Hash-anchored read, edit, and grep.
 - [@deathbeam/pi-images](packages/pi-images) - Minimal extension for image descriptions for vision-less models and an image generation tool.
