@@ -28,11 +28,6 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
 }
 ```
 
-Relative `agentDirs` resolve against the project cwd, later same-name definitions win. Project `models` override global
-tiers (`cheap`, `balanced`, `strong`); a tier is a `provider/model` string with an optional `:<thinking>` suffix, as in
-pi's `--model`. An unset tier makes the child use the current session model. Thinking resolves from the agent's
-`model` suffix first, then the tier suffix, then the session level.
-
 Agents are Markdown files with frontmatter, the body becomes the child's system prompt:
 
 ```markdown
@@ -41,17 +36,17 @@ name: scout
 description: Explore the codebase
 tools: read, grep
 model: cheap
+isolated: false
 ---
 
 Explore the codebase and report relevant paths.
 ```
 
-Omit `tools` to inherit active tools. `model` can also be an explicit `provider/model[:thinking]`. The model sees the agent list from
-when the extension loaded, so run `/reload` after adding agents or changing their descriptions.
-
-The main session is prompted to act as an orchestrator. When it makes 5, 10, 20, … direct exploration calls (`read`,
-`grep`, `find`, `ls`, shell, web tools) without delegating, a hidden reminder nudges it to delegate the rest. The count
-resets on each prompt and each `delegate` call.
+- `name` is required and must be unique
+- `descripion` is required
+- `tools` is optional, a comma-separated list of tool names. Defaults to the session tools.
+- `model` is optional, a tier name or `provider/model[:thinking]`. Defaults to the session model.
+- `isolated` is optional, defaults to `false`. See [Isolation](#isolation).
 
 ## Isolation
 
@@ -59,8 +54,7 @@ resets on each prompt and each `delegate` call.
 `.pi/worktrees/<id>`, starting from your current working tree including uncommitted changes. Add `.pi/worktrees/` to
 `.gitignore`.
 
-`delegate_apply` merges the result into your working tree as uncommitted changes. On conflict the clone is kept so you
-can steer the delegate to resolve it. `discard: true` drops the clone instead.
+`delegate_apply` merges the result into your working tree as uncommitted changes.
 
 ## Development
 
