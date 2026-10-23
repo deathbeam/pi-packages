@@ -117,7 +117,7 @@ export function isolationSummary(iso: IsolationState): string {
     try {
         // Staging first pulls uncommitted and untracked changes into the stat.
         git(["add", "-A"], { cwd: iso.clone });
-        const stat = git(["diff", "--stat", iso.base], { cwd: iso.clone }).trim();
+        const stat = git(["diff", "--stat", iso.base], { cwd: iso.clone }).trimEnd();
         if (stat) lines.push(`Changes vs the main tree at launch:\n${stat}`);
     } catch {
         // The clone may already be applied or gone; the path alone still says where the work lives.
@@ -177,7 +177,7 @@ export function applyClone(iso: IsolationState): ApplyResult {
     // Without --binary, binary files render as a name-only "Binary files differ" line.
     return {
         kind: "applied",
-        stat: run(["diff", "--stat", SNAPSHOT_BRANCH, "HEAD"]).trim(),
+        stat: run(["diff", "--stat", SNAPSHOT_BRANCH, "HEAD"]).trimEnd(),
         diff: run(["diff", SNAPSHOT_BRANCH, "HEAD"]),
     };
 }
