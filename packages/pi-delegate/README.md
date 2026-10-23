@@ -1,6 +1,6 @@
 # [@deathbeam/pi-delegate](https://www.npmjs.com/package/@deathbeam/pi-delegate)
 
-Run subagents with `delegate`, `delegate_list`, `delegate_steer`, and `delegate_cancel`.
+Run subagents with `delegate`, `delegate_list`, `delegate_steer`, `delegate_cancel`, and `delegate_apply`.
 Use `/delegate` command to inspect jobs in a full-screen TUI.
 
 ## Installation
@@ -52,6 +52,15 @@ when the extension loaded, so run `/reload` after adding agents or changing thei
 The main session is prompted to act as an orchestrator. When it makes 5, 10, 20, … direct exploration calls (`read`,
 `grep`, `find`, `ls`, shell, web tools) without delegating, a hidden reminder nudges it to delegate the rest. The count
 resets on each prompt and each `delegate` call.
+
+## Isolation
+
+`isolated: true` (on a `delegate` call or in agent frontmatter) runs the delegate in its own git clone at
+`.pi/worktrees/<id>`, starting from your current working tree including uncommitted changes. Add `.pi/worktrees/` to
+`.gitignore`.
+
+`delegate_apply` merges the result into your working tree as uncommitted changes. On conflict the clone is kept so you
+can steer the delegate to resolve it. `discard: true` drops the clone instead.
 
 ## Development
 

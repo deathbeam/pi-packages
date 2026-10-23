@@ -161,6 +161,68 @@ export function reviveHint(id: string): string {
     return `To continue this job, call delegate_steer with id ${id} and a message.`;
 }
 
+/**
+ * Converts a git unified diff into pi's own diff format (`+12 content` / `-12 content` / ` 12 content`,
+ * prefix, padded line number, space, content), which is what pi's renderDiff colors; a raw unified
+ * diff renders as flat context. Line numbers come from the @@ headers (- uses the old side, + and
+ * context the new side); the file path heads each file and `...` separates its hunks.
+ */
+export function piDiff(unified: string): string {
+    const out: string[] = [];
+    let path = "";
+    let pathShown = false;
+    let hunkSeen = false;
+    let oldNum = 0;
+    let newNum = 0;
+    let width = 1;
+    const header = () => {
+        if (!pathShown) {
+            out.push(path);
+            pathShown = true;
+        }
+    };
+    for (const line of unified.split("\n")) {
+        const file = /^diff --git a\/\S+ b\/(.+)$/.exec(line);
+        if (file) {
+            path = file[1]!;
+            pathShown = false;
+            hunkSeen = false;
+            continue;
+        }
+        const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+        if (hunk) {
+            const [, oldStart, oldCount, newStart, newCount] = hunk;
+            // The width comes free from the hunk header's last line number on each side.
+            width = String(
+                Math.max(
+                    Number(oldStart) + (Number(oldCount) || 1) - 1,
+                    Number(newStart) + (Number(newCount) || 1) - 1,
+                ),
+            ).length;
+            header();
+            if (hunkSeen) out.push(` ${"".padStart(width, " ")} ...`);
+            hunkSeen = true;
+            oldNum = Number(oldStart);
+            newNum = Number(newStart);
+            continue;
+        }
+        // File-meta noise and the no-newline marker carry no content to render.
+        if (!hunkSeen || line.startsWith("\\")) {
+            if (/^Binary files .* differ$/.test(line)) header();
+            continue;
+        }
+        const content = line.slice(1);
+        const num = (prefix: string) => String(prefix === "-" ? oldNum++ : newNum++).padStart(width, " ");
+        if (line.startsWith("+")) out.push(`+${num("+")} ${content}`);
+        else if (line.startsWith("-")) out.push(`-${num("-")} ${content}`);
+        else {
+            out.push(` ${num(" ")} ${content}`);
+            oldNum++;
+        }
+    }
+    return out.join("\n");
+}
+
 export function reportText(report: DelegateReport): string {
     // Context usage lets the parent judge whether to continue this job or start a fresh one.
     const head = `Delegate "${report.agent}" (job ${report.id}, ${usageStats(report, report.elapsedMs)})`;

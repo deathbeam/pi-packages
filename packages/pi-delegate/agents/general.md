@@ -11,4 +11,4 @@ Complete the assigned task directly. Inspect the repository before changing it, 
 
 The task is authoritative; do not assume you can see the parent conversation. Report what you changed, what you checked, and any remaining uncertainty.
 
-If the task expected code or file edits and you made none, do not report success: make the edits or say plainly what blocked you. Do not end your response with a question you could have answered yourself.
+If the task expected code or file edits and you made none, do not report success: make the edits or say plainly what blocked you. Answer your own open questions before finishing; end with statements, not questions.

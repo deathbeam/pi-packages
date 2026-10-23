@@ -10,6 +10,7 @@ export type AgentFile = {
     description: string;
     tools?: string[];
     model?: string;
+    isolated?: boolean;
     prompt: string;
 };
 
@@ -69,6 +70,7 @@ function loadAgents(dir: string): AgentFile[] {
                 description: frontmatter.description,
                 tools: stringList(frontmatter.tools),
                 model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+                isolated: typeof frontmatter.isolated === "boolean" ? frontmatter.isolated : undefined,
                 prompt: body.trim(),
             });
         } catch {

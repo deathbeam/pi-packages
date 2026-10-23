@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme, keyHint, renderDiff } from "@earendil-works/pi-coding-agent";
 import {
     type Component,
     Container,
@@ -12,7 +13,6 @@ import {
     TruncatedText,
     truncateToWidth,
 } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
 import {
     COLLAPSED_OUTPUT_LINES,
     type DelegateReport,
@@ -20,6 +20,7 @@ import {
     jobLine,
     launchDetails,
     outputPreview,
+    piDiff,
     reportText,
     reviveHint,
     SPINNER_INTERVAL_MS,
@@ -31,6 +32,14 @@ import {
 } from "./format.ts";
 import { priorActivity, runChild } from "./child.ts";
 import { createJobStore, type DelegateJob, type InspectJob } from "./store.ts";
+import {
+    applyClone,
+    cloneCwd,
+    createIsolation,
+    isolationSummary,
+    removeClone,
+    type IsolationState,
+} from "./isolation.ts";
 import { registerInspector } from "./inspector.ts";
 import { configFor, contextWindowFor, discoverAgents, resolveModel, type AgentFile } from "./agents.ts";
 
@@ -46,7 +55,7 @@ type SteerDetails = Pick<
     elapsedMs: number;
 };
 
-const DELEGATION_TOOLS = new Set(["delegate", "delegate_list", "delegate_steer", "delegate_cancel"]);
+const DELEGATION_TOOLS = new Set(["delegate", "delegate_apply", "delegate_list", "delegate_steer", "delegate_cancel"]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
 const REMINDER_MESSAGE = "delegate-reminder";
@@ -95,6 +104,11 @@ function mustResolveModel(request: string | undefined, ctx: ExtensionContext, fa
     const { model, thinking } = resolveModel(request ?? fallback, configFor(ctx.cwd).models ?? {}, ctx);
     if (!model) throw new Error(`No model found for "${request ?? fallback}".`);
     return { model, thinking };
+}
+
+/** Isolated jobs append the clone location and a change stat so the orchestrator can apply the work. */
+function withIsolation(output: string, isolation: IsolationState | undefined): string {
+    return isolation ? [output, isolationSummary(isolation)].filter(Boolean).join("\n\n") : output;
 }
 
 /** Shared tool layout: an optional identity header, then a width-aware payload preview. */
@@ -228,7 +242,7 @@ export default function (pi: ExtensionAPI) {
             contextTokens: job.contextTokens,
             contextWindow: job.contextWindow,
             elapsedMs: Date.now() - job.startedAt,
-            output,
+            output: withIsolation(output ?? "", job.isolation),
             error,
         };
         // Idle: this starts a new turn. Streaming: steer the report in at the next turn boundary;
@@ -244,7 +258,7 @@ export default function (pi: ExtensionAPI) {
         ctx: ExtensionContext,
         agent: AgentFile,
         prior: InspectJob | undefined,
-        fields: { description: string; model?: string },
+        fields: { description: string; model?: string; isolated?: boolean },
         task: string,
         signal: AbortSignal | undefined,
         prompt = task,
@@ -254,20 +268,23 @@ export default function (pi: ExtensionAPI) {
             (tool) => !DELEGATION_TOOLS.has(tool),
         );
         const displayModel = thinking ? `${model}:${thinking}` : model;
+        const id = prior?.id ?? randomUUID().slice(0, 8);
+        const isolation = fields.isolated ? (prior?.isolation ?? createIsolation(ctx.cwd, id)) : undefined;
+
         const job: DelegateJob = {
             // A revived job keeps its id: the pinned child session id reopens the old transcript.
-            id: prior?.id ?? randomUUID().slice(0, 8),
+            id,
             agent: agent.name,
             description: fields.description.trim(),
             task,
             model: displayModel,
             status: "running",
-            // A revive continues the pinned transcript, so the inspector replays the child's own history.
             activity: prior ? priorActivity(DELEGATE_SESSION_DIR, prior.id) : [],
             tools,
             toolCalls: 0,
             startedAt: Date.now(),
             contextWindow: contextWindowFor(ctx, model),
+            isolation,
             controller: new AbortController(),
         };
         const details: DelegateDetails = {
@@ -294,14 +311,17 @@ export default function (pi: ExtensionAPI) {
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
-            cwd: ctx.cwd,
+            cwd: isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd,
             shell: false,
             stdio: "pipe",
         });
         store.launch(job, details.background);
+        const isolatedPrompt = isolation
+            ? `You are working in an isolated git clone at ${isolation.clone}; the main working tree is untouched. Commit freely here; the orchestrator applies your changes to the main tree.`
+            : "";
         const run = runChild(
             child,
-            prompt,
+            isolatedPrompt ? `${isolatedPrompt}\n\n${prompt}` : prompt,
             details.background ? job.controller.signal : signal,
             (update) => store.record(job, update),
             Boolean(prior),
@@ -312,7 +332,10 @@ export default function (pi: ExtensionAPI) {
             try {
                 const output = await run.done;
                 store.finish(job, "done");
-                return { content: [{ type: "text" as const, text: output }], details };
+                return {
+                    content: [{ type: "text" as const, text: withIsolation(output, job.isolation) }],
+                    details,
+                };
             } catch (error) {
                 // Record the outcome so the launch entry cannot linger as "running".
                 const cancelled = error instanceof Error && error.message === "Delegate was aborted";
@@ -335,7 +358,7 @@ export default function (pi: ExtensionAPI) {
             content: [
                 {
                     type: "text" as const,
-                    text: `${prior ? "Revived" : "Started"} delegate "${job.agent}" in the background (job ${job.id}). Steer it with delegate_steer or stop it with delegate_cancel. Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
+                    text: `${prior ? "Revived" : "Started"} delegate "${job.agent}" in the background (job ${job.id}). Do not call tools solely to wait, even no-op bash commands; when its report is your next dependency, end your turn and it will arrive automatically unless cancelled.`,
                 },
             ],
             details,
@@ -402,7 +425,7 @@ export default function (pi: ExtensionAPI) {
         pi.sendMessage(
             {
                 customType: REMINDER_MESSAGE,
-                content: `<system-reminder>You have made ${directCalls} direct exploration calls since your last delegation. If what remains is exploration, research, or a build/test/debug loop, delegate it now, in parallel for independent scopes, instead of continuing yourself.</system-reminder>`,
+                content: `<system-reminder>You have made ${directCalls} direct exploration calls since your last delegation. If what remains is exploration, research, or a build/test/debug loop, delegate it now, in parallel for independent scopes.</system-reminder>`,
                 display: false,
             },
             { deliverAs: "steer" },
@@ -429,9 +452,10 @@ export default function (pi: ExtensionAPI) {
     registerInspector(pi, store);
 
     const cwd = process.cwd();
-    const agentList = discoverAgents(cwd, configFor(cwd).agentDirs).map(
-        (agent) => `- ${agent.name}${agent.model ? ` (${agent.model})` : ""}: ${agent.description}`,
-    );
+    const agentList = discoverAgents(cwd, configFor(cwd).agentDirs).map((agent) => {
+        const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
+        return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
+    });
 
     pi.registerTool({
         name: "delegate",
@@ -439,17 +463,19 @@ export default function (pi: ExtensionAPI) {
         description: [
             "Start a delegate: a background run of one of the agents below on one focused task. Returns a job id immediately; the report arrives later as a follow-up message.",
             "",
-            "Available agents (default model in parentheses):",
+            "Available agents:",
             ...agentList,
             "",
             "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
+            "",
+            "With isolated: true, the delegate runs in an isolated git clone at .pi/worktrees/<job id> (gitignore that path), starting from the main tree exactly as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back.",
             "",
             "To follow up on or redirect an existing job, see delegate_steer.",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
         promptGuidelines: [
-            "You are the orchestrator, and delegating is your default: plan, split the work, brief delegates, and integrate their reports. Delegation is authorized; do not wait for the user to ask. Your context is the scarce resource: everything you read stays in it, is re-sent with every later request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
+            "You are the orchestrator, and delegating is your default: plan, split the work, brief delegates, and integrate their reports. Delegate on your own initiative. Your context is the scarce resource: everything you read stays in it, is re-sent with every later request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
             "Delegate exploration, research, implementation beyond a small edit, build/test/debug loops, and reviews. Work directly only for reading one known file or the lines you are about to edit, one targeted search, a small edit (about 30 lines in one file), a quick verification (one test run or one cited line), or a command the user asked you to run. Shell one-liners and scripts that search or read code count as exploration, not quick commands.",
             "Your failure mode is drifting into doing the work yourself, one quick search at a time. Decide what to delegate before your first exploratory call; if one targeted search does not settle it, delegate the rest.",
             "Start every independent delegate before waiting on any, ideally in one message. Trust reports instead of repeating their searches; check only what you act on. If a report falls short, delegate a follow-up that names the gap instead of redoing the work yourself.",
@@ -468,10 +494,13 @@ export default function (pi: ExtensionAPI) {
                         "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix.",
                 }),
             ),
+            isolated: Type.Optional(
+                Type.Boolean({ description: "Run in an isolated git clone; apply results with delegate_apply." }),
+            ),
         }),
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
             const params = dropNulls(rawParams);
-            const { agent: agentName, description, task, model } = params;
+            const { agent: agentName, description, task, model, isolated } = params;
             if (!agentName || !description || !task) throw new Error("agent, description and task are required.");
             const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
             const agent = agents.find((candidate) => candidate.name === agentName);
@@ -479,7 +508,8 @@ export default function (pi: ExtensionAPI) {
                 const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
                 throw new Error(`Unknown agent "${agentName}". Available agents: ${names}.`);
             }
-            return runDelegate(ctx, agent, undefined, { description, model }, task, signal);
+            const effective = isolated ?? agent.isolated;
+            return runDelegate(ctx, agent, undefined, { description, model, isolated: effective }, task, signal);
         },
 
         renderCall(args, theme, context) {
@@ -518,7 +548,7 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_steer",
         label: "Steer delegate",
         description:
-            "Send a message to a delegate job. A running job reads it before its next model request. A finished job, whatever its status, continues its own transcript with the message as its next instruction and reports again. Continue a job for follow-up on the same work. For a new task, or a job past half its context window (shown in its report), start a fresh delegate with a condensed brief of what the old job found.",
+            "Send a message to a delegate job. A running job reads it before its next model request. A finished job, whatever its status, continues its own transcript (its brief, its work, prior steers) with the message as its next instruction and reports again, so send only what is new. Continue a job for follow-up on the same work. For a new task, or a job past half its context window (shown in its report), start a fresh delegate with a condensed brief of what the old job found.",
         promptSnippet: "Send guidance to a delegate by job id, or continue a finished one",
         parameters: Type.Object({
             id: Type.String({
@@ -574,6 +604,11 @@ export default function (pi: ExtensionAPI) {
             }
             const prior = store.find(id);
             if (!id || !prior) throw new Error(`Unknown delegate job "${id}".`);
+            // An applied or discarded clone cannot be continued; a revive would run in the main tree.
+            if (prior.cloneClosed)
+                throw new Error(
+                    `The isolated clone of delegate job "${id}" was already applied or discarded; delegate_steer cannot continue it. Start a fresh delegate with a condensed brief instead.`,
+                );
             const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
             const agent = agents.find((candidate) => candidate.name === prior.agent);
             if (!agent) {
@@ -584,7 +619,11 @@ export default function (pi: ExtensionAPI) {
                 ctx,
                 agent,
                 prior,
-                { description: prior.description, model: params.model ?? prior.model },
+                {
+                    description: prior.description,
+                    model: params.model ?? prior.model,
+                    isolated: Boolean(prior.isolation),
+                },
                 prior.task,
                 signal,
                 params.message,
@@ -659,6 +698,106 @@ export default function (pi: ExtensionAPI) {
                 0,
                 0,
             );
+        },
+    });
+
+    pi.registerTool({
+        name: "delegate_apply",
+        label: "Apply delegate",
+        description:
+            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. On conflict the clone is kept and the error explains the recovery. The job must be finished, not running.",
+        promptSnippet: "Apply an isolated delegate's clone to the main tree, or discard it, by job id",
+        parameters: Type.Object({
+            id: Type.String({ description: "Job id of a finished isolated delegate." }),
+            discard: Type.Optional(
+                Type.Boolean({ description: "Remove the delegate's clone without applying its changes." }),
+            ),
+        }),
+        async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
+            const params = dropNulls(rawParams);
+            const id = jobId(params.id);
+            const job = store.find(id);
+            if (!id || !job) throw new Error(`Unknown delegate job "${id}".`);
+            if (job.status === "running")
+                throw new Error(`Delegate job "${id}" is still running; steer it or cancel it first.`);
+            if (!job.isolation)
+                throw new Error(`Delegate job "${id}" is not isolated; its changes are already in the main tree.`);
+            if (params.discard === true) {
+                removeClone(job.isolation);
+                job.isolation = undefined;
+                job.cloneClosed = true;
+                store.save(job);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Discarded the isolated clone of delegate "${job.agent}" (job ${job.id}); nothing was applied.`,
+                        },
+                    ],
+                    details: { id: job.id, agent: job.agent, discarded: true },
+                };
+            }
+            const result = applyClone(job.isolation);
+            if (result.kind === "conflict") {
+                // Base rule: base tracks the newest snapshot, so the next apply works whether or not the delegate rebased yet.
+                job.isolation = { ...job.isolation, base: result.snapshot };
+                store.save(job);
+                throw new Error(
+                    `Main tree changed under delegate job "${job.id}"; conflicting files: ${result.files.join(", ") || "(unknown)"}. The clone at ${job.isolation.clone} was kept. Steer job ${job.id} with: "Main tree changed under you. In your clone run \`git rebase main-snapshot\` (or merge), resolve conflicts, commit." Then call delegate_apply again.`,
+                );
+            }
+            const stat = result.kind === "applied" ? `\n${result.stat}` : "";
+            removeClone(job.isolation);
+            job.isolation = undefined;
+            job.cloneClosed = true;
+            store.save(job);
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text:
+                            result.kind === "empty"
+                                ? `Delegate "${job.agent}" (job ${job.id}) made no changes; its clone was removed.`
+                                : `Applied the changes of delegate "${job.agent}" (job ${job.id}) to the main tree:${stat}\n(clone removed)`,
+                    },
+                ],
+                details: { id: job.id, agent: job.agent, diff: result.kind === "applied" ? result.diff : undefined },
+            };
+        },
+
+        renderCall(args, theme, context) {
+            return toolLayout(
+                "delegate_apply",
+                jobTarget(args?.id, theme),
+                argText(args?.discard) === "true" ? "discard" : "",
+                theme,
+                context.expanded,
+            );
+        },
+
+        renderResult(result, { expanded }, theme, context) {
+            const details = result.details as
+                { id: string; agent: string; discarded?: boolean; diff?: string } | undefined;
+            const body = resultText(result);
+            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
+            const status = details.discarded ? "clone discarded" : "changes applied";
+            const header = `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", status)}`;
+            const diff = details.diff?.trim() ? renderDiff(piDiff(details.diff)) : "";
+            if (!diff) return new Text(header, 0, 0);
+            const lines = diff.split("\n");
+            // Collapsed shows the head like the other delegate previews; expanded shows the full colored diff.
+            const shown =
+                expanded || lines.length <= COLLAPSED_OUTPUT_LINES
+                    ? lines
+                    : [
+                          ...lines.slice(0, COLLAPSED_OUTPUT_LINES),
+                          moreLines(theme, lines.length - COLLAPSED_OUTPUT_LINES),
+                      ];
+            const container = new Container();
+            container.addChild(new Text(header, 0, 0));
+            container.addChild(new Spacer(1));
+            container.addChild(new Text(shown.join("\n"), 0, 0));
+            return container;
         },
     });
 

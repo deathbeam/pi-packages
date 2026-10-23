@@ -1,4 +1,5 @@
 import type { ChildActivity, ChildUpdate } from "./child.ts";
+import type { IsolationState } from "./isolation.ts";
 
 export type JobStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
 export type InspectJob = {
@@ -15,6 +16,9 @@ export type InspectJob = {
     endedAt?: number;
     status: JobStatus;
     activity: ChildActivity[];
+    isolation?: IsolationState;
+    /** Set once an isolated job's clone was applied or discarded, so a steer revive refuses instead of rerunning in the main tree. */
+    cloneClosed?: boolean;
 };
 
 export type DelegateJob = InspectJob & {
@@ -109,6 +113,13 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             append(JOB_ENTRY, entry);
             notify();
             return true;
+        },
+        /** Appends a corrected entry for a finished job changed after completion (isolation applied, discarded, or re-based). */
+        save: (job: InspectJob) => {
+            drop(job.id);
+            history.unshift(job);
+            append(JOB_ENTRY, { ...job, activity: [...job.activity] });
+            notify();
         },
         /** Rebuilds history from the branch and returns the jobs it marked interrupted. */
         restore: (branch: readonly unknown[]): InspectJob[] => {

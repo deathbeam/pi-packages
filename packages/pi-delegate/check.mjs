@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { join } from "node:path";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, renderDiff } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
     COLLAPSED_OUTPUT_LINES,
@@ -16,6 +16,7 @@ import {
     launchDetails,
     limitOutput,
     outputPreview,
+    piDiff,
     reportText,
     resultPreview,
     SPINNER_INTERVAL_MS,
@@ -40,11 +41,12 @@ const child = readFileSync(new URL("child.ts", root), "utf8");
 const store = readFileSync(new URL("store.ts", root), "utf8");
 const inspector = readFileSync(new URL("inspector.ts", root), "utf8");
 const agents = readFileSync(new URL("agents.ts", root), "utf8");
+const isolation = readFileSync(new URL("isolation.ts", root), "utf8");
 // Tripwires match source text across every module, so code that moved stays covered.
-const sources = `${index}\n${store}\n${inspector}\n${agents}`;
+const sources = `${index}\n${store}\n${inspector}\n${agents}\n${isolation}`;
 
 // Regex tripwires cannot see runtime syntax or protocol behavior, so compile and exercise both below.
-for (const source of [index, store, inspector, agents]) {
+for (const source of [index, store, inspector, agents, isolation]) {
     const dir = mkdtempSync(join(tmpdir(), "pi-delegate-index-check-"));
     const file = join(dir, "index.mjs");
     writeFileSync(file, stripTypeScriptTypes(source, { mode: "strip" }));
@@ -62,10 +64,12 @@ assert.match(sources, /registerCommand\("delegate"/);
 assert.match(sources, /name: "delegate_list"/);
 assert.match(sources, /name: "delegate_steer"/);
 assert.match(sources, /name: "delegate_cancel"/);
+assert.match(sources, /name: "delegate_apply"/);
 const excluded = sources.match(/const DELEGATION_TOOLS = new Set\(([\s\S]*?)\]\)/)?.[1];
 assert.ok(excluded, "missing child delegation denylist");
 assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).sort(), [
     "delegate",
+    "delegate_apply",
     "delegate_cancel",
     "delegate_list",
     "delegate_steer",
@@ -136,6 +140,8 @@ for (const { file, text } of agentFiles) {
             /^(cheap|balanced|strong)(:(off|minimal|low|medium|high|xhigh|max))?$/,
             `${file} model "${model}"`,
         );
+    const isolated = text.match(/^isolated:\s*(\S+)/m)?.[1];
+    if (isolated) assert.match(isolated, /^(true|false)$/, `${file} isolated "${isolated}"`);
 }
 
 // Crash recovery: entry dedupe runs through the store's restore seam.
@@ -184,6 +190,27 @@ assert.deepEqual(outputPreview("a\nb", 5), { shown: ["a", "b"], hidden: 0 });
 assert.deepEqual(outputPreview("a\nb\nc", 2), { shown: ["a", "b"], hidden: 1 });
 assert.deepEqual(outputPreview("```\ncode\nmore", 2), { shown: ["```", "code", "```"], hidden: 1 });
 assert.deepEqual(outputPreview("```\na\n```\nb", 3), { shown: ["```", "a", "```"], hidden: 1 });
+// A git unified diff must convert to pi's `+-<padded num> content` format before renderDiff colors it.
+const unified = [
+    "diff --git a/x.ts b/x.ts",
+    "index 111..222 100644",
+    "--- a/x.ts",
+    "+++ b/x.ts",
+    "@@ -1,4 +1,5 @@",
+    " line1",
+    "-old2",
+    "+new2",
+    "+new2b",
+    " line3",
+    "\\ No newline at end of file",
+].join("\n");
+const converted = piDiff(unified).split("\n");
+assert.deepEqual(converted, ["x.ts", " 1 line1", "-2 old2", "+2 new2", "+3 new2b", " 4 line3"]);
+for (const line of converted.slice(1)) assert.match(line, /^([-+ ]) *\d+ /);
+const codes = renderDiff(piDiff(unified))
+    .split("\n")
+    .map((line) => /^\u001b\[([0-9;]+)m/.exec(line)?.[1]);
+assert.ok(codes[2] !== codes[1] && codes[3] !== codes[1], "added/removed lines must not render as context");
 assert.equal(usageStats({}, 0), "0s");
 assert.equal(usageStats({ contextTokens: 900 }, 42000), "900 · 42s");
 assert.equal(usageStats({ contextTokens: 1234 }, 0), "1.2k · 0s");

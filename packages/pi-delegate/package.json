@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-delegate",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "description": "Minimal extension for delegating tasks to subagents.",
   "type": "module",
   "license": "MIT",
@@ -23,6 +23,7 @@
     "agents.ts",
     "child.ts",
     "format.ts",
+    "isolation.ts",
     "agents",
     "README.md",
     "LICENSE"
