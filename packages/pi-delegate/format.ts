@@ -1,6 +1,15 @@
-/** Formatting helpers stay runtime Pi-import-free for the native check; Pi's analogous formatters are private. */
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { JobStatus } from "./store.ts";
+import { getMarkdownTheme, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+    type Component,
+    Container,
+    Markdown,
+    Spacer,
+    Text,
+    TruncatedText,
+    truncateToWidth,
+} from "@earendil-works/pi-tui";
+import type { IsolationState } from "./isolation.ts";
+import type { DelegateJob, JobStatus } from "./store.ts";
 
 type UsageInfo = {
     contextTokens?: number;
@@ -18,6 +27,9 @@ export type DelegateReport = {
     elapsedMs: number;
     output?: string;
     error?: string;
+    status: JobStatus;
+    isolation?: IsolationState;
+    cloneClosed?: boolean;
 };
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -56,8 +68,32 @@ export function statusText(theme: Theme, status: JobStatus, now = Date.now()): s
     return theme.fg(STATUS_COLORS[status], statusIcon(status, now));
 }
 
-export function jobIdentity(theme: Theme, job: { id: string; agent: string }): string {
-    return `${theme.fg("muted", job.id)} ${theme.fg("toolTitle", theme.bold(job.agent))}`;
+/** The isolation state to show for a job: pending means its clone still holds unapplied work. */
+export type IsolationMark = "isolated" | "pending";
+
+type IsolationStateFields = {
+    isolation?: unknown;
+    cloneClosed?: boolean;
+    status?: string;
+};
+
+/** Derives the mark from a job: an isolation with no clone left, or a still-running one, is not pending. */
+export function isolationMarkOf(job: IsolationStateFields): IsolationMark | undefined {
+    if (!job.isolation) return undefined;
+    return job.cloneClosed || job.status === "running" ? "isolated" : "pending";
+}
+
+/** `⎇`, warning-colored while the clone's work is still unapplied. */
+export function jobIdentity(theme: Theme, job: { id: string; agent: string } & IsolationStateFields): string {
+    // Details snapshot the job's state, so a transcript line keeps the mark it had when captured.
+    const mark = isolationMarkOf(job);
+    const branch = mark ? ` ${theme.fg(mark === "pending" ? "warning" : "muted", "⎇")}` : "";
+    return `${theme.fg("muted", job.id)} ${theme.fg("toolTitle", theme.bold(job.agent))}${branch}`;
+}
+
+export function isolationWords(job: IsolationStateFields): string {
+    const mark = isolationMarkOf(job);
+    return mark === "pending" ? "isolated, pending delegate_apply" : mark === "isolated" ? "isolated" : "";
 }
 
 export function formatTools(tools: string[]): string {
@@ -88,9 +124,18 @@ export function usageStats(usage: UsageInfo, elapsedMs: number): string {
         : "";
     return [tokens, formatDuration(elapsedMs)].filter(Boolean).join(" · ");
 }
+
+export function elapsedMs(job: { startedAt: number; endedAt?: number }, now = Date.now()): number {
+    return (job.endedAt ?? now) - job.startedAt;
+}
+
 /** Summed wall-clock across jobs; running jobs tick from `now`. Parallel jobs each count their full span. */
 export function totalElapsedMs(jobs: { startedAt: number; endedAt?: number }[], now = Date.now()): number {
-    return jobs.reduce((sum, job) => sum + (job.endedAt ?? now) - job.startedAt, 0);
+    return jobs.reduce((sum, job) => sum + elapsedMs(job, now), 0);
+}
+
+export function tally(running: number, all: { startedAt: number; endedAt?: number }[], now = Date.now()): string {
+    return `${running} running · ${all.length} total · ${formatDuration(totalElapsedMs(all, now))}`;
 }
 
 export function toolCallDetail(toolName: string, args: unknown): string {
@@ -121,13 +166,17 @@ export function launchDetails(info: { model?: string; tools: string[] }): string
     return [`${EXPANDED_PAD}Model: ${info.model ?? "default"}`, `${EXPANDED_PAD}Tools: ${formatTools(info.tools)}`];
 }
 
+/** Caps a preview at `maxLines`; callers report the hidden count their own way. */
+export function capLines<T>(lines: T[], maxLines: number): { shown: T[]; hidden: number } {
+    if (lines.length <= maxLines) return { shown: lines, hidden: 0 };
+    return { shown: lines.slice(0, maxLines), hidden: lines.length - maxLines };
+}
+
 /** Close dangling Markdown fences so collapsed previews render correctly. */
 export function outputPreview(text: string, maxLines = COLLAPSED_OUTPUT_LINES): { shown: string[]; hidden: number } {
-    const lines = text.trim().split("\n");
-    if (lines.length <= maxLines) return { shown: lines, hidden: 0 };
-    const shown = lines.slice(0, maxLines);
-    if (shown.filter((line) => line.trimStart().startsWith("```")).length % 2 === 1) shown.push("```");
-    return { shown, hidden: lines.length - maxLines };
+    const { shown, hidden } = capLines(text.trim().split("\n"), maxLines);
+    if (hidden && shown.filter((line) => line.trimStart().startsWith("```")).length % 2 === 1) shown.push("```");
+    return { shown, hidden };
 }
 
 /** Cap child output without splitting UTF-8 characters. */
@@ -240,4 +289,95 @@ export function widgetJobs<T>(jobs: T[]): { shown: T[]; hidden: number; detail: 
     const detail = jobs.length <= WIDGET_MAX_DETAIL_JOBS;
     const shown = detail ? jobs : jobs.slice(-WIDGET_MAX_JOBS);
     return { shown, hidden: jobs.length - shown.length, detail };
+}
+
+export type DelegateDetails = Pick<
+    DelegateJob,
+    "id" | "agent" | "description" | "task" | "model" | "tools" | "status" | "isolation" | "cloneClosed"
+> & { background: boolean };
+
+export function resultFallback(body: string, theme: Theme, isError: boolean): Text {
+    const mark = statusText(theme, isError ? "failed" : "done");
+    return new Text(`\n${mark} ${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
+}
+
+export function moreLines(theme: Theme, hidden: number): string {
+    return theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand");
+}
+
+export function appendOutput(container: Container, body: string, expanded: boolean, theme: Theme): void {
+    const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
+    container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
+    if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
+}
+
+export function toolLayout(
+    toolName: string,
+    identity: string,
+    payload: string,
+    theme: Theme,
+    expanded: boolean,
+): Component {
+    const container = new Container();
+    if (toolName)
+        container.addChild(
+            new TruncatedText(`${theme.fg("toolTitle", theme.bold(toolName))}${identity ? ` ${identity}` : ""}`),
+        );
+    if (!payload.trim()) return container;
+    const body = new Text(
+        payload
+            .split("\n")
+            .map((line) => theme.fg("toolOutput", line))
+            .join("\n"),
+        0,
+        0,
+    );
+    if (toolName) container.addChild(new Spacer(1));
+    container.addChild({
+        render: (width) => {
+            // Wrapping turns one long line into many, so the cap counts rendered rows, not source lines.
+            const { shown, hidden } = capLines(body.render(width), expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
+            return hidden ? [...shown, truncateToWidth(moreLines(theme, hidden), width)] : shown;
+        },
+        invalidate: () => body.invalidate(),
+    });
+    return container;
+}
+
+export function resultHeader(
+    theme: Theme,
+    job: { id: string; agent: string },
+    tail: string,
+    outcome: JobStatus = "done",
+): string {
+    return `${statusText(theme, outcome)} ${jobIdentity(theme, job)} ${theme.fg("muted", tail)}`;
+}
+
+export function jobSummary(job: {
+    description: string;
+    contextTokens?: number;
+    contextWindow?: number;
+    elapsedMs: number;
+}): string {
+    return `${job.description} ${usageStats(job, job.elapsedMs)}`;
+}
+
+export function launchResult(
+    details: DelegateDetails,
+    body: string,
+    status: string,
+    expanded: boolean,
+    theme: Theme,
+): Component {
+    const container = new Container();
+    // The mark is the call's outcome (launch succeeded); job progress stays in the widget and report.
+    container.addChild(new Text(`\n${resultHeader(theme, details, status)}`, 0, 0));
+    // The call body already carries the task; only the launch metadata is new here.
+    if (expanded)
+        container.addChild(
+            new Text(theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")), 0, 0),
+        );
+    // Background results arrive as their own message; headless runs still show the output here.
+    if (!details.background && body) appendOutput(container, body, expanded, theme);
+    return container;
 }

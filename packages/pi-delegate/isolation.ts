@@ -5,7 +5,7 @@ import { join, relative, resolve } from "node:path";
 /** Persisted with the job: where the clone lives and which main-tree snapshot it started from. */
 export type IsolationState = { clone: string; base: string };
 
-export type ApplyResult =
+type ApplyResult =
     | { kind: "applied"; stat: string; diff: string }
     | { kind: "empty" }
     | { kind: "conflict"; files: string[]; snapshot: string };
@@ -122,6 +122,7 @@ export function isolationSummary(iso: IsolationState): string {
     } catch {
         // The clone may already be applied or gone; the path alone still says where the work lives.
     }
+    lines.push("Apply with delegate_apply to land these changes in the main tree.");
     return lines.join("\n");
 }
 

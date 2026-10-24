@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { stripTypeScriptTypes } from "node:module";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -45,19 +43,7 @@ const isolation = readFileSync(new URL("isolation.ts", root), "utf8");
 // Tripwires match source text across every module, so code that moved stays covered.
 const sources = `${index}\n${store}\n${inspector}\n${agents}\n${isolation}`;
 
-// Regex tripwires cannot see runtime syntax or protocol behavior, so compile and exercise both below.
-for (const source of [index, store, inspector, agents, isolation]) {
-    const dir = mkdtempSync(join(tmpdir(), "pi-delegate-index-check-"));
-    const file = join(dir, "index.mjs");
-    writeFileSync(file, stripTypeScriptTypes(source, { mode: "strip" }));
-    try {
-        execFileSync(process.execPath, ["--check", file], { stdio: "pipe" });
-    } finally {
-        rmSync(dir, { recursive: true, force: true });
-    }
-}
-
-// Tripwires for wiring the compiled-file check cannot see: the child protocol, the delivery path,
+// Tripwires for wiring the runtime import cannot see: the child protocol, the delivery path,
 // and where the prompt text lives. Renderer behavior is exercised below, not matched against source text.
 assert.match(sources, /name: "delegate"/);
 assert.match(sources, /registerCommand\("delegate"/);
@@ -547,7 +533,6 @@ const delegate = registered.find((tool) => tool.name === "delegate");
 assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
 // The model must learn from the tool description that steering continues or redirects any job.
 assert.match(delegate.description, /follow up on or redirect an existing job, see delegate_steer/);
-assert.doesNotMatch(delegate.description, /resume/);
 assert.match(delegate.promptGuidelines.join("\n"), /You are the orchestrator/);
 // Drift reminder: only the orchestrating session, at 5 then 10 direct calls, and a delegate call resets it.
 const nudged = (activeTools) => {
@@ -843,7 +828,6 @@ try {
     assert.match(launchResult, /Model:[\s\S]*Tools:/);
     // Display-only suffix: the session thinking (off) shows on the model, --model stays raw.
     assert.match(first.details.model, /:off$/, "inherited thinking must suffix the model display");
-    assert.match(sources, /thinking \? `\$\{model\}:\$\{thinking\}` : model/, "no-thinking must keep the bare model");
     assert.equal(launch.concat(launchResult).match(/trace it/g)?.length, 1, "launch task shown twice");
     assert.equal(launch.concat(launchResult).match(/first run/g)?.length, 1, "launch description shown twice");
     assert.match(

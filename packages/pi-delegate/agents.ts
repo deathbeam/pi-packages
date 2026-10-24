@@ -91,6 +91,20 @@ export function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[
     return [...agents.values()];
 }
 
+export function agentsFor(cwd: string): AgentFile[] {
+    return discoverAgents(cwd, configFor(cwd).agentDirs);
+}
+
+export function agentByName(cwd: string, name: string): AgentFile {
+    const agents = agentsFor(cwd);
+    const agent = agents.find((candidate) => candidate.name === name);
+    if (!agent) {
+        const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
+        throw new Error(`Unknown agent "${name}". Available agents: ${names}.`);
+    }
+    return agent;
+}
+
 // Same `:<thinking>` suffix pi's --model takes; only known levels split, so ids like `llama3:8b` stay whole.
 function splitThinking(value: string): { model: string; thinking?: string } {
     const match = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/.exec(value);

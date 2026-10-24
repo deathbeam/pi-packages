@@ -3,31 +3,30 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, getMarkdownTheme, keyHint, renderDiff } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, renderDiff } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import {
-    type Component,
-    Container,
-    Markdown,
-    Spacer,
-    Text,
-    TruncatedText,
-    truncateToWidth,
-} from "@earendil-works/pi-tui";
-import {
+    appendOutput,
+    capLines,
     COLLAPSED_OUTPUT_LINES,
+    type DelegateDetails,
     type DelegateReport,
+    elapsedMs,
+    isolationWords,
     jobIdentity,
     jobLine,
-    launchDetails,
-    outputPreview,
+    jobSummary,
+    launchResult,
+    moreLines,
     piDiff,
     reportText,
+    resultFallback,
+    resultHeader,
     reviveHint,
     SPINNER_INTERVAL_MS,
-    formatDuration,
     statusText,
-    totalElapsedMs,
-    usageStats,
+    tally,
+    toolLayout,
     widgetJobs,
 } from "./format.ts";
 import { priorActivity, runChild } from "./child.ts";
@@ -41,11 +40,7 @@ import {
     type IsolationState,
 } from "./isolation.ts";
 import { registerInspector } from "./inspector.ts";
-import { configFor, contextWindowFor, discoverAgents, resolveModel, type AgentFile } from "./agents.ts";
-
-type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "description" | "task" | "model" | "tools"> & {
-    background: boolean;
-};
+import { agentByName, agentsFor, configFor, contextWindowFor, resolveModel, type AgentFile } from "./agents.ts";
 
 type SteerDetails = Pick<
     DelegateJob,
@@ -82,23 +77,6 @@ function resultText(result: { content: readonly { type: string; text?: string }[
     return result.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
 }
 
-function resultFallback(body: string, theme: Theme, isError: boolean): Text {
-    const mark = statusText(theme, isError ? "failed" : "done");
-    return new Text(`\n${mark} ${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
-}
-
-/** Shared foreground output preview: delegate results, steer revives, and follow-up reports. */
-function appendOutput(container: Container, body: string, expanded: boolean, theme: Theme): void {
-    const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
-    container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
-    if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
-}
-
-/** Shared collapsed-output note so all three preview sites phrase it identically. */
-function moreLines(theme: Theme, hidden: number): string {
-    return theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand");
-}
-
 /** One resolution path for launches and swaps; the error names the requested model. */
 function mustResolveModel(request: string | undefined, ctx: ExtensionContext, fallback?: string) {
     const { model, thinking } = resolveModel(request ?? fallback, configFor(ctx.cwd).models ?? {}, ctx);
@@ -111,78 +89,12 @@ function withIsolation(output: string, isolation: IsolationState | undefined): s
     return isolation ? [output, isolationSummary(isolation)].filter(Boolean).join("\n\n") : output;
 }
 
-/** Shared tool layout: an optional identity header, then a width-aware payload preview. */
-function toolLayout(toolName: string, identity: string, payload: string, theme: Theme, expanded: boolean): Component {
-    const container = new Container();
-    if (toolName)
-        container.addChild(
-            new TruncatedText(`${theme.fg("toolTitle", theme.bold(toolName))}${identity ? ` ${identity}` : ""}`),
-        );
-    if (!payload.trim()) return container;
-    const body = new Text(
-        payload
-            .split("\n")
-            .map((line) => theme.fg("toolOutput", line))
-            .join("\n"),
-        0,
-        0,
-    );
-    if (toolName) container.addChild(new Spacer(1));
-    container.addChild({
-        render: (width) => {
-            // Wrapping turns one long line into many, so the cap counts rendered rows, not source lines.
-            const lines = body.render(width);
-            if (expanded || lines.length <= COLLAPSED_OUTPUT_LINES) return lines;
-            return [
-                ...lines.slice(0, COLLAPSED_OUTPUT_LINES),
-                truncateToWidth(moreLines(theme, lines.length - COLLAPSED_OUTPUT_LINES), width),
-            ];
-        },
-        invalidate: () => body.invalidate(),
-    });
-    return container;
-}
-
-/** Shared launch-result card: delegate launches and steer revives render identically. */
-function launchResult(
-    details: DelegateDetails,
-    body: string,
-    status: string,
-    expanded: boolean,
-    theme: Theme,
-): Component {
-    const container = new Container();
-    // The mark is the call's outcome (launch succeeded); job progress stays in the widget and report.
-    container.addChild(
-        new Text(`\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", status)}`, 0, 0),
-    );
-    // The call body already carries the task; only the launch metadata is new here.
-    if (expanded)
-        container.addChild(
-            new Text(theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")), 0, 0),
-        );
-    // Background results arrive as their own message; headless runs still show the output here.
-    if (!details.background && body) appendOutput(container, body, expanded, theme);
-    return container;
-}
-
 export default function (pi: ExtensionAPI) {
     const store = createJobStore(pi.appendEntry);
     let ticker: ReturnType<typeof setInterval> | undefined;
     // Prompts are read once; drift happens one quick search at a time, so count it and nudge at 5, 10, 20, ...
     let directCalls = 0;
     let nextReminder = FIRST_REMINDER_AT;
-
-    const jobSnapshot = (job: InspectJob) => ({
-        id: job.id,
-        agent: job.agent,
-        description: job.description,
-        contextTokens: job.contextTokens,
-        contextWindow: job.contextWindow,
-        startedAt: job.startedAt,
-        status: job.status,
-        endedAt: job.endedAt,
-    });
 
     const jobTarget = (rawId: unknown, theme: Theme): string => {
         const id = jobId(rawId);
@@ -203,11 +115,11 @@ export default function (pi: ExtensionAPI) {
         const { shown, hidden, detail } = widgetJobs(jobs);
         const lines: string[] = [];
         const all = store.all();
-        const counts = `${jobs.length} running · ${all.length} total · ${formatDuration(totalElapsedMs(all, now))}`;
+        const counts = tally(jobs.length, all, now);
         lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
         for (const job of shown) {
             lines.push(
-                `${statusText(theme, "running", now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, now - job.startedAt))}`,
+                `${statusText(theme, "running", now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`,
             );
             if (!detail) continue;
             if (job.lastTool)
@@ -241,9 +153,12 @@ export default function (pi: ExtensionAPI) {
             toolCalls: job.toolCalls,
             contextTokens: job.contextTokens,
             contextWindow: job.contextWindow,
-            elapsedMs: Date.now() - job.startedAt,
+            elapsedMs: elapsedMs(job),
             output: withIsolation(output ?? "", job.isolation),
             error,
+            status: job.status,
+            isolation: job.isolation,
+            cloneClosed: job.cloneClosed,
         };
         // Idle: this starts a new turn. Streaming: steer the report in at the next turn boundary;
         // a follow-up waits for a run end that a parent stuck polling may never reach.
@@ -295,6 +210,9 @@ export default function (pi: ExtensionAPI) {
             model: displayModel,
             tools,
             background: ctx.hasUI,
+            status: job.status,
+            isolation: job.isolation,
+            cloneClosed: job.cloneClosed,
         };
         const args = [
             "--session-id",
@@ -395,7 +313,12 @@ export default function (pi: ExtensionAPI) {
             pi.sendMessage(
                 {
                     customType: INTERRUPTED_MESSAGE,
-                    content: `<system-reminder>These delegate jobs were interrupted by a restart or crash; their transcripts survive. Continue each with delegate_steer (job id plus your guidance):\n${interrupted.map((job) => `- ${job.id} ${job.agent}: ${job.description}`).join("\n")}</system-reminder>`,
+                    content: `<system-reminder>These delegate jobs were interrupted by a restart or crash; their transcripts survive. Continue each with delegate_steer (job id plus your guidance):\n${interrupted
+                        .map((job) => {
+                            const isolation = isolationWords(job);
+                            return `- ${job.id} ${job.agent}: ${job.description}${isolation ? ` (${isolation})` : ""}`;
+                        })
+                        .join("\n")}</system-reminder>`,
                     display: false,
                 },
                 { deliverAs: "steer" },
@@ -435,14 +358,9 @@ export default function (pi: ExtensionAPI) {
     pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded }, theme) => {
         const report = message.details as DelegateReport | undefined;
         if (!report?.agent) return undefined;
-        const icon = statusText(theme, report.error ? "failed" : "done");
         const container = new Container();
         container.addChild(
-            new Text(
-                `${icon} ${jobIdentity(theme, report)} ${theme.fg("muted", report.description)} ${theme.fg("muted", usageStats(report, report.elapsedMs))}`,
-                0,
-                0,
-            ),
+            new Text(resultHeader(theme, report, jobSummary(report), report.error ? "failed" : "done"), 0, 0),
         );
         if (report.error) container.addChild(new Text(theme.fg("error", report.error), 0, 0));
         else if (report.output) appendOutput(container, report.output, expanded, theme);
@@ -452,7 +370,7 @@ export default function (pi: ExtensionAPI) {
     registerInspector(pi, store);
 
     const cwd = process.cwd();
-    const agentList = discoverAgents(cwd, configFor(cwd).agentDirs).map((agent) => {
+    const agentList = agentsFor(cwd).map((agent) => {
         const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
         return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
     });
@@ -502,12 +420,7 @@ export default function (pi: ExtensionAPI) {
             const params = dropNulls(rawParams);
             const { agent: agentName, description, task, model, isolated } = params;
             if (!agentName || !description || !task) throw new Error("agent, description and task are required.");
-            const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
-            const agent = agents.find((candidate) => candidate.name === agentName);
-            if (!agent) {
-                const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
-                throw new Error(`Unknown agent "${agentName}". Available agents: ${names}.`);
-            }
+            const agent = agentByName(ctx.cwd, agentName);
             const effective = isolated ?? agent.isolated;
             return runDelegate(ctx, agent, undefined, { description, model, isolated: effective }, task, signal);
         },
@@ -567,7 +480,7 @@ export default function (pi: ExtensionAPI) {
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
             const params = dropNulls(rawParams);
             const id = jobId(params.id);
-            const running = store.live().find((candidate) => candidate.id === id);
+            const running = store.liveJob(id);
             if (running) {
                 // A live job without steer would fall into the revive path and double-spawn its pinned session.
                 if (!running.steer) throw new Error(`No steerable delegate job "${id}".`);
@@ -576,7 +489,7 @@ export default function (pi: ExtensionAPI) {
                     await running.steer(params.message);
                 } catch (error) {
                     // The swap or steer await can outlast the job (a model ack waits up to 30s); raw child errors are cryptic.
-                    if (!store.live().some((candidate) => candidate.id === id))
+                    if (!store.liveJob(id))
                         throw new Error(
                             `Delegate job "${id}" just finished; call delegate_steer again to continue it.`,
                         );
@@ -590,7 +503,7 @@ export default function (pi: ExtensionAPI) {
                     toolCalls: running.toolCalls,
                     contextTokens: running.contextTokens,
                     contextWindow: running.contextWindow,
-                    elapsedMs: Date.now() - running.startedAt,
+                    elapsedMs: elapsedMs(running),
                 };
                 return {
                     content: [
@@ -602,19 +515,13 @@ export default function (pi: ExtensionAPI) {
                     details,
                 };
             }
-            const prior = store.find(id);
-            if (!id || !prior) throw new Error(`Unknown delegate job "${id}".`);
+            const prior = store.findOrThrow(id);
             // An applied or discarded clone cannot be continued; a revive would run in the main tree.
             if (prior.cloneClosed)
                 throw new Error(
                     `The isolated clone of delegate job "${id}" was already applied or discarded; delegate_steer cannot continue it. Start a fresh delegate with a condensed brief instead.`,
                 );
-            const agents = discoverAgents(ctx.cwd, configFor(ctx.cwd).agentDirs);
-            const agent = agents.find((candidate) => candidate.name === prior.agent);
-            if (!agent) {
-                const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
-                throw new Error(`Unknown agent "${prior.agent}". Available agents: ${names}.`);
-            }
+            const agent = agentByName(ctx.cwd, prior.agent);
             return runDelegate(
                 ctx,
                 agent,
@@ -644,12 +551,7 @@ export default function (pi: ExtensionAPI) {
             const details = result.details as SteerDetails | DelegateDetails | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            if ("message" in details)
-                return new Text(
-                    `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", details.description)} ${theme.fg("muted", usageStats(details, details.elapsedMs))}`,
-                    0,
-                    0,
-                );
+            if ("message" in details) return new Text(`\n${resultHeader(theme, details, jobSummary(details))}`, 0, 0);
             return launchResult(
                 details,
                 body,
@@ -670,7 +572,7 @@ export default function (pi: ExtensionAPI) {
         }),
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const id = jobId(params.id);
-            const job = store.live().find((candidate) => candidate.id === id);
+            const job = store.liveJob(id);
             if (!job) throw new Error(`No running delegate job "${id}".`);
             store.finish(job, "cancelled");
             job.controller.abort();
@@ -692,12 +594,8 @@ export default function (pi: ExtensionAPI) {
             const details = result.details as { id: string; agent: string } | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            return new Text(
-                // The mark is the call's outcome (cancellation requested), not the job's cancelled status.
-                `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", "cancellation requested")}`,
-                0,
-                0,
-            );
+            // The mark is the call's outcome (cancellation requested), not the job's cancelled status.
+            return new Text(`\n${resultHeader(theme, details, "cancellation requested")}`, 0, 0);
         },
     });
 
@@ -716,17 +614,21 @@ export default function (pi: ExtensionAPI) {
         async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
             const params = dropNulls(rawParams);
             const id = jobId(params.id);
-            const job = store.find(id);
-            if (!id || !job) throw new Error(`Unknown delegate job "${id}".`);
+            const job = store.findOrThrow(id);
             if (job.status === "running")
                 throw new Error(`Delegate job "${id}" is still running; steer it or cancel it first.`);
             if (!job.isolation)
                 throw new Error(`Delegate job "${id}" is not isolated; its changes are already in the main tree.`);
-            if (params.discard === true) {
-                removeClone(job.isolation);
+
+            const isolation = job.isolation;
+            const closeClone = () => {
+                removeClone(isolation);
                 job.isolation = undefined;
                 job.cloneClosed = true;
                 store.save(job);
+            };
+            if (params.discard === true) {
+                closeClone();
                 return {
                     content: [
                         {
@@ -747,10 +649,7 @@ export default function (pi: ExtensionAPI) {
                 );
             }
             const stat = result.kind === "applied" ? `\n${result.stat}` : "";
-            removeClone(job.isolation);
-            job.isolation = undefined;
-            job.cloneClosed = true;
-            store.save(job);
+            closeClone();
             return {
                 content: [
                     {
@@ -781,18 +680,12 @@ export default function (pi: ExtensionAPI) {
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
             const status = details.discarded ? "clone discarded" : "changes applied";
-            const header = `\n${statusText(theme, "done")} ${jobIdentity(theme, details)} ${theme.fg("muted", status)}`;
+            const header = `\n${resultHeader(theme, details, status)}`;
             const diff = details.diff?.trim() ? renderDiff(piDiff(details.diff)) : "";
             if (!diff) return new Text(header, 0, 0);
-            const lines = diff.split("\n");
             // Collapsed shows the head like the other delegate previews; expanded shows the full colored diff.
-            const shown =
-                expanded || lines.length <= COLLAPSED_OUTPUT_LINES
-                    ? lines
-                    : [
-                          ...lines.slice(0, COLLAPSED_OUTPUT_LINES),
-                          moreLines(theme, lines.length - COLLAPSED_OUTPUT_LINES),
-                      ];
+            const { shown, hidden } = capLines(diff.split("\n"), expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
+            if (hidden) shown.push(moreLines(theme, hidden));
             const container = new Container();
             container.addChild(new Text(header, 0, 0));
             container.addChild(new Spacer(1));
@@ -818,26 +711,26 @@ export default function (pi: ExtensionAPI) {
                     ? ` · ${lastTool}${lastDetail ? ` ${lastDetail}` : ""}`
                     : "";
             };
-            const lines = jobs.map(
-                (job) =>
-                    `- ${job.id} ${job.agent} · ${job.status} · ${jobLine(job, (job.endedAt ?? now) - job.startedAt)}${lastActivity(job)}`,
-            );
+            const lines = jobs.map((job) => {
+                const tag = isolationWords(job);
+                return `- ${job.id} ${job.agent} · ${job.status}${tag ? ` · ${tag}` : ""} · ${jobLine(job, elapsedMs(job, now))}${lastActivity(job)}`;
+            });
             return {
                 content: [
                     { type: "text", text: `${jobs.length} delegates (${running} running):\n${lines.join("\n")}` },
                 ],
-                details: { jobs: jobs.map(jobSnapshot) },
+                details: { jobs: jobs.map(store.snapshot) },
             };
         },
         renderResult(result, _options, theme, context) {
-            const jobs = (result.details as { jobs?: ReturnType<typeof jobSnapshot>[] } | undefined)?.jobs;
+            const jobs = (result.details as { jobs?: InspectJob[] } | undefined)?.jobs;
             if (!jobs?.length || context.isError) return resultFallback(resultText(result), theme, context.isError);
             const now = Date.now();
             return new Text(
                 `\n${statusText(theme, "done")} ${theme.fg("muted", `${jobs.length} delegates`)}\n${jobs
                     .map(
                         (job) =>
-                            `${statusText(theme, job.status, now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, (job.endedAt ?? now) - job.startedAt))}`,
+                            `${statusText(theme, job.status, now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`,
                     )
                     .join("\n")}`,
                 0,

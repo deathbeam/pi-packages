@@ -1,15 +1,7 @@
 import { type ExtensionAPI, getMarkdownTheme, keyHint, rawKeyHint } from "@earendil-works/pi-coding-agent";
 import { HStack, Markdown, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { ChildActivity } from "./child.ts";
-import {
-    formatDuration,
-    formatTools,
-    jobIdentity,
-    STATUS_COLORS,
-    statusText,
-    totalElapsedMs,
-    usageStats,
-} from "./format.ts";
+import { elapsedMs, formatTools, jobIdentity, STATUS_COLORS, statusText, tally, usageStats } from "./format.ts";
 import type { InspectJob, JobStore } from "./store.ts";
 
 /** The /delegate command: a full-screen inspector over the job store. */
@@ -60,12 +52,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                     `${theme.fg(start + index === selectedIndex && focus === "list" ? "accent" : "text", start + index === selectedIndex ? "›" : " ")} ${statusText(theme, item.status)} ${jobIdentity(theme, item)}`,
                                 ),
                                 row(theme.fg("muted", `    ${item.description}`)),
-                                row(
-                                    theme.fg(
-                                        "muted",
-                                        `    ${usageStats(item, (item.endedAt ?? Date.now()) - item.startedAt)}`,
-                                    ),
-                                ),
+                                row(theme.fg("muted", `    ${usageStats(item, elapsedMs(item))}`)),
                             ]);
                         return [
                             ...lines,
@@ -117,7 +104,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                               : [];
                         return [
                             truncateToWidth(
-                                `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", usageStats(job, (job.endedAt ?? Date.now()) - job.startedAt))}`,
+                                `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", usageStats(job, elapsedMs(job)))}`,
                                 width,
                             ),
                             truncateToWidth(theme.fg("dim", job.model), width),
@@ -147,10 +134,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                             const title = truncateToWidth(
                                 `${theme.fg(focus === "list" ? "accent" : "muted", focus === "list" ? "[Jobs]" : "Jobs")}  ` +
                                     `${theme.fg(focus === "history" ? "accent" : "muted", focus === "history" ? "[Activity]" : "Activity")}` +
-                                    theme.fg(
-                                        "dim",
-                                        ` · ${store.live().length} running · ${items.length} total · ${formatDuration(totalElapsedMs(items))}`,
-                                    ),
+                                    theme.fg("dim", ` · ${tally(store.live().length, items)}`),
                                 width,
                             );
                             const footer = truncateToWidth(

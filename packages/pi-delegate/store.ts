@@ -60,10 +60,13 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         const stale = history.findIndex((item) => item.id === id);
         if (stale >= 0) history.splice(stale, 1);
     };
-    const entryData = (job: DelegateJob): InspectJob => {
-        const { controller, steer, swapModel, lastTool, lastDetail, lastResult, ...snapshot } = job;
+    const find = (id: string) => running.get(id) ?? history.find((item) => item.id === id);
+    /** The serializable form of a job: runtime handles and the latest tool detail stay out. */
+    const snapshot = (job: InspectJob): InspectJob => {
+        const { controller, steer, swapModel, lastTool, lastDetail, lastResult, ...plain } = job as InspectJob &
+            Partial<DelegateJob>;
         // Copy activity: the live job keeps appending to its own array after the launch snapshot.
-        return { ...snapshot, activity: [...snapshot.activity] };
+        return { ...plain, activity: [...plain.activity] };
     };
     const addActivity = (job: DelegateJob, activity: ChildActivity) => {
         const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
@@ -83,10 +86,18 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         /** Every job a view can show: live first, then history. */
         all: (): InspectJob[] => [...running.values(), ...history],
         live: (): DelegateJob[] => [...running.values()],
-        find: (id: string) => running.get(id) ?? history.find((item) => item.id === id),
+        find,
+        snapshot,
+        /** A job by id; the common "unknown delegate job" failure lives here so every tool phrases it alike. */
+        findOrThrow: (id: string): InspectJob => {
+            const job = find(id);
+            if (!job) throw new Error(`Unknown delegate job "${id}".`);
+            return job;
+        },
+        liveJob: (id: string) => running.get(id),
         /** Writes the launch entry a restarted parent restores from; background jobs join the live set. */
         launch: (job: DelegateJob, background: boolean) => {
-            append(JOB_ENTRY, entryData(job));
+            append(JOB_ENTRY, snapshot(job));
             drop(job.id);
             if (background) running.set(job.id, job);
         },
@@ -107,7 +118,7 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             running.delete(job.id);
             job.status = status;
             if (detail) addActivity(job, { kind: "status", text: detail });
-            const entry: InspectJob = { ...entryData(job), endedAt: Date.now() };
+            const entry: InspectJob = { ...snapshot(job), endedAt: Date.now() };
             drop(entry.id);
             history.unshift(entry);
             append(JOB_ENTRY, entry);
@@ -118,7 +129,7 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         save: (job: InspectJob) => {
             drop(job.id);
             history.unshift(job);
-            append(JOB_ENTRY, { ...job, activity: [...job.activity] });
+            append(JOB_ENTRY, snapshot(job));
             notify();
         },
         /** Rebuilds history from the branch and returns the jobs it marked interrupted. */
