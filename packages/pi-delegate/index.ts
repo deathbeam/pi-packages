@@ -270,14 +270,16 @@ export default function (pi: ExtensionAPI) {
         if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
+        const cwd = isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd;
         const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
-            cwd: isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd,
+            cwd,
             shell: false,
             stdio: "pipe",
         });
         store.launch(job);
+        // The brief was written against the main tree, so its absolute paths need mapping to the clone.
         const isolatedPrompt = isolation
-            ? `You are working in an isolated git clone at ${isolation.clone}; the main working tree is untouched. Commit freely here; the orchestrator applies your changes to the main tree. \`git diff main-snapshot\` shows all changes made in this clone.`
+            ? `You are working in an isolated git clone at ${isolation.clone}. Your working directory ${cwd} is already inside it, so use relative paths and do not cd into it. Paths under ${ctx.cwd} in the task refer to the same files under ${cwd}. The main working tree is untouched; any edits or commits you make stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " `git diff main-snapshot` shows all changes made in this clone." : ""}`
             : "";
         const run = runChild(
             child,
@@ -432,9 +434,9 @@ export default function (pi: ExtensionAPI) {
             "",
             "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
             "",
-            "With isolated: true, the delegate runs in an isolated git clone at .pi/worktrees/<job id> (gitignore that path), starting from the main tree exactly as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
+            "With isolated: true, the delegate runs in an isolated git clone at .pi/worktrees/<job id>, starting from the main tree exactly as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
             "",
-            "To run another delegate in an isolated job's clone, pass that job id as `clone`. Every job id that ran in a clone is a handle on it: delegate_apply or delegate_discard with any of them acts on the whole clone, and only one of them can run at a time.",
+            "To run another delegate in an isolated job's clone, pass that job id as `clone`. delegate_apply or delegate_discard with any job id from that clone acts on the whole clone, and only one job can run in a clone at a time.",
             "",
             "To follow up on or redirect an existing job, see delegate_steer.",
         ].join("\n"),
@@ -677,7 +679,7 @@ export default function (pi: ExtensionAPI) {
                     store.save(shared);
                 }
                 throw new Error(
-                    `Main tree changed under delegate job "${job.id}"; conflicting files: ${result.files.join(", ") || "(unknown)"}. The clone at ${isolation.clone} was kept. Steer job ${job.id} with: "Main tree changed under you. In your clone run \`git rebase main-snapshot\` (or merge), resolve conflicts, commit." Then call delegate_apply again.`,
+                    `Main tree changed under delegate job "${job.id}"; conflicting files: ${result.files.join(", ") || "(unknown)"}. The clone at ${isolation.clone} was kept. Steer job ${job.id} with: "The main tree changed under you. Run \`git rebase main-snapshot\`, resolve each conflict, then \`git add\` the files and run \`git rebase --continue\` until the rebase finishes." Then call delegate_apply again.`,
                 );
             }
             const stat = result.kind === "applied" ? `\n${result.stat}` : "";

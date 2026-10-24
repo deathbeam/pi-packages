@@ -72,7 +72,7 @@ export function createIsolation(cwd: string, jobId: string): IsolationState {
     try {
         root = git(["rev-parse", "--show-toplevel"], { cwd }).trim();
     } catch {
-        throw new Error('isolation: "clone" requires the session to run inside a git repository.');
+        throw new Error("isolated: true requires the session to run inside a git repository.");
     }
     const clone = join(root, ".pi", "worktrees", jobId);
     rmSync(clone, { recursive: true, force: true });
@@ -118,7 +118,7 @@ export function isolationSummary(iso: IsolationState): string {
         // Staging first pulls uncommitted and untracked changes into the stat.
         git(["add", "-A"], { cwd: iso.clone });
         const stat = git(["diff", "--stat", iso.base], { cwd: iso.clone }).trimEnd();
-        if (stat) lines.push(`Changes vs the main tree at launch:\n${stat}`);
+        if (stat) lines.push(`Changes in this clone:\n${stat}`);
     } catch {
         // The clone may already be applied or gone; the path alone still says where the work lives.
     }
@@ -142,7 +142,9 @@ export function applyClone(iso: IsolationState): ApplyResult {
     if (run(["status", "--porcelain"]).trim()) run([...IDENTITY, "commit", "--no-verify", "-m", "delegate work"]);
     const branch = run(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
     if (branch === SNAPSHOT_BRANCH)
-        throw new Error(`the clone is on ${SNAPSHOT_BRANCH}; the delegate must keep its work on its own branch`);
+        throw new Error(
+            `the clone is checked out on ${SNAPSHOT_BRANCH}; steer the delegate to move its work onto its own branch, then apply again`,
+        );
     // Snapshot the current main tree, then replay the delegate's commits onto it with a real 3-way
     // merge: git tolerates nearby, non-overlapping edits that raw patch context matching rejects.
     const snapshot = snapshotMainTree(iso, root);
