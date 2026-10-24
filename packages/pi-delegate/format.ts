@@ -277,7 +277,12 @@ export function reportText(report: DelegateReport): string {
     const head = `Delegate "${report.agent}" (job ${report.id}, ${usageStats(report, report.elapsedMs)})`;
     if (report.error) return `${head} failed: ${report.error}\n${reviveHint(report.id)}`;
     const output = (report.output ?? "").trim();
-    return `${head} finished.${output ? `\n\n${output}` : ""}`;
+    // The apply hint is for the model only: the transcript renders `output`, so users never see it.
+    const hint =
+        report.isolation && !report.cloneClosed
+            ? `\n\nCall delegate_apply with job ${report.id} to land its changes.`
+            : "";
+    return `${head} finished.${output ? `\n\n${output}` : ""}${hint}`;
 }
 
 export function jobLine(info: { description?: string } & UsageInfo, elapsedMs: number): string {

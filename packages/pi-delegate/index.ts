@@ -363,7 +363,10 @@ export default function (pi: ExtensionAPI) {
             new Text(resultHeader(theme, report, jobSummary(report), report.error ? "failed" : "done"), 0, 0),
         );
         if (report.error) container.addChild(new Text(theme.fg("error", report.error), 0, 0));
-        else if (report.output) appendOutput(container, report.output, expanded, theme);
+        else if (report.output) {
+            container.addChild(new Spacer(1));
+            appendOutput(container, report.output, expanded, theme);
+        }
         return container;
     });
 

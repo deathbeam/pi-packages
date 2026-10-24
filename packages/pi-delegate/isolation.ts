@@ -122,7 +122,6 @@ export function isolationSummary(iso: IsolationState): string {
     } catch {
         // The clone may already be applied or gone; the path alone still says where the work lives.
     }
-    lines.push("Apply with delegate_apply to land these changes in the main tree.");
     return lines.join("\n");
 }
 
