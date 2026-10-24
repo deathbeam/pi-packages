@@ -50,7 +50,14 @@ type SteerDetails = Pick<
     elapsedMs: number;
 };
 
-const DELEGATION_TOOLS = new Set(["delegate", "delegate_apply", "delegate_list", "delegate_steer", "delegate_cancel"]);
+const DELEGATION_TOOLS = new Set([
+    "delegate",
+    "delegate_apply",
+    "delegate_discard",
+    "delegate_list",
+    "delegate_steer",
+    "delegate_cancel",
+]);
 const WIDGET_KEY = "delegate";
 const RESULT_MESSAGE = "delegate-result";
 const REMINDER_MESSAGE = "delegate-reminder";
@@ -100,6 +107,39 @@ export default function (pi: ExtensionAPI) {
         const id = jobId(rawId);
         const job = store.find(id);
         return job ? jobIdentity(theme, job) : theme.fg("muted", id || "…");
+    };
+
+    /** The clone is the unit: every job id that ran in it is only a handle, so state changes reach all of them. */
+    const jobsInClone = (clone: string) => store.all().filter((job) => job.isolation?.clone === clone);
+
+    /** A job that still has a clone; any job id that ran in a clone is a handle on it. */
+    const clonedJob = (id: string) => {
+        const job = store.findOrThrow(id);
+        const isolation = job.isolation;
+        if (!isolation)
+            throw new Error(
+                job.cloneClosed
+                    ? `The clone of delegate job "${id}" was already applied or discarded.`
+                    : `Delegate job "${id}" did not run in an isolated clone.`,
+            );
+        return { job, isolation };
+    };
+
+    /** Closing a clone is a clone-wide operation: every job id that ran in it stops pointing at it. */
+    const closeClone = (isolation: IsolationState) => {
+        removeClone(isolation);
+        for (const shared of jobsInClone(isolation.clone)) {
+            shared.isolation = undefined;
+            shared.cloneClosed = true;
+            store.save(shared);
+        }
+    };
+
+    /** One job at a time per clone: a shared clone is a shared working directory. */
+    const requireIdleClone = (isolation: IsolationState) => {
+        const busy = store.live().find((job) => job.isolation?.clone === isolation.clone);
+        if (busy)
+            throw new Error(`Delegate job "${busy.id}" is running in this clone; wait for it or cancel it first.`);
     };
 
     const refreshWidget = (ctx: ExtensionContext) => {
@@ -173,7 +213,7 @@ export default function (pi: ExtensionAPI) {
         ctx: ExtensionContext,
         agent: AgentFile,
         prior: InspectJob | undefined,
-        fields: { description: string; model?: string; isolated?: boolean },
+        fields: { description: string; model?: string; isolated?: boolean; clone?: IsolationState },
         task: string,
         signal: AbortSignal | undefined,
         prompt = task,
@@ -184,7 +224,9 @@ export default function (pi: ExtensionAPI) {
         );
         const displayModel = thinking ? `${model}:${thinking}` : model;
         const id = prior?.id ?? randomUUID().slice(0, 8);
-        const isolation = fields.isolated ? (prior?.isolation ?? createIsolation(ctx.cwd, id)) : undefined;
+        const isolation =
+            prior?.isolation ?? fields.clone ?? (fields.isolated ? createIsolation(ctx.cwd, id) : undefined);
+        if (isolation) requireIdleClone(isolation);
 
         const job: DelegateJob = {
             // A revived job keeps its id: the pinned child session id reopens the old transcript.
@@ -233,14 +275,15 @@ export default function (pi: ExtensionAPI) {
             shell: false,
             stdio: "pipe",
         });
-        store.launch(job, details.background);
+        store.launch(job);
         const isolatedPrompt = isolation
-            ? `You are working in an isolated git clone at ${isolation.clone}; the main working tree is untouched. Commit freely here; the orchestrator applies your changes to the main tree.`
+            ? `You are working in an isolated git clone at ${isolation.clone}; the main working tree is untouched. Commit freely here; the orchestrator applies your changes to the main tree. \`git diff main-snapshot\` shows all changes made in this clone.`
             : "";
         const run = runChild(
             child,
             isolatedPrompt ? `${isolatedPrompt}\n\n${prompt}` : prompt,
-            details.background ? job.controller.signal : signal,
+            // Foreground runs also stop on the tool's own abort (Esc); delegate_cancel and shutdown use the controller.
+            details.background || !signal ? job.controller.signal : AbortSignal.any([signal, job.controller.signal]),
             (update) => store.record(job, update),
             Boolean(prior),
         );
@@ -389,7 +432,9 @@ export default function (pi: ExtensionAPI) {
             "",
             "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
             "",
-            "With isolated: true, the delegate runs in an isolated git clone at .pi/worktrees/<job id> (gitignore that path), starting from the main tree exactly as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back.",
+            "With isolated: true, the delegate runs in an isolated git clone at .pi/worktrees/<job id> (gitignore that path), starting from the main tree exactly as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
+            "",
+            "To run another delegate in an isolated job's clone, pass that job id as `clone`. Every job id that ran in a clone is a handle on it: delegate_apply or delegate_discard with any of them acts on the whole clone, and only one of them can run at a time.",
             "",
             "To follow up on or redirect an existing job, see delegate_steer.",
         ].join("\n"),
@@ -416,16 +461,24 @@ export default function (pi: ExtensionAPI) {
                 }),
             ),
             isolated: Type.Optional(
-                Type.Boolean({ description: "Run in an isolated git clone; apply results with delegate_apply." }),
+                Type.Boolean({ description: "Run in a new isolated git clone; apply results with delegate_apply." }),
+            ),
+            clone: Type.Optional(
+                Type.String({
+                    description: "Job id of an isolated delegate; run in its clone instead of the main tree.",
+                }),
             ),
         }),
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
             const params = dropNulls(rawParams);
             const { agent: agentName, description, task, model, isolated } = params;
             if (!agentName || !description || !task) throw new Error("agent, description and task are required.");
+            const cloneId = jobId(params.clone);
+            if (cloneId && isolated === false) throw new Error("clone always runs isolated; omit isolated: false.");
+            const clone = cloneId ? clonedJob(cloneId).isolation : undefined;
             const agent = agentByName(ctx.cwd, agentName);
-            const effective = isolated ?? agent.isolated;
-            return runDelegate(ctx, agent, undefined, { description, model, isolated: effective }, task, signal);
+            const effective = clone ? true : (isolated ?? agent.isolated);
+            return runDelegate(ctx, agent, undefined, { description, model, isolated: effective, clone }, task, signal);
         },
 
         renderCall(args, theme, context) {
@@ -569,7 +622,7 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_cancel",
         label: "Cancel delegate",
         description: "Cancel a running delegate by job id. It sends no report; delegate_steer can continue it later.",
-        promptSnippet: "Cancel a running background delegate by job id",
+        promptSnippet: "Cancel a running delegate by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id from delegate or delegate_list." }),
         }),
@@ -606,53 +659,29 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_apply",
         label: "Apply delegate",
         description:
-            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. On conflict the clone is kept and the error explains the recovery. The job must be finished, not running.",
-        promptSnippet: "Apply an isolated delegate's clone to the main tree, or discard it, by job id",
+            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. On conflict the clone is kept and the error explains the recovery. No delegate may be running in its clone.",
+        promptSnippet: "Apply an isolated delegate's clone to the main tree by job id",
         parameters: Type.Object({
-            id: Type.String({ description: "Job id of a finished isolated delegate." }),
-            discard: Type.Optional(
-                Type.Boolean({ description: "Remove the delegate's clone without applying its changes." }),
-            ),
+            id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),
         }),
         async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
             const params = dropNulls(rawParams);
             const id = jobId(params.id);
-            const job = store.findOrThrow(id);
-            if (job.status === "running")
-                throw new Error(`Delegate job "${id}" is still running; steer it or cancel it first.`);
-            if (!job.isolation)
-                throw new Error(`Delegate job "${id}" is not isolated; its changes are already in the main tree.`);
-
-            const isolation = job.isolation;
-            const closeClone = () => {
-                removeClone(isolation);
-                job.isolation = undefined;
-                job.cloneClosed = true;
-                store.save(job);
-            };
-            if (params.discard === true) {
-                closeClone();
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Discarded the isolated clone of delegate "${job.agent}" (job ${job.id}); nothing was applied.`,
-                        },
-                    ],
-                    details: { id: job.id, agent: job.agent, discarded: true },
-                };
-            }
-            const result = applyClone(job.isolation);
+            const { job, isolation } = clonedJob(id);
+            requireIdleClone(isolation);
+            const result = applyClone(isolation);
             if (result.kind === "conflict") {
                 // Base rule: base tracks the newest snapshot, so the next apply works whether or not the delegate rebased yet.
-                job.isolation = { ...job.isolation, base: result.snapshot };
-                store.save(job);
+                for (const shared of jobsInClone(isolation.clone)) {
+                    shared.isolation = { ...isolation, base: result.snapshot };
+                    store.save(shared);
+                }
                 throw new Error(
-                    `Main tree changed under delegate job "${job.id}"; conflicting files: ${result.files.join(", ") || "(unknown)"}. The clone at ${job.isolation.clone} was kept. Steer job ${job.id} with: "Main tree changed under you. In your clone run \`git rebase main-snapshot\` (or merge), resolve conflicts, commit." Then call delegate_apply again.`,
+                    `Main tree changed under delegate job "${job.id}"; conflicting files: ${result.files.join(", ") || "(unknown)"}. The clone at ${isolation.clone} was kept. Steer job ${job.id} with: "Main tree changed under you. In your clone run \`git rebase main-snapshot\` (or merge), resolve conflicts, commit." Then call delegate_apply again.`,
                 );
             }
             const stat = result.kind === "applied" ? `\n${result.stat}` : "";
-            closeClone();
+            closeClone(isolation);
             return {
                 content: [
                     {
@@ -668,22 +697,14 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            return toolLayout(
-                "delegate_apply",
-                jobTarget(args?.id, theme),
-                argText(args?.discard) === "true" ? "discard" : "",
-                theme,
-                context.expanded,
-            );
+            return toolLayout("delegate_apply", jobTarget(args?.id, theme), "", theme, context.expanded);
         },
 
         renderResult(result, { expanded }, theme, context) {
-            const details = result.details as
-                { id: string; agent: string; discarded?: boolean; diff?: string } | undefined;
+            const details = result.details as { id: string; agent: string; diff?: string } | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            const status = details.discarded ? "clone discarded" : "changes applied";
-            const header = `\n${resultHeader(theme, details, status)}`;
+            const header = `\n${resultHeader(theme, details, "changes applied")}`;
             const diff = details.diff?.trim() ? renderDiff(piDiff(details.diff)) : "";
             if (!diff) return new Text(header, 0, 0);
             // Collapsed shows the head like the other delegate previews; expanded shows the full colored diff.
@@ -694,6 +715,43 @@ export default function (pi: ExtensionAPI) {
             container.addChild(new Spacer(1));
             container.addChild(new Text(shown.join("\n"), 0, 0));
             return container;
+        },
+    });
+
+    pi.registerTool({
+        name: "delegate_discard",
+        label: "Discard delegate clone",
+        description: "Remove an isolated delegate's clone without applying its changes.",
+        promptSnippet: "Discard an isolated delegate's clone by job id",
+        parameters: Type.Object({
+            id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),
+        }),
+        async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
+            const params = dropNulls(rawParams);
+            const id = jobId(params.id);
+            const { job, isolation } = clonedJob(id);
+            requireIdleClone(isolation);
+            closeClone(isolation);
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Discarded the isolated clone of delegate "${job.agent}" (job ${job.id}); nothing was applied.`,
+                    },
+                ],
+                details: { id: job.id, agent: job.agent, discarded: true },
+            };
+        },
+
+        renderCall(args, theme, context) {
+            return toolLayout("delegate_discard", jobTarget(args?.id, theme), "", theme, context.expanded);
+        },
+
+        renderResult(result, _options, theme, context) {
+            const details = result.details as { id: string; agent: string; discarded?: boolean } | undefined;
+            const body = resultText(result);
+            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
+            return new Text(`\n${resultHeader(theme, details, "clone discarded")}`, 0, 0);
         },
     });
 

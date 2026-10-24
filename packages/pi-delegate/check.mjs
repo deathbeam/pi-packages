@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -51,12 +52,14 @@ assert.match(sources, /name: "delegate_list"/);
 assert.match(sources, /name: "delegate_steer"/);
 assert.match(sources, /name: "delegate_cancel"/);
 assert.match(sources, /name: "delegate_apply"/);
+assert.match(sources, /name: "delegate_discard"/);
 const excluded = sources.match(/const DELEGATION_TOOLS = new Set\(([\s\S]*?)\]\)/)?.[1];
 assert.ok(excluded, "missing child delegation denylist");
 assert.deepEqual([...excluded.matchAll(/"([^"]+)"/g)].map(([, name]) => name).sort(), [
     "delegate",
     "delegate_apply",
     "delegate_cancel",
+    "delegate_discard",
     "delegate_list",
     "delegate_steer",
 ]);
@@ -1328,6 +1331,105 @@ try {
     const revivedReport = await Promise.race([deliveredRevived, timeout]);
     assert.equal(revivedReport.details.id, cancelled.details.id);
     assert.equal(revivedReport.details.error, undefined);
+    // A clone belongs to no single job: any id that ran in it can apply it once, and only one job runs in it at a time.
+    const applyTool = registered.find((tool) => tool.name === "delegate_apply");
+    const isoRepo = mkdtempSync(join(tmpdir(), "pi-delegate-iso-"));
+    try {
+        const git = (...args) => execFileSync("git", args, { cwd: isoRepo, encoding: "utf8" });
+        git("init", "-q");
+        git("config", "user.email", "check@example.com");
+        git("config", "user.name", "check");
+        writeFileSync(join(isoRepo, "seed.txt"), "seed\n");
+        git("add", "seed.txt");
+        git("commit", "-q", "-m", "seed");
+        const isoCtx = { ...tuiCtx, cwd: isoRepo };
+        const owner = await delegate.execute(
+            "call",
+            { agent: "explore", description: "clone owner", task: "trace it", isolated: true },
+            undefined,
+            () => {},
+            isoCtx,
+        );
+        const clone = owner.details.isolation.clone;
+        // The refusal names the job holding the clone.
+        await assert.rejects(
+            delegate.execute(
+                "call",
+                { agent: "explore", description: "clone guest", task: "trace it", clone: `job ${owner.details.id}` },
+                undefined,
+                () => {},
+                isoCtx,
+            ),
+            new RegExp(`"${owner.details.id}" is running in this clone`),
+        );
+        // clone implies isolation even though the explore agent is not isolated.
+        await assert.rejects(
+            delegate.execute(
+                "call",
+                {
+                    agent: "explore",
+                    description: "clone guest",
+                    task: "trace it",
+                    clone: owner.details.id,
+                    isolated: false,
+                },
+                undefined,
+                () => {},
+                isoCtx,
+            ),
+            /clone always runs isolated/,
+        );
+        await cancel.execute("call", { id: owner.details.id }, undefined, () => {}, isoCtx);
+        const guest = await delegate.execute(
+            "call",
+            { agent: "explore", description: "clone guest", task: "trace it", clone: owner.details.id },
+            undefined,
+            () => {},
+            isoCtx,
+        );
+        assert.equal(guest.details.isolation.clone, clone, "the guest did not share the clone");
+        // Apply refuses while another job in the clone is still running.
+        await assert.rejects(
+            applyTool.execute("call", { id: owner.details.id }, undefined, () => {}),
+            new RegExp(`"${guest.details.id}" is running in this clone`),
+        );
+        await cancel.execute("call", { id: guest.details.id }, undefined, () => {}, isoCtx);
+        writeFileSync(join(clone, "guest.txt"), "guest work\n");
+        const applied = await applyTool.execute("call", { id: guest.details.id }, undefined, () => {});
+        assert.match(applied.content[0].text, /Applied the changes/);
+        assert.equal(readFileSync(join(isoRepo, "guest.txt"), "utf8"), "guest work\n", "apply via the guest id missed");
+        assert.equal(existsSync(clone), false, "the shared clone was not removed");
+        for (const id of [owner.details.id, guest.details.id]) {
+            const last = savedEntries.filter((entry) => entry.data?.id === id).at(-1).data;
+            assert.equal(last.isolation, undefined, `${id} still points at the closed clone`);
+            assert.equal(last.cloneClosed, true, `${id} did not record the closed clone`);
+        }
+        await assert.rejects(
+            steer.execute("call", { id: owner.details.id, message: "continue" }, undefined, () => {}, isoCtx),
+            /already applied or discarded/,
+        );
+        // Discard takes the same clone-wide close path without applying anything.
+        const discardTool = registered.find((tool) => tool.name === "delegate_discard");
+        const discardedOwner = await delegate.execute(
+            "call",
+            { agent: "explore", description: "discard me", task: "trace it", isolated: true },
+            undefined,
+            () => {},
+            isoCtx,
+        );
+        await cancel.execute("call", { id: discardedOwner.details.id }, undefined, () => {}, isoCtx);
+        const discarded = await discardTool.execute("call", { id: discardedOwner.details.id }, undefined, () => {});
+        assert.match(discarded.content[0].text, /Discarded the isolated clone/);
+        assert.equal(discarded.details.discarded, true);
+        assert.equal(existsSync(discardedOwner.details.isolation.clone), false, "discard kept the clone");
+        assert.equal(
+            savedEntries.filter((entry) => entry.data?.id === discardedOwner.details.id).at(-1).data.cloneClosed,
+            true,
+        );
+        assert.equal("discard" in applyTool.parameters.properties, false, "delegate_apply still takes discard");
+    } finally {
+        rmSync(isoRepo, { recursive: true, force: true });
+    }
 } finally {
     clearTimeout(timer);
     process.argv = argv;

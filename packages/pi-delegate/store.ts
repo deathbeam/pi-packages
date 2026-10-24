@@ -95,11 +95,11 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             return job;
         },
         liveJob: (id: string) => running.get(id),
-        /** Writes the launch entry a restarted parent restores from; background jobs join the live set. */
-        launch: (job: DelegateJob, background: boolean) => {
+        /** Writes the launch entry a restarted parent restores from; the job joins the live set until it finishes. */
+        launch: (job: DelegateJob) => {
             append(JOB_ENTRY, snapshot(job));
             drop(job.id);
-            if (background) running.set(job.id, job);
+            running.set(job.id, job);
         },
         record: (job: DelegateJob, update: ChildUpdate) => {
             if (job.status !== "running") return;
@@ -108,8 +108,7 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             if (update.lastDetail !== undefined) job.lastDetail = update.lastDetail;
             if (update.lastResult !== undefined) job.lastResult = update.lastResult;
             if (update.contextTokens !== undefined) job.contextTokens = update.contextTokens;
-            // Activity feeds the live views; a foreground run reports through its tool result instead.
-            if (update.activity && running.has(job.id)) addActivity(job, update.activity);
+            if (update.activity) addActivity(job, update.activity);
         },
         /** Leaves the live set and writes the completion entry; false when the job was cancelled. */
         finish: (job: DelegateJob, status: JobStatus, detail?: string): boolean => {
