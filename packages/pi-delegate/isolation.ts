@@ -28,6 +28,8 @@ function git(
             cwd: options.cwd,
             input: options.input,
             encoding: "utf8",
+            // Without this, git's stderr (rebase hints etc.) leaks onto the TUI.
+            stdio: "pipe",
             // Binary diffs of real repositories blow past execFileSync's 1 MiB default.
             maxBuffer: 1024 ** 3,
             env: options.indexFile ? { ...process.env, GIT_INDEX_FILE: options.indexFile } : process.env,
