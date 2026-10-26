@@ -275,19 +275,20 @@ export default function (pi: ExtensionAPI) {
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const cwd = isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd;
+        if (isolation)
+            args.push(
+                "--append-system-prompt",
+                `You are working in an isolated git clone at ${isolation.clone}. Your working directory is ${cwd}; run every command from it with relative paths. Any path under ${ctx.cwd} means the same file under ${cwd}. Your edits and commits stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " `git diff main-snapshot` shows every change made in this clone." : ""}`,
+            );
         const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
             cwd,
             shell: false,
             stdio: "pipe",
         });
         store.launch(job);
-        // The brief was written against the main tree, so its absolute paths need mapping to the clone.
-        const isolatedPrompt = isolation
-            ? `You are working in an isolated git clone at ${isolation.clone}. Your working directory ${cwd} is already inside it, so use relative paths and do not cd into it. Paths under ${ctx.cwd} in the task refer to the same files under ${cwd}. The main working tree is untouched; any edits or commits you make stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " `git diff main-snapshot` shows all changes made in this clone." : ""}`
-            : "";
         const run = runChild(
             child,
-            isolatedPrompt ? `${isolatedPrompt}\n\n${prompt}` : prompt,
+            prompt,
             // Foreground runs also stop on the tool's own abort (Esc); delegate_cancel and shutdown use the controller.
             details.background || !signal ? job.controller.signal : AbortSignal.any([signal, job.controller.signal]),
             (update) => store.record(job, update),
