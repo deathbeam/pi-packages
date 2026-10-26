@@ -278,7 +278,7 @@ export default function (pi: ExtensionAPI) {
         if (isolation)
             args.push(
                 "--append-system-prompt",
-                `You are working in an isolated git clone at ${isolation.clone}. Your working directory is ${cwd}; run every command from it with relative paths. Any path under ${ctx.cwd} means the same file under ${cwd}. Your edits and commits stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " `git diff main-snapshot` shows every change made in this clone." : ""}`,
+                `You are working in an isolated git clone at ${isolation.clone}. Your working directory is ${cwd}; run every command from it with relative paths. Any path under ${ctx.cwd} means the same file under ${cwd}. Your edits stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " Git commands that write, such as commit and rebase, work here and change only this clone. `git diff main-snapshot` shows every change made in it." : ""}`,
             );
         const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
             cwd,
