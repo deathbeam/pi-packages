@@ -331,7 +331,7 @@ fake.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
 assert.equal(await run.done, "é");
 assert.deepEqual(activity, [
     { kind: "tool", text: "read", detail: "src/a.ts" },
-    { kind: "result", text: "↳ read: file loaded" },
+    { kind: "result", text: "file loaded" },
     { kind: "assistant", text: "é" },
     { kind: "user", text: guidance },
     { kind: "user", text: "block one\nblock two" },
@@ -496,7 +496,7 @@ assert.deepEqual(priorActivity(seedDir, "seed1"), [
     { kind: "user", text: "trace it" },
     { kind: "assistant", text: "Reading files." },
     { kind: "tool", text: "read", detail: "src/a.ts" },
-    { kind: "result", text: "↳ read: const a = 1;" },
+    { kind: "result", text: "const a = 1;" },
 ]);
 assert.deepEqual(priorActivity(seedDir, "nope"), [], "unknown session id must seed nothing");
 assert.deepEqual(priorActivity(join(seedDir, "missing"), "seed1"), [], "missing session dir must seed nothing");

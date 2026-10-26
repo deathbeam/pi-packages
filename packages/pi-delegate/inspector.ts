@@ -72,12 +72,18 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                         if (entry.kind === "tool")
                             return [
                                 truncateToWidth(
-                                    theme.fg("toolTitle", entry.text) +
+                                    theme.fg("toolTitle", theme.bold(entry.text)) +
                                         (entry.detail ? ` ${theme.fg("accent", entry.detail)}` : ""),
                                     width,
                                 ),
                             ];
-                        if (entry.kind === "result") return [truncateToWidth(theme.fg("text", entry.text), width)];
+                        if (entry.kind === "result")
+                            return [
+                                truncateToWidth(
+                                    `  ${theme.fg("muted", "↳")} ${theme.fg(entry.isError ? "error" : "toolOutput", entry.text || "(no text output)")}`,
+                                    width,
+                                ),
+                            ];
                         // Only failure detail still says anything; the header icon carries the status.
                         if (!entry.text) return [];
                         return [truncateToWidth(theme.fg(STATUS_COLORS.failed, entry.text), width)];

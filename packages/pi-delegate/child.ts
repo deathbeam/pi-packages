@@ -15,12 +15,10 @@ export type ChildActivity = {
     kind: "tool" | "result" | "assistant" | "user" | "status";
     text: string;
     detail?: string;
+    isError?: boolean;
 };
 export type ChildUpdate = {
     toolCalls?: number;
-    lastTool?: string;
-    lastDetail?: string;
-    lastResult?: string;
     contextTokens?: number;
     activity?: ChildActivity;
 };
@@ -132,9 +130,6 @@ export function runChild(
                         const detail = toolCallDetail(event.toolName, event.args);
                         onUpdate?.({
                             toolCalls,
-                            lastTool: event.toolName,
-                            lastDetail: detail,
-                            lastResult: "",
                             activity: { kind: "tool", text: event.toolName, detail },
                         });
                         return;
@@ -142,10 +137,10 @@ export function runChild(
                     case "tool_execution_end": {
                         const preview = resultPreview(event.result);
                         onUpdate?.({
-                            lastResult: preview,
                             activity: {
                                 kind: "result",
-                                text: `↳ ${event.toolName}${event.isError ? " ✗" : ""}: ${preview ?? "(no text output)"}`,
+                                text: preview ?? "",
+                                ...(event.isError ? { isError: true } : {}),
                             },
                         });
                         return;
@@ -357,7 +352,7 @@ export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
                 ? (entry.message as {
                       role?: "assistant" | "user" | "toolResult";
                       content?: unknown;
-                      toolName?: string;
+                      isError?: boolean;
                   })
                 : undefined;
         if (!message?.role) continue;
@@ -365,7 +360,8 @@ export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
             const preview = resultPreview({ content: message.content });
             activity.push({
                 kind: "result",
-                text: normalize(`↳ ${message.toolName ?? "tool"}: ${preview ?? "(no text output)"}`),
+                text: normalize(preview ?? ""),
+                ...(message.isError ? { isError: true } : {}),
             });
             continue;
         }

@@ -30,7 +30,7 @@ import {
     widgetJobs,
 } from "./format.ts";
 import { priorActivity, runChild } from "./child.ts";
-import { createJobStore, type DelegateJob, type InspectJob } from "./store.ts";
+import { createJobStore, type DelegateJob, lastToolCall, type InspectJob } from "./store.ts";
 import {
     applyClone,
     cloneCwd,
@@ -162,11 +162,15 @@ export default function (pi: ExtensionAPI) {
                 `${statusText(theme, "running", now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`,
             );
             if (!detail) continue;
-            if (job.lastTool)
+            const { tool, result } = lastToolCall(job);
+            if (tool)
                 lines.push(
-                    `   ${theme.fg("toolTitle", theme.bold(job.lastTool))}${job.lastDetail ? ` ${theme.fg("accent", job.lastDetail)}` : ""}`,
+                    `   ${theme.fg("toolTitle", theme.bold(tool.text))}${tool.detail ? ` ${theme.fg("accent", tool.detail)}` : ""}`,
                 );
-            if (job.lastResult) lines.push(`   ${theme.fg("muted", "↳")} ${theme.fg("toolOutput", job.lastResult)}`);
+            if (result?.text)
+                lines.push(
+                    `   ${theme.fg("muted", "↳")} ${theme.fg(result.isError ? "error" : "toolOutput", result.text)}`,
+                );
         }
         if (hidden) lines.push(`   ${theme.fg("muted", `… ${hidden} more running`)}`);
         ctx.ui.setWidget(WIDGET_KEY, lines);
@@ -769,10 +773,8 @@ export default function (pi: ExtensionAPI) {
             if (!jobs.length) return { content: [{ type: "text", text: "No delegates yet." }], details: undefined };
             const running = jobs.filter((job) => job.status === "running").length;
             const lastActivity = (job: InspectJob) => {
-                const { lastTool, lastDetail } = job as DelegateJob;
-                return job.status === "running" && lastTool
-                    ? ` · ${lastTool}${lastDetail ? ` ${lastDetail}` : ""}`
-                    : "";
+                const { tool } = lastToolCall(job);
+                return job.status === "running" && tool ? ` · ${tool.text}${tool.detail ? ` ${tool.detail}` : ""}` : "";
             };
             const lines = jobs.map((job) => {
                 const tag = isolationWords(job);

@@ -21,10 +21,14 @@ export type InspectJob = {
     cloneClosed?: boolean;
 };
 
+/** The job's latest tool call and its result, once the result arrives. */
+export function lastToolCall(job: InspectJob): { tool?: ChildActivity; result?: ChildActivity } {
+    const at = job.activity.findLastIndex((entry) => entry.kind === "tool");
+    if (at < 0) return {};
+    return { tool: job.activity[at], result: job.activity.slice(at + 1).find((entry) => entry.kind === "result") };
+}
+
 export type DelegateJob = InspectJob & {
-    lastTool?: string;
-    lastDetail?: string;
-    lastResult?: string;
     controller: AbortController;
     steer?: (message: string) => Promise<void>;
     swapModel?: (provider: string, modelId: string, level?: string, onModelSet?: () => void) => Promise<void>;
@@ -61,10 +65,9 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         if (stale >= 0) history.splice(stale, 1);
     };
     const find = (id: string) => running.get(id) ?? history.find((item) => item.id === id);
-    /** The serializable form of a job: runtime handles and the latest tool detail stay out. */
+    /** The serializable form of a job: runtime handles stay out. */
     const snapshot = (job: InspectJob): InspectJob => {
-        const { controller, steer, swapModel, lastTool, lastDetail, lastResult, ...plain } = job as InspectJob &
-            Partial<DelegateJob>;
+        const { controller, steer, swapModel, ...plain } = job as InspectJob & Partial<DelegateJob>;
         // Copy activity: the live job keeps appending to its own array after the launch snapshot.
         return { ...plain, activity: [...plain.activity] };
     };
@@ -104,9 +107,6 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         record: (job: DelegateJob, update: ChildUpdate) => {
             if (job.status !== "running") return;
             if (update.toolCalls !== undefined) job.toolCalls = update.toolCalls;
-            if (update.lastTool !== undefined) job.lastTool = update.lastTool;
-            if (update.lastDetail !== undefined) job.lastDetail = update.lastDetail;
-            if (update.lastResult !== undefined) job.lastResult = update.lastResult;
             if (update.contextTokens !== undefined) job.contextTokens = update.contextTokens;
             if (update.activity) addActivity(job, update.activity);
         },
