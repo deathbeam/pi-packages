@@ -152,7 +152,7 @@ export default function (pi: ExtensionAPI) {
         }
         const theme = ctx.ui.theme;
         const now = Date.now();
-        const { shown, hidden, detail } = widgetJobs(jobs);
+        const { shown, hidden } = widgetJobs(jobs);
         const lines: string[] = [];
         const all = store.all();
         const counts = tally(jobs.length, all, now);
@@ -161,7 +161,6 @@ export default function (pi: ExtensionAPI) {
             lines.push(
                 `${statusText(theme, "running", now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`,
             );
-            if (!detail) continue;
             const { tool, result } = lastToolCall(job);
             if (tool)
                 lines.push(
@@ -172,8 +171,14 @@ export default function (pi: ExtensionAPI) {
                     `   ${theme.fg("muted", "↳")} ${theme.fg(result.isError ? "error" : "toolOutput", result.text)}`,
                 );
         }
-        if (hidden) lines.push(`   ${theme.fg("muted", `… ${hidden} more running`)}`);
-        ctx.ui.setWidget(WIDGET_KEY, lines);
+        if (hidden) lines.push(`   ${theme.fg("muted", `… ${hidden} more running · /delegate to view all`)}`);
+
+        // A component factory, because Pi cuts string-array widgets at ten lines.
+        ctx.ui.setWidget(WIDGET_KEY, () => {
+            const container = new Container();
+            for (const line of lines) container.addChild(new Text(line, 1, 0));
+            return container;
+        });
     };
 
     // The ticker animates spinners exactly while live jobs exist.

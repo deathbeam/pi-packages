@@ -47,12 +47,8 @@ export const STATUS_COLORS = {
     cancelled: "muted",
     interrupted: "warning",
 } as const satisfies Record<JobStatus, string>;
-/** Pi slices extension widgets at ten lines and appends its own truncation note. */
-const WIDGET_MAX_LINES = 10;
-/** Only a few jobs still fit with their tool-call and tool-result lines: 1 tally + 3 lines per job. */
-const WIDGET_MAX_DETAIL_JOBS = Math.floor((WIDGET_MAX_LINES - 1) / 3);
-/** In bulk, one row per job: 1 tally + N rows + 1 "more running" footer. */
-const WIDGET_MAX_JOBS = WIDGET_MAX_LINES - 2;
+/** Each job takes up to 3 rows (job, tool call, tool result); older ones collapse into a footer. */
+const WIDGET_MAX_JOBS = 5;
 export const COLLAPSED_OUTPUT_LINES = 10;
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const EXPANDED_PAD = "  ";
@@ -289,11 +285,10 @@ export function jobLine(info: { description?: string } & UsageInfo, elapsedMs: n
     return [info.description?.trim(), usageStats(info, elapsedMs)].filter(Boolean).join(" · ");
 }
 
-/** Omit detail rows in bulk so Pi's ten-line widget cap cannot split jobs. */
-export function widgetJobs<T>(jobs: T[]): { shown: T[]; hidden: number; detail: boolean } {
-    const detail = jobs.length <= WIDGET_MAX_DETAIL_JOBS;
-    const shown = detail ? jobs : jobs.slice(-WIDGET_MAX_JOBS);
-    return { shown, hidden: jobs.length - shown.length, detail };
+/** Shows the newest jobs; the rest are counted in a "more running" footer. */
+export function widgetJobs<T>(jobs: T[]): { shown: T[]; hidden: number } {
+    const shown = jobs.slice(-WIDGET_MAX_JOBS);
+    return { shown, hidden: jobs.length - shown.length };
 }
 
 export type DelegateDetails = Pick<
