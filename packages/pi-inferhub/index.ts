@@ -18,8 +18,15 @@ type CatalogEntry = {
     };
 };
 
+type ComboEntry = {
+    slug?: unknown;
+    name?: unknown;
+    members?: { kind?: unknown; model?: unknown; alias?: unknown }[];
+};
+
 const BASE_URL = "https://api.inferhub.dev/v1";
 const ANTHROPIC_BASE_URL = "https://api.inferhub.dev";
+const MANAGEMENT_URL = "https://inferhub.dev/api";
 const API = "openai-completions";
 const PI_THINKING_LEVELS = [
     "minimal",
@@ -68,7 +75,11 @@ function commonLevels(sources: CatalogEntry[]): string[] {
     return first.filter((level) => rest.every((levels) => levels.includes(level)));
 }
 
-function toPiModel(entry: CatalogEntry, members: CatalogEntry[]): ProviderModelConfig | undefined {
+function toPiModel(
+    entry: CatalogEntry,
+    members: CatalogEntry[],
+    displayName?: string,
+): ProviderModelConfig | undefined {
     if (typeof entry.id !== "string" || !entry.id || entry.output_modality === "image") return undefined;
 
     const sources = members.length > 0 ? members : [entry];
@@ -81,7 +92,7 @@ function toPiModel(entry: CatalogEntry, members: CatalogEntry[]): ProviderModelC
         ...(name.startsWith("claude") ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
         ...(name.startsWith("gpt") ? { api: "openai-responses" } : {}),
         id: entry.id,
-        name: typeof label === "string" ? label : entry.id,
+        name: displayName ?? (typeof label === "string" ? label : entry.id),
         reasoning: true,
         thinkingLevelMap: thinkingLevelMap(commonLevels(sources)),
         input: sources.every((source) => typeof source.modality === "string" && source.modality.includes("image"))
@@ -100,7 +111,7 @@ function toPiModel(entry: CatalogEntry, members: CatalogEntry[]): ProviderModelC
     };
 }
 
-function buildModels(entries: CatalogEntry[]): ProviderModelConfig[] {
+function groupByName(entries: CatalogEntry[]): Map<string, CatalogEntry[]> {
     const byName = new Map<string, CatalogEntry[]>();
     for (const entry of entries) {
         if (typeof entry.id !== "string" || entry.owned_by === "alias") continue;
@@ -109,26 +120,70 @@ function buildModels(entries: CatalogEntry[]): ProviderModelConfig[] {
         if (list) list.push(entry);
         else byName.set(key, [entry]);
     }
-
-    return entries
-        .filter((entry) => typeof entry.id === "string")
-        .map((entry) =>
-            toPiModel(entry, entry.owned_by === "alias" ? (byName.get(normalizeName(entry.id as string)) ?? []) : []),
-        )
-        .filter((model): model is ProviderModelConfig => model !== undefined);
+    return byName;
 }
 
-async function fetchCatalog(apiKey: string, signal: AbortSignal): Promise<ProviderModelConfig[]> {
-    const response = await fetch(`${BASE_URL}/models`, {
+// An alias borrows the entries sharing its name; anything else stands for itself.
+function sourcesFor(entry: CatalogEntry, byName: Map<string, CatalogEntry[]>): CatalogEntry[] {
+    const group = entry.owned_by === "alias" ? (byName.get(normalizeName(entry.id as string)) ?? []) : [];
+    return group.length > 0 ? group : [entry];
+}
+
+function buildModels(entries: CatalogEntry[]): ProviderModelConfig[] {
+    const byName = groupByName(entries);
+    return entries.flatMap((entry) => {
+        const model = typeof entry.id === "string" ? toPiModel(entry, sourcesFor(entry, byName)) : undefined;
+        return model ? [model] : [];
+    });
+}
+
+// Combos are only listed by the management API and are routed as "combo/<slug>".
+function buildComboModels(entries: CatalogEntry[], combos: ComboEntry[]): ProviderModelConfig[] {
+    const byName = groupByName(entries);
+    const byId = new Map(
+        entries.flatMap((entry) => (typeof entry.id === "string" ? [[entry.id, entry] as const] : [])),
+    );
+    return combos.flatMap((combo) => {
+        const members = (Array.isArray(combo.members) ? combo.members : []).flatMap((member) => {
+            const id = member.kind === "alias" ? member.alias : member.model;
+            const entry = typeof id === "string" ? byId.get(id) : undefined;
+            return entry ? sourcesFor(entry, byName) : [];
+        });
+        if (typeof combo.slug !== "string" || !combo.slug) return [];
+        const model = toPiModel(
+            { id: `combo/${combo.slug}` },
+            members,
+            typeof combo.name === "string" ? combo.name : undefined,
+        );
+        return model ? [model] : [];
+    });
+}
+
+async function fetchCombos(apiKey: string, signal: AbortSignal): Promise<ComboEntry[]> {
+    const response = await fetch(`${MANAGEMENT_URL}/combos`, {
         headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
         signal,
     });
+    if (!response.ok) return [];
+    const payload: unknown = await response.json();
+    return Array.isArray(payload) ? payload : [];
+}
+
+async function fetchCatalog(apiKey: string, signal: AbortSignal): Promise<ProviderModelConfig[]> {
+    const [response, combos] = await Promise.all([
+        fetch(`${BASE_URL}/models`, {
+            headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+            signal,
+        }),
+        // Combos are a bonus: the management API can rate-limit or fail without costing us the catalog.
+        fetchCombos(apiKey, signal).catch(() => []),
+    ]);
     if (!response.ok) {
         throw new Error(`InferHub model catalog failed: ${response.status} ${await response.text()}`);
     }
     const payload = (await response.json()) as { data?: CatalogEntry[] };
     if (!Array.isArray(payload.data)) throw new Error("InferHub model catalog has no data array");
-    return buildModels(payload.data);
+    return [...buildModels(payload.data), ...buildComboModels(payload.data, combos)];
 }
 
 export default async function (pi: ExtensionAPI) {
