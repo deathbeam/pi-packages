@@ -276,7 +276,7 @@ export function reportText(report: DelegateReport): string {
     // The apply hint is for the model only: the transcript renders `output`, so users never see it.
     const hint =
         report.isolation && !report.cloneClosed
-            ? `\n\nCall delegate_apply with job ${report.id} to land its changes, or delegate_discard to drop them.`
+            ? `\n\nCall delegate_apply with job ${report.id} to land its changes, or delegate_discard to drop them. Call one, not both: a successful apply removes the clone.`
             : "";
     return `${head} finished.${output ? `\n\n${output}` : ""}${hint}`;
 }

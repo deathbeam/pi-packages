@@ -671,7 +671,7 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_apply",
         label: "Apply delegate",
         description:
-            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. On conflict the clone is kept and the error explains the recovery. No delegate may be running in its clone.",
+            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. A successful apply removes the clone itself, so never call delegate_discard for the same clone, in the same turn or after. On conflict the clone is kept and the error explains the recovery. No delegate may be running in its clone.",
         promptSnippet: "Apply an isolated delegate's clone to the main tree by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),
@@ -733,7 +733,8 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "delegate_discard",
         label: "Discard delegate clone",
-        description: "Remove an isolated delegate's clone without applying its changes.",
+        description:
+            "Remove an isolated delegate's clone without applying its changes. Use it instead of delegate_apply, never alongside it: a successful apply already removes the clone, and a discard in the same turn deletes the clone that apply needs.",
         promptSnippet: "Discard an isolated delegate's clone by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),
