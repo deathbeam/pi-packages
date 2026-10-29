@@ -32,6 +32,20 @@ export type DelegateReport = {
     cloneClosed?: boolean;
 };
 
+/** The isolation state to show for a job: pending means its clone still holds unapplied work. */
+export type IsolationMark = "isolated" | "pending";
+
+type IsolationStateFields = {
+    isolation?: unknown;
+    cloneClosed?: boolean;
+    status?: string;
+};
+
+export type DelegateDetails = Pick<
+    DelegateJob,
+    "id" | "agent" | "description" | "task" | "model" | "tools" | "status" | "isolation" | "cloneClosed"
+> & { background: boolean };
+
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const SPINNER_INTERVAL_MS = 100;
 const STATUS_ICONS = {
@@ -63,15 +77,6 @@ function statusIcon(status: JobStatus, now = Date.now()): string {
 export function statusText(theme: Theme, status: JobStatus, now = Date.now()): string {
     return theme.fg(STATUS_COLORS[status], statusIcon(status, now));
 }
-
-/** The isolation state to show for a job: pending means its clone still holds unapplied work. */
-export type IsolationMark = "isolated" | "pending";
-
-type IsolationStateFields = {
-    isolation?: unknown;
-    cloneClosed?: boolean;
-    status?: string;
-};
 
 /** Derives the mark from a job: an isolation with no clone left, or a still-running one, is not pending. */
 export function isolationMarkOf(job: IsolationStateFields): IsolationMark | undefined {
@@ -290,11 +295,6 @@ export function widgetJobs<T>(jobs: T[]): { shown: T[]; hidden: number } {
     const shown = jobs.slice(-WIDGET_MAX_JOBS);
     return { shown, hidden: jobs.length - shown.length };
 }
-
-export type DelegateDetails = Pick<
-    DelegateJob,
-    "id" | "agent" | "description" | "task" | "model" | "tools" | "status" | "isolation" | "cloneClosed"
-> & { background: boolean };
 
 export function resultFallback(body: string, theme: Theme, isError: boolean): Text {
     const mark = statusText(theme, isError ? "failed" : "done");

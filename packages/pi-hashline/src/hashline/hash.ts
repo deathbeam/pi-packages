@@ -21,7 +21,7 @@ export const NIBBLE_STR = "ZPMQVRWSNKTXJBYH";
 /** Anchor hashes are displayed uppercase; input matching tolerates any case. */
 export const HASH_ALPHABET_RE = new RegExp(`^[${NIBBLE_STR}]+$`, "i");
 
-/** Lines containing no alphanumeric character (only punctuation/symbols/whitespace). */
+/** True when a line contains at least one letter or digit. */
 export const RE_SIGNIFICANT = /[\p{L}\p{N}]/u;
 
 /** Fuzzy-match Unicode replacement regexes for anchor textHint validation. */
@@ -93,6 +93,15 @@ export function isFuzzyEquivalentLine(expected: string, actual: string): boolean
     return normalizeFuzzyLine(expected) === normalizeFuzzyLine(actual);
 }
 
+/** Fuzzy-normalized hint text before its first ellipsis, and whether it was truncated there. */
+function hintPrefix(hint: string): { prefix: string; truncated: boolean } {
+    const normalized = normalizeFuzzyLine(hint);
+    const ellipsisIndex = normalized.search(ELLIPSIS_RE);
+    return ellipsisIndex === -1
+        ? { prefix: normalized, truncated: false }
+        : { prefix: normalized.slice(0, ellipsisIndex), truncated: true };
+}
+
 /**
  * Match a textHint against an actual file line for anchor validation.
  *
@@ -103,13 +112,9 @@ export function isFuzzyEquivalentLine(expected: string, actual: string): boolean
  * the line. An ellipsis-leading hint has an empty prefix and never vetoes.
  */
 export function hintMatchesLine(hint: string, line: string): boolean {
-    const normalizedHint = normalizeFuzzyLine(hint);
-    const ellipsisIndex = normalizedHint.search(ELLIPSIS_RE);
-    if (ellipsisIndex === -1) {
-        return normalizedHint === normalizeFuzzyLine(line);
-    }
-    const prefix = normalizedHint.slice(0, ellipsisIndex);
-    return normalizeFuzzyLine(line).startsWith(prefix);
+    const { prefix, truncated } = hintPrefix(hint);
+    const normalizedLine = normalizeFuzzyLine(line);
+    return truncated ? normalizedLine.startsWith(prefix) : normalizedLine === prefix;
 }
 
 /**
@@ -118,8 +123,5 @@ export function hintMatchesLine(hint: string, line: string): boolean {
  * line, so candidate scanning must skip them.
  */
 export function hintHasSignal(hint: string): boolean {
-    const normalizedHint = normalizeFuzzyLine(hint);
-    const ellipsisIndex = normalizedHint.search(ELLIPSIS_RE);
-    const prefix = ellipsisIndex === -1 ? normalizedHint : normalizedHint.slice(0, ellipsisIndex);
-    return prefix.length > 0;
+    return hintPrefix(hint).prefix.length > 0;
 }

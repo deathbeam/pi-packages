@@ -21,13 +21,6 @@ export type InspectJob = {
     cloneClosed?: boolean;
 };
 
-/** The job's latest tool call and its result, once the result arrives. */
-export function lastToolCall(job: InspectJob): { tool?: ChildActivity; result?: ChildActivity } {
-    const at = job.activity.findLastIndex((entry) => entry.kind === "tool");
-    if (at < 0) return {};
-    return { tool: job.activity[at], result: job.activity.slice(at + 1).find((entry) => entry.kind === "result") };
-}
-
 export type DelegateJob = InspectJob & {
     controller: AbortController;
     steer?: (message: string) => Promise<void>;
@@ -164,3 +157,10 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
 }
 
 export type JobStore = ReturnType<typeof createJobStore>;
+
+/** The job's latest tool call and its result, once the result arrives. */
+export function lastToolCall(job: InspectJob): { tool?: ChildActivity; result?: ChildActivity } {
+    const at = job.activity.findLastIndex((entry) => entry.kind === "tool");
+    if (at < 0) return {};
+    return { tool: job.activity[at], result: job.activity.slice(at + 1).find((entry) => entry.kind === "result") };
+}

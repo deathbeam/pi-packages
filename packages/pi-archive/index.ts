@@ -25,6 +25,17 @@ interface SearchOptions {
     offset?: number;
 }
 
+interface SearchResult {
+    matches: ArchiveMatch[];
+    bytesScanned: number;
+    filesScanned: number;
+    truncated: boolean;
+    limitReached?: boolean;
+    scanIncomplete?: boolean;
+    perSession?: number;
+    offset?: number;
+}
+
 const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
 const DEFAULT_PER_SESSION = 3;
 const MAX_PER_SESSION = 1000;
@@ -40,7 +51,7 @@ const OPTION_BOUNDS = [
     { name: "offset", min: 0, max: MAX_OFFSET },
 ] as const;
 
-function parseJsonLine(line: string): any | null {
+function parseJsonLine(line: string): unknown {
     try {
         return JSON.parse(line);
     } catch {
@@ -197,16 +208,7 @@ async function searchSessions(
     opts: SearchOptions = {},
     signal?: AbortSignal,
     onProgress?: (filesScanned: number, matches: number) => void,
-): Promise<{
-    matches: ArchiveMatch[];
-    bytesScanned: number;
-    filesScanned: number;
-    truncated: boolean;
-    limitReached?: boolean;
-    scanIncomplete?: boolean;
-    perSession?: number;
-    offset?: number;
-}> {
+): Promise<SearchResult> {
     const terms = parseTerms(query);
     for (const { name, min, max } of OPTION_BOUNDS) {
         const value = opts[name];
@@ -266,7 +268,6 @@ async function searchSessions(
     let skipped = 0;
     let bytes = 0;
     let filesScanned = 0;
-    // Only truthiness is consumed; the string records why the scan stopped short.
     let incompleteReason: string | undefined = incompleteDiscovery ? "partial discovery" : undefined;
     let limitReached = false;
     for (const { file, dir, name } of files) {
@@ -365,7 +366,7 @@ function recentSessions(
     return out.slice(0, count).map(({ file, name }) => ({ file, name }));
 }
 
-function formatResults(query: string, result: Awaited<ReturnType<typeof searchSessions>>): string {
+function formatResults(query: string, result: SearchResult): string {
     const notes = [
         result.limitReached ? "Result limit reached; increase offset to check for more." : "",
         result.scanIncomplete ? "Search incomplete; narrow the search or check archive access." : "",

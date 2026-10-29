@@ -24,6 +24,13 @@ async function keen(path: string, init: RequestInit = {}, signal?: AbortSignal):
     return res.json();
 }
 
+// Strict models inject literal "null" for optional params they omit; drop those before reading any.
+function definedParams<T extends object>(params: T): T {
+    return Object.fromEntries(
+        Object.entries(params).filter(([, value]) => value !== null && value !== undefined && value !== "null"),
+    ) as T;
+}
+
 export default function (pi: ExtensionAPI) {
     pi.registerTool({
         name: "web_search",
@@ -47,15 +54,12 @@ export default function (pi: ExtensionAPI) {
             ),
         }),
         async execute(_id, rawParams, signal) {
-            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
-            const p = Object.fromEntries(
-                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
-            ) as typeof rawParams;
+            const p = definedParams(rawParams);
             const r = await keen(
                 "/v1/search",
                 {
                     method: "POST",
-                    body: JSON.stringify(Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined))),
+                    body: JSON.stringify(p),
                 },
                 signal,
             );
@@ -92,10 +96,7 @@ export default function (pi: ExtensionAPI) {
             ),
         }),
         async execute(_id, rawParams, signal) {
-            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
-            const p = Object.fromEntries(
-                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
-            ) as typeof rawParams;
+            const p = definedParams(rawParams);
             const q = new URLSearchParams({ url: p.url });
             if (p.max_chars !== undefined) q.set("maxChars", String(p.max_chars));
             if (p.live) q.set("live", "true");

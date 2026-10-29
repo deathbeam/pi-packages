@@ -96,6 +96,11 @@ function withIsolation(output: string, isolation: IsolationState | undefined): s
     return isolation ? [output, isolationSummary(isolation)].filter(Boolean).join("\n\n") : output;
 }
 
+/** Status icon, identity, and the muted detail line: the row the widget and delegate_list both show. */
+function jobRow(theme: Theme, job: InspectJob, now: number): string {
+    return `${statusText(theme, job.status, now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`;
+}
+
 export default function (pi: ExtensionAPI) {
     const store = createJobStore(pi.appendEntry);
     let ticker: ReturnType<typeof setInterval> | undefined;
@@ -112,7 +117,7 @@ export default function (pi: ExtensionAPI) {
     /** The clone is the unit: every job id that ran in it is only a handle, so state changes reach all of them. */
     const jobsInClone = (clone: string) => store.all().filter((job) => job.isolation?.clone === clone);
 
-    /** A job that still has a clone; any job id that ran in a clone is a handle on it. */
+    /** A job that still has a clone; throws explaining why it has none. */
     const clonedJob = (id: string) => {
         const job = store.findOrThrow(id);
         const isolation = job.isolation;
@@ -153,14 +158,10 @@ export default function (pi: ExtensionAPI) {
         const theme = ctx.ui.theme;
         const now = Date.now();
         const { shown, hidden } = widgetJobs(jobs);
-        const lines: string[] = [];
-        const all = store.all();
-        const counts = tally(jobs.length, all, now);
-        lines.push(`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`);
+        const counts = tally(jobs.length, store.all(), now);
+        const lines = [`${statusText(theme, "running", now)} ${theme.fg("muted", counts)}`];
         for (const job of shown) {
-            lines.push(
-                `${statusText(theme, "running", now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`,
-            );
+            lines.push(jobRow(theme, job, now));
             const { tool, result } = lastToolCall(job);
             if (tool)
                 lines.push(
@@ -181,7 +182,6 @@ export default function (pi: ExtensionAPI) {
         });
     };
 
-    // The ticker animates spinners exactly while live jobs exist.
     const syncTicker = (ctx: ExtensionContext) => {
         if (store.live().length > 0) ticker ??= setInterval(() => refreshWidget(ctx), SPINNER_INTERVAL_MS);
         else if (ticker) {
@@ -427,8 +427,7 @@ export default function (pi: ExtensionAPI) {
 
     registerInspector(pi, store);
 
-    const cwd = process.cwd();
-    const agentList = agentsFor(cwd).map((agent) => {
+    const agentList = agentsFor(process.cwd()).map((agent) => {
         const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
         return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
     });
@@ -798,13 +797,9 @@ export default function (pi: ExtensionAPI) {
             const jobs = (result.details as { jobs?: InspectJob[] } | undefined)?.jobs;
             if (!jobs?.length || context.isError) return resultFallback(resultText(result), theme, context.isError);
             const now = Date.now();
+            const rows = jobs.map((job) => jobRow(theme, job, now)).join("\n");
             return new Text(
-                `\n${statusText(theme, "done")} ${theme.fg("muted", `${jobs.length} delegates`)}\n${jobs
-                    .map(
-                        (job) =>
-                            `${statusText(theme, job.status, now)} ${jobIdentity(theme, job)} ${theme.fg("muted", jobLine(job, elapsedMs(job, now)))}`,
-                    )
-                    .join("\n")}`,
+                `\n${statusText(theme, "done")} ${theme.fg("muted", `${jobs.length} delegates`)}\n${rows}`,
                 0,
                 0,
             );

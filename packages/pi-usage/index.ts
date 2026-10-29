@@ -17,6 +17,9 @@ import {
     type UsageRecord,
 } from "./usage.ts";
 
+type Column = { label: string; width: number; cell: (stats: Stats, requests: number, totalCost: number) => string };
+type BodyRow = { name: string; stats: Stats; requests: number; dim: boolean };
+
 const PERIODS = [
     { label: "Today", days: 1 },
     { label: "7d", days: 7 },
@@ -31,6 +34,25 @@ const NAME_HEADERS: Record<GroupMode, string> = {
     model: "Model",
     project: "Project",
 };
+
+const COLUMNS: Column[] = [
+    { label: "Cost", width: 10, cell: (s) => formatCost(s.cost) },
+    {
+        label: "Share",
+        width: 13,
+        cell: (s, _r, totalCost) => {
+            const share = totalCost > 0 ? s.cost / totalCost : 0;
+            const filled = Math.round(8 * share);
+            return "█".repeat(filled) + "·".repeat(8 - filled) + " " + `${Math.round(100 * share)}%`.padStart(4);
+        },
+    },
+    { label: "Reqs", width: 6, cell: (_s, requests) => formatTokens(requests) },
+    { label: "In", width: 7, cell: (s) => formatTokens(s.input) },
+    { label: "Out", width: 7, cell: (s) => formatTokens(s.output) },
+    // Cost already prices read/write differently; one combined token column is enough.
+    { label: "Cache", width: 7, cell: (s) => formatTokens(s.cacheRead + s.cacheWrite) },
+    { label: "Hit%", width: 5, cell: (s) => hitPct(s) },
+];
 
 const SPARK_BARS = "▁▂▃▄▅▆▇█";
 const MIN_NAME_WIDTH = 12;
@@ -63,27 +85,6 @@ function hitPct(stats: Stats): string {
     const total = stats.input + stats.cacheRead + stats.cacheWrite;
     return total > 0 ? `${Math.round((100 * stats.cacheRead) / total)}%` : "-";
 }
-
-type Column = { label: string; width: number; cell: (stats: Stats, requests: number, totalCost: number) => string };
-
-const COLUMNS: Column[] = [
-    { label: "Cost", width: 10, cell: (s) => formatCost(s.cost) },
-    // Cost already prices read/write differently; one combined token column is enough.
-    {
-        label: "Share",
-        width: 13,
-        cell: (s, _r, totalCost) => {
-            const share = totalCost > 0 ? s.cost / totalCost : 0;
-            const filled = Math.round(8 * share);
-            return "█".repeat(filled) + "·".repeat(8 - filled) + " " + `${Math.round(100 * share)}%`.padStart(4);
-        },
-    },
-    { label: "Reqs", width: 6, cell: (_s, requests) => formatTokens(requests) },
-    { label: "In", width: 7, cell: (s) => formatTokens(s.input) },
-    { label: "Out", width: 7, cell: (s) => formatTokens(s.output) },
-    { label: "Cache", width: 7, cell: (s) => formatTokens(s.cacheRead + s.cacheWrite) },
-    { label: "Hit%", width: 5, cell: (s) => hitPct(s) },
-];
 
 /** Widths fit the worst case ($999,999 / 999.9B); the name column shrinks first, then Share, then Hit%. */
 function layout(width: number): { nameWidth: number; columns: Column[] } {
@@ -155,12 +156,10 @@ function sparkline(
     };
 }
 
-type BodyRow = { name: string; stats: Stats; requests: number; dim: boolean };
-
-function flatten(rows: GroupRow[]): BodyRow[] {
+function flatten(rows: GroupRow[], mode: GroupMode): BodyRow[] {
     const body: BodyRow[] = [];
     for (const row of rows) {
-        body.push({ name: row.name, stats: row.stats, requests: row.requests, dim: false });
+        body.push({ name: displayName(mode, row.name), stats: row.stats, requests: row.requests, dim: false });
         for (const child of row.children ?? [])
             body.push({ name: `  ${child.name}`, stats: child.stats, requests: child.requests, dim: true });
     }
@@ -191,7 +190,7 @@ export default function (pi: ExtensionAPI) {
             } as const;
             await ctx.ui.custom((tui, theme, keys, done) => {
                 let period = 0;
-                let group: number = 0;
+                let group = 0;
                 let cursor = 0;
                 let top = 0;
                 let rowCount = 0;
@@ -199,19 +198,18 @@ export default function (pi: ExtensionAPI) {
                 render = () => tui.requestRender();
                 void loaded.then(render);
                 const title = (width: number): string => {
-                    const periodTabs = PERIODS.map(({ label }, i) =>
-                        i === period ? theme.fg("accent", `[${label}]`) : theme.fg("muted", ` ${label} `),
-                    ).join(" ");
-                    const groupTabs = GROUPS.map((g, i) =>
-                        i === group
-                            ? theme.fg("accent", `[${GROUP_LABELS[g]}]`)
-                            : theme.fg("muted", ` ${GROUP_LABELS[g]} `),
-                    ).join(" ");
-                    let left = `${theme.fg("accent", theme.bold("Usage"))}  ${periodTabs}${theme.fg("dim", " (tab/←→)")}`;
-                    let right = `${groupTabs}${theme.fg("dim", " (v)")}`;
+                    const tab = (label: string, active: boolean) =>
+                        active ? theme.fg("accent", `[${label}]`) : theme.fg("muted", ` ${label} `);
+                    const periodTabs = PERIODS.map(({ label }, i) => tab(label, i === period)).join(" ");
+                    const groupTabs = GROUPS.map((g, i) => tab(GROUP_LABELS[g], i === group)).join(" ");
+                    const periodHint = theme.fg("dim", " (tab/←→)");
+                    const groupHint = theme.fg("dim", " (v)");
+                    let left = `${theme.fg("accent", theme.bold("Usage"))}  ${periodTabs}${periodHint}`;
+                    let right = `${groupTabs}${groupHint}`;
+                    // Drop the key hints before the tabs, so the right-hand tabs survive truncation.
                     if (visibleWidth(left) + 1 + visibleWidth(right) > width) {
-                        left = left.replace(theme.fg("dim", " (tab/←→)"), "");
-                        right = right.replace(theme.fg("dim", " (v)"), "");
+                        left = left.replace(periodHint, "");
+                        right = right.replace(groupHint, "");
                     }
                     const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
                     return truncateToWidth(left + " ".repeat(pad) + right, width);
@@ -263,10 +261,7 @@ export default function (pi: ExtensionAPI) {
                             ),
                         );
                         // Fixed top: title, rule, summary, sparkline, column header. Fixed bottom: totals, rule, footer.
-                        const body = flatten(buildRows(state.records, since, mode)).map((row) => ({
-                            ...row,
-                            name: displayName(mode, row.name),
-                        }));
+                        const body = flatten(buildRows(state.records, since, mode), mode);
                         rowCount = body.length;
                         viewHeight = Math.max(0, rows - lines.length - 3);
                         cursor = Math.min(cursor, Math.max(0, rowCount - 1));

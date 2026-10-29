@@ -33,15 +33,19 @@ function evictOldestVersion(): void {
     }
 }
 
+function moveToFront(canonicalPath: string): void {
+    const idx = pathOrder.indexOf(canonicalPath);
+    if (idx > 0) {
+        pathOrder.splice(idx, 1);
+        pathOrder.unshift(canonicalPath);
+    }
+}
+
 export function rememberReadSnapshot(canonicalPath: string, content: string): void {
     const existing = pathMap.get(canonicalPath);
 
     if (existing && existing.length > 0 && existing[0] === content) {
-        const idx = pathOrder.indexOf(canonicalPath);
-        if (idx > 0) {
-            pathOrder.splice(idx, 1);
-            pathOrder.unshift(canonicalPath);
-        }
+        moveToFront(canonicalPath);
         return;
     }
 
@@ -50,11 +54,7 @@ export function rememberReadSnapshot(canonicalPath: string, content: string): vo
         while (existing.length > MAX_VERSIONS_PER_PATH) {
             existing.pop();
         }
-        const idx = pathOrder.indexOf(canonicalPath);
-        if (idx > 0) {
-            pathOrder.splice(idx, 1);
-            pathOrder.unshift(canonicalPath);
-        }
+        moveToFront(canonicalPath);
     } else {
         if (pathOrder.length >= MAX_PATHS) {
             const lruPath = pathOrder[pathOrder.length - 1]!;

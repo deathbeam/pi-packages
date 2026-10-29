@@ -519,7 +519,6 @@ extension({
 let notice;
 await inspect.handler("", { mode: "tui", ui: { notify: (message) => (notice = message) } });
 assert.match(notice, /No delegates/);
-// Missing CLI argv must fail before spawning a child.
 const delegate = registered.find((tool) => tool.name === "delegate");
 // User agent dirs can override bundled agents, so check the tier format rather than one agent.
 assert.match(delegate.description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
@@ -580,6 +579,7 @@ const ctx = {
     thinkingLevel: "off",
 };
 const argv = process.argv;
+// Missing CLI argv must fail before spawning a child.
 process.argv = [argv[0]];
 try {
     await assert.rejects(

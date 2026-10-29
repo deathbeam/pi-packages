@@ -5,12 +5,6 @@ import { limitOutput, resultPreview, toolCallDetail } from "./format.ts";
 
 type Child = ChildProcessWithoutNullStreams;
 
-function usageTokens(usage: any): number | undefined {
-    if (!usage) return undefined;
-    const tokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-    return tokens > 0 ? tokens : undefined;
-}
-
 export type ChildActivity = {
     kind: "tool" | "result" | "assistant" | "user" | "status";
     text: string;
@@ -29,6 +23,12 @@ type ChildRun = {
     steer: (message: string) => Promise<void>;
     swapModel: (provider: string, modelId: string, level?: string, onModelSet?: () => void) => Promise<void>;
 };
+
+function usageTokens(usage: any): number | undefined {
+    if (!usage) return undefined;
+    const tokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    return tokens > 0 ? tokens : undefined;
+}
 
 /** Run one RPC child, keeping its writer serialized so backpressure and EPIPE reach the caller. */
 export function runChild(
@@ -157,14 +157,7 @@ export function runChild(
                     case "message_end": {
                         const role = event.message?.role;
                         if (role !== "assistant" && role !== "user") return;
-                        const content = event.message.content;
-                        const text =
-                            typeof content === "string"
-                                ? content
-                                : (content
-                                      ?.filter((part: any) => part.type === "text")
-                                      .map((part: any) => part.text ?? "")
-                                      .join("") ?? "");
+                        const text = transcriptText(event.message.content).join("");
                         if (role === "assistant") {
                             childError = event.message.errorMessage;
                             if (text) liveText = text;
@@ -304,7 +297,7 @@ export function runChild(
     };
 }
 
-/** Text content of a persisted transcript message, in part order. */
+/** Text parts of a message's content, in order. */
 function transcriptText(content: unknown): string[] {
     if (typeof content === "string") return [content];
     if (!Array.isArray(content)) return [];
@@ -331,7 +324,7 @@ export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
         return [];
     }
     if (!sessionFile) return [];
-    let lines: string[] = [];
+    let lines: string[];
     try {
         lines = readFileSync(join(sessionDir, sessionFile), "utf8").split("\n");
     } catch {

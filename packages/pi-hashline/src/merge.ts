@@ -70,7 +70,7 @@ export function threeWayMerge(base: string, baseEdited: string, current: string)
 
     const merged = applyPatch(current, patch, { fuzzFactor: 0 });
 
-    if (merged === false || typeof merged !== "string") {
+    if (typeof merged !== "string") {
         return null;
     }
 

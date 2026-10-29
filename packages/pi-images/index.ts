@@ -81,6 +81,14 @@ function describeImage(ctx: ExtensionContext, model: Model<Api>, block: ImageCon
     return description;
 }
 
+/** Content blocks of a message the vision model must replace, or undefined when it carries no image. */
+function imageContentOf(message: unknown): any[] | undefined {
+    const record = message as { role?: unknown; content?: any };
+    if (record.role !== "user" && record.role !== "toolResult") return undefined;
+    if (!Array.isArray(record.content)) return undefined;
+    return record.content.some((block) => block?.type === "image") ? record.content : undefined;
+}
+
 export default function (pi: ExtensionAPI) {
     pi.on("context", async (event, ctx) => {
         // The hook runs on every LLM call; bail before touching settings when the model already sees images.
@@ -88,15 +96,7 @@ export default function (pi: ExtensionAPI) {
         const settings = readImagesSettings(ctx.cwd);
         if (!settings.vision) return;
 
-        const hasImages = event.messages.some((message) => {
-            const record = message as { role?: unknown; content?: unknown };
-            return (
-                (record.role === "user" || record.role === "toolResult") &&
-                Array.isArray(record.content) &&
-                record.content.some((block) => (block as { type?: unknown })?.type === "image")
-            );
-        });
-        if (!hasImages) return;
+        if (!event.messages.some((message) => imageContentOf(message) !== undefined)) return;
 
         let model: Model<Api> | undefined;
         try {
@@ -124,15 +124,9 @@ export default function (pi: ExtensionAPI) {
         }
 
         const messages = [];
-        let changed = false;
         for (const message of event.messages) {
-            const record = message as { role?: unknown; content?: unknown };
-            const content = record.content;
-            if (
-                (record.role !== "user" && record.role !== "toolResult") ||
-                !Array.isArray(content) ||
-                !content.some((block) => (block as { type?: unknown })?.type === "image")
-            ) {
+            const content = imageContentOf(message);
+            if (!content) {
                 messages.push(message);
                 continue;
             }
@@ -151,16 +145,15 @@ export default function (pi: ExtensionAPI) {
                     );
                     next.push({ type: "text", text: `[Image description: ${description}]` });
                 } else if (typed.type === "text" && typeof typed.text === "string") {
-                    const text = typed.text.split(OMITTED_NOTE).join("").trim();
+                    const text = typed.text.replaceAll(OMITTED_NOTE, "").trim();
                     if (text) next.push({ type: "text", text });
                 } else {
                     next.push(block);
                 }
             }
-            changed = true;
             messages.push({ ...message, content: next });
         }
-        if (changed) return { messages };
+        return { messages };
     });
 
     pi.registerTool({

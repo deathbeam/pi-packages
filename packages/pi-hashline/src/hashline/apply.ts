@@ -90,26 +90,14 @@ function formatMismatchError(mismatches: HashMismatch[], fileLines: string[]): s
                 }
             }
 
-            if (totalCandidates + matches.length > CANDIDATE_TOTAL_LIMIT) {
-                // Total budget exhausted: show overflow message for this anchor.
-                perAnchor.push({
-                    mismatch: m,
-                    result: { kind: "overflow", count: matches.length },
-                });
-            } else if (matches.length > CANDIDATE_PER_ANCHOR_LIMIT) {
-                // Per-anchor limit exceeded before total: show overflow message.
-                totalCandidates += matches.length;
-                perAnchor.push({
-                    mismatch: m,
-                    result: { kind: "overflow", count: matches.length },
-                });
-            } else {
-                totalCandidates += matches.length;
-                perAnchor.push({
-                    mismatch: m,
-                    result: { kind: "list", lines: matches },
-                });
-            }
+            const overBudget = totalCandidates + matches.length > CANDIDATE_TOTAL_LIMIT;
+            const overflow = overBudget || matches.length > CANDIDATE_PER_ANCHOR_LIMIT;
+            // An exhausted total budget is not charged again; the per-anchor one is.
+            if (!overBudget) totalCandidates += matches.length;
+            perAnchor.push({
+                mismatch: m,
+                result: overflow ? { kind: "overflow", count: matches.length } : { kind: "list", lines: matches },
+            });
         }
 
         // Only emit the "Did you mean" section when at least one anchor has candidates.
@@ -356,16 +344,15 @@ function resolveEditToSpan(
             }
 
             const isSentinelAppend = hasTerminalNewline && edit.pos.line === fileLines.length;
+            const insertAt = isSentinelAppend
+                ? content.length
+                : lineStarts[edit.pos.line - 1]! + fileLines[edit.pos.line - 1]!.length;
             return {
                 kind: "insert",
                 index,
                 label: describeEdit(edit),
-                start: isSentinelAppend
-                    ? content.length
-                    : lineStarts[edit.pos.line - 1]! + fileLines[edit.pos.line - 1]!.length,
-                end: isSentinelAppend
-                    ? content.length
-                    : lineStarts[edit.pos.line - 1]! + fileLines[edit.pos.line - 1]!.length,
+                start: insertAt,
+                end: insertAt,
                 replacement: isSentinelAppend ? `${insertedText}\n` : `\n${insertedText}`,
                 boundary: computeInsertionBoundary(edit, lineIndex),
             };
@@ -589,24 +576,16 @@ function validateAnchorEdits(
                 }
                 break;
             }
-            case "append": {
-                if (edit.pos && !validate(edit.pos)) continue;
-                if (edit.lines.length === 0) {
-                    throw new Error(
-                        "[E_BAD_OP] Append with empty lines payload. Provide content to insert or remove the edit.",
-                    );
-                }
-                warnDuplicateInsert("append", edit, lineIndex, warnings);
-                break;
-            }
+            case "append":
             case "prepend": {
                 if (edit.pos && !validate(edit.pos)) continue;
                 if (edit.lines.length === 0) {
+                    const op = edit.op === "append" ? "Append" : "Prepend";
                     throw new Error(
-                        "[E_BAD_OP] Prepend with empty lines payload. Provide content to insert or remove the edit.",
+                        `[E_BAD_OP] ${op} with empty lines payload. Provide content to insert or remove the edit.`,
                     );
                 }
-                warnDuplicateInsert("prepend", edit, lineIndex, warnings);
+                warnDuplicateInsert(edit.op, edit, lineIndex, warnings);
                 break;
             }
         }
@@ -674,16 +653,9 @@ function assembleEditResult(content: string, spans: ResolvedEditSpan[], signal: 
     let result = content;
     for (const span of spans) {
         throwIfAborted(signal);
-        const replacement =
-            span.insertMode === "append-empty-origin"
-                ? result.length === 0
-                    ? span.replacement
-                    : `\n${span.replacement}`
-                : span.insertMode === "prepend-empty-origin"
-                  ? result.length === 0
-                      ? span.replacement
-                      : `${span.replacement}\n`
-                  : span.replacement;
+        let replacement = span.replacement;
+        if (span.insertMode === "append-empty-origin" && result.length > 0) replacement = `\n${replacement}`;
+        else if (span.insertMode === "prepend-empty-origin" && result.length > 0) replacement = `${replacement}\n`;
         result = result.slice(0, span.start) + replacement + result.slice(span.end);
     }
     return result;

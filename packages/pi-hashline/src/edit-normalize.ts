@@ -35,7 +35,6 @@ function coerceEditsArray(edits: unknown): unknown {
     return parsed;
 }
 
-/** Leave malformed input intact for validation's more precise error. */
 export function normalizeEditRequest(input: unknown): unknown {
     if (!isRecord(input)) {
         return input;

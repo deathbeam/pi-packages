@@ -47,7 +47,7 @@ const COMPAT = {
 } as const;
 
 function thinkingLevelMap(advertised: string[]): ThinkingLevelMap {
-    const map: ThinkingLevelMap = { off: "none", xhigh: null, max: null };
+    const map: ThinkingLevelMap = { off: "none" };
     for (const level of PI_THINKING_LEVELS) {
         const supported = advertised.length > 0 ? advertised.includes(level) : level !== "xhigh" && level !== "max";
         map[level] = supported ? level : null;
@@ -125,14 +125,15 @@ function groupByName(entries: CatalogEntry[]): Map<string, CatalogEntry[]> {
 
 // An alias borrows the entries sharing its name; anything else stands for itself.
 function sourcesFor(entry: CatalogEntry, byName: Map<string, CatalogEntry[]>): CatalogEntry[] {
-    const group = entry.owned_by === "alias" ? (byName.get(normalizeName(entry.id as string)) ?? []) : [];
-    return group.length > 0 ? group : [entry];
+    const group =
+        entry.owned_by === "alias" && typeof entry.id === "string" ? byName.get(normalizeName(entry.id)) : undefined;
+    return group?.length ? group : [entry];
 }
 
 function buildModels(entries: CatalogEntry[]): ProviderModelConfig[] {
     const byName = groupByName(entries);
     return entries.flatMap((entry) => {
-        const model = typeof entry.id === "string" ? toPiModel(entry, sourcesFor(entry, byName)) : undefined;
+        const model = toPiModel(entry, sourcesFor(entry, byName));
         return model ? [model] : [];
     });
 }

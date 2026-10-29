@@ -14,12 +14,8 @@ const appliedPayloadTracker = new Map<string, string>();
 
 export function recordNoopEdit(path: string, payloadKey: string): { count: number; escalate: boolean } {
     const existing = noopTracker.get(path);
-    if (existing && existing.payloadKey === payloadKey) {
-        existing.count += 1;
-    } else {
-        noopTracker.set(path, { payloadKey, count: 1 });
-    }
-    const count = noopTracker.get(path)!.count;
+    const count = existing?.payloadKey === payloadKey ? existing.count + 1 : 1;
+    noopTracker.set(path, { payloadKey, count });
     return { count, escalate: count >= NOOP_HARD_LIMIT };
 }
 

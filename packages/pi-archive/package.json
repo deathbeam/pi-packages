@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-archive",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Minimal extension for searching past Pi conversations and improving compaction.",
   "type": "module",
   "license": "MIT",

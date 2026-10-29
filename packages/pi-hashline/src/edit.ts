@@ -131,7 +131,7 @@ function assertEditRequest(request: unknown): asserts request is EditRequestPara
     }
 }
 
-/** Shared preview/execute pipeline; accessMode controls writability. */
+/** Resolve, validate, apply, and describe one edit request; accessMode controls writability. */
 async function executeEditPipeline(
     params: EditRequestParams,
     cwd: string,

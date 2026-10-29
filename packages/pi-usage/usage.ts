@@ -217,18 +217,17 @@ export type DailyCost = { label: string; cost: number };
 
 /** Cost per local calendar day, oldest first, covering the `days` days ending today. */
 export function dailyCosts(records: UsageRecord[], days: number, now = Date.now()): DailyCost[] {
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
-    // setDate walks calendar days, so DST shifts cannot misplace a bucket.
     const buckets: DailyCost[] = [];
     const index = new Map<number, number>();
-    const cursor = new Date(start);
+    const cursor = new Date(now);
+    cursor.setHours(0, 0, 0, 0);
     for (let i = 0; i < days; i++) {
         index.set(cursor.getTime(), days - 1 - i);
         buckets.unshift({
             label: `${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`,
             cost: 0,
         });
+        // setDate walks calendar days, so DST shifts cannot misplace a bucket.
         cursor.setDate(cursor.getDate() - 1);
     }
     for (const record of records) {

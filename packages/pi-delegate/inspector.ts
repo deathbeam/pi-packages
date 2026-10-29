@@ -154,7 +154,6 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                 return [
                                     title,
                                     theme.fg("muted", "No delegates in this session."),
-                                    // Fixed rows: title, top rule, bottom rule, footer.
                                     ...Array(Math.max(0, tui.terminal.rows - 4)).fill(""),
                                     footer,
                                 ].slice(0, tui.terminal.rows);
