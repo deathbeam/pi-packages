@@ -1,5 +1,5 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, keyHint } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "child_process";
@@ -395,7 +395,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             let rendered = `\n${shown.join("\n")}`;
             const remaining = lines.length - maxLines;
             if (remaining > 0) {
-                rendered += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+                rendered += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
             }
             if (notices.length)
                 rendered += `\n\n${notices.map((notice) => theme.fg("warning", sanitizeOutput(notice))).join("\n")}`;

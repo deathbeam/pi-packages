@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-    createReadTool,
+    createReadToolDefinition,
     formatSize,
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
@@ -256,15 +256,7 @@ export function registerReadTool(pi: ExtensionAPI): void {
             }
 
             if (file.kind === "image") {
-                const builtinRead = createReadTool(ctx.cwd);
-                const executeBuiltinRead = builtinRead.execute as unknown as (
-                    toolCallId: string,
-                    input: typeof params,
-                    abortSignal: typeof signal,
-                    onUpdate: typeof _onUpdate,
-                    context: typeof ctx,
-                ) => ReturnType<typeof builtinRead.execute>;
-                return executeBuiltinRead(_toolCallId, params, signal, _onUpdate, ctx);
+                return createReadToolDefinition(ctx.cwd).execute(_toolCallId, params, signal, _onUpdate, ctx);
             }
 
             throwIfAborted(signal);

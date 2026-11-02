@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { keyHint, renderDiff, withFileMutationQueue, type Theme } from "@earendil-works/pi-coding-agent";
+import { renderDiff, withFileMutationQueue, type KeybindingHints, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { constants } from "fs";
@@ -291,7 +291,12 @@ async function executeEditPipeline(
 }
 
 /** Collapse the diff but never hide warnings. */
-function capDiffPreview(diff: string, expanded: boolean, theme: Pick<Theme, "fg">): string {
+function capDiffPreview(
+    diff: string,
+    expanded: boolean,
+    theme: Pick<Theme, "fg">,
+    keyHint: KeybindingHints["keyHint"],
+): string {
     const lines = diff.split("\n");
     if (expanded || lines.length <= COLLAPSED_DIFF_LINES) {
         return diff;
@@ -348,7 +353,9 @@ function buildEditToolDefinition(): EditToolDefinition {
             const sections: string[] = [];
             if (details?.diff) {
                 // Sanitize file content before renderDiff adds its own ANSI styling.
-                sections.push(capDiffPreview(renderDiff(sanitizeOutput(details.diff)), expanded, theme));
+                sections.push(
+                    capDiffPreview(renderDiff(sanitizeOutput(details.diff)), expanded, theme, context.keyHint),
+                );
             }
             if (details?.diff && details.warnings.length > 0) {
                 sections.push(

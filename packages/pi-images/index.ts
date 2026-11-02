@@ -252,7 +252,9 @@ export default function (pi: ExtensionAPI) {
                 container.addChild(
                     new Text(
                         theme.fg("toolOutput", shown.join("\n")) +
-                            (more > 0 ? `\n${theme.fg("muted", `... (${more} more lines, ctrl+o to expand)`)}` : ""),
+                            (more > 0
+                                ? `\n${theme.fg("muted", `... (${more} more lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`
+                                : ""),
                         0,
                         0,
                     ),

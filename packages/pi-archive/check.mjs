@@ -367,6 +367,16 @@ assert.ok(
     (await beforeAgentStart({}, archiveCtx([], { file: path.join(projA, "new-session.jsonl") })))?.message,
     "new sessions receive their own titles",
 );
+// Runs started by another extension's custom message still get the hint: it is the session's first run,
+// the injected entry stays in the transcript, and the guard above keeps it from repeating. Gating on
+// messageType "user" would drop it when the user then steers into that run instead of starting a new one.
+assert.match(
+    (await beforeAgentStart(
+        { type: "before_agent_start", messageType: "custom", message: { customType: "report", content: "x" } },
+        archiveCtx([]),
+    ))?.message?.content ?? "",
+    /^Recent sessions in this project/,
+);
 
 // The retrieval rule lives in both the system guidelines and the tool schema (used with custom SYSTEM.md).
 assert.match(tool.promptGuidelines?.join("\n") ?? "", /compaction.*search_archive/is);

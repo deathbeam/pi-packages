@@ -170,7 +170,8 @@ export function runChild(
                         return;
                     }
                     case "agent_settled":
-                        finish(0);
+                        // A run the child aborted itself (an extension's abort or compaction) is not the task's answer.
+                        finish(0, event.aborted ? new Error("Delegate run was aborted before it finished") : undefined);
                         return;
                     case "extension_ui_request":
                         if (["select", "confirm", "input", "editor"].includes(event.method)) {

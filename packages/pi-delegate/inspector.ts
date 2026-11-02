@@ -1,5 +1,12 @@
-import { type ExtensionAPI, getMarkdownTheme, keyHint, rawKeyHint } from "@earendil-works/pi-coding-agent";
-import { HStack, Markdown, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type ExtensionAPI, getMarkdownTheme, rawKeyHint } from "@earendil-works/pi-coding-agent";
+import {
+    HStack,
+    type Keybinding,
+    Markdown,
+    matchesKey,
+    truncateToWidth,
+    wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import type { ChildActivity } from "./child.ts";
 import { elapsedMs, formatTools, jobIdentity, STATUS_COLORS, statusText, tally, usageStats } from "./format.ts";
 import type { InspectJob, JobStore } from "./store.ts";
@@ -27,6 +34,9 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                     let historyWidth = 1;
                     let markdown = new WeakMap<ChildActivity, Markdown>();
                     const jobs = () => store.all();
+                    // Format hints from the injected manager; an imported copy would not see the user's keybindings.
+                    const hint = (id: Keybinding, description: string) =>
+                        rawKeyHint(keys.getKeys(id).join("/"), description);
                     // Fixed rows: title, top rule, bottom rule, footer.
                     const bodyHeight = () => Math.max(0, tui.terminal.rows - 4);
                     const toolsLines = (job: InspectJob, width: number) =>
@@ -146,7 +156,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                             const footer = truncateToWidth(
                                 theme.fg(
                                     "dim",
-                                    `${keyHint("tui.select.up", "up")} · ${keyHint("tui.select.down", "down")} · ${rawKeyHint("←/→", "switch pane")} · ${keyHint("tui.select.cancel", "close")}`,
+                                    `${hint("tui.select.up", "up")} · ${hint("tui.select.down", "down")} · ${rawKeyHint("←/→", "switch pane")} · ${hint("tui.select.cancel", "close")}`,
                                 ),
                                 width,
                             );

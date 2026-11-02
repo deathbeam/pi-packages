@@ -230,7 +230,7 @@ try {
         bold: (text) => text,
     };
     const longPrompt = "START\n" + "a very detailed prompt\n".repeat(10) + "END";
-    const callCtx = { expanded: false, cwd: project };
+    const callCtx = { expanded: false, cwd: project, keyHint: (_key, description) => `ctrl+o ${description}` };
     const collapsedRows = tools.image_generate
         .renderCall({ prompt: longPrompt }, theme, callCtx)
         .render(40)

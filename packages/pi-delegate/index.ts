@@ -383,7 +383,8 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", (_event, ctx) => restoreSession(ctx));
     pi.on("session_tree", (_event, ctx) => restoreSession(ctx));
 
-    pi.on("before_agent_start", () => {
+    pi.on("before_agent_start", (event) => {
+        if (event.messageType !== "user") return;
         directCalls = 0;
         nextReminder = FIRST_REMINDER_AT;
     });
@@ -410,7 +411,7 @@ export default function (pi: ExtensionAPI) {
         );
     });
 
-    pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded }, theme) => {
+    pi.registerMessageRenderer(RESULT_MESSAGE, (message, { expanded, keyHint }, theme) => {
         const report = message.details as DelegateReport | undefined;
         if (!report?.agent) return undefined;
         const container = new Container();
@@ -420,7 +421,7 @@ export default function (pi: ExtensionAPI) {
         if (report.error) container.addChild(new Text(theme.fg("error", report.error), 0, 0));
         else if (report.output) {
             container.addChild(new Spacer(1));
-            appendOutput(container, report.output, expanded, theme);
+            appendOutput(container, report.output, expanded, theme, keyHint);
         }
         return container;
     });
@@ -507,6 +508,7 @@ export default function (pi: ExtensionAPI) {
                 argText(args?.task),
                 theme,
                 context.expanded,
+                context.keyHint,
             );
         },
 
@@ -520,6 +522,7 @@ export default function (pi: ExtensionAPI) {
                 details.background ? "started in background" : "completed",
                 expanded,
                 theme,
+                context.keyHint,
             );
         },
     });
@@ -611,6 +614,7 @@ export default function (pi: ExtensionAPI) {
                 argText(args?.message),
                 theme,
                 context.expanded,
+                context.keyHint,
             );
         },
 
@@ -625,6 +629,7 @@ export default function (pi: ExtensionAPI) {
                 details.background ? "revived in background" : "revived",
                 expanded,
                 theme,
+                context.keyHint,
             );
         },
     });
@@ -654,7 +659,14 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            return toolLayout("delegate_cancel", jobTarget(args?.id, theme), "", theme, context.expanded);
+            return toolLayout(
+                "delegate_cancel",
+                jobTarget(args?.id, theme),
+                "",
+                theme,
+                context.expanded,
+                context.keyHint,
+            );
         },
 
         renderResult(result, _options, theme, context) {
@@ -708,7 +720,14 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            return toolLayout("delegate_apply", jobTarget(args?.id, theme), "", theme, context.expanded);
+            return toolLayout(
+                "delegate_apply",
+                jobTarget(args?.id, theme),
+                "",
+                theme,
+                context.expanded,
+                context.keyHint,
+            );
         },
 
         renderResult(result, { expanded }, theme, context) {
@@ -720,7 +739,7 @@ export default function (pi: ExtensionAPI) {
             if (!diff) return new Text(header, 0, 0);
             // Collapsed shows the head like the other delegate previews; expanded shows the full colored diff.
             const { shown, hidden } = capLines(diff.split("\n"), expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
-            if (hidden) shown.push(moreLines(theme, hidden));
+            if (hidden) shown.push(moreLines(theme, hidden, context.keyHint));
             const container = new Container();
             container.addChild(new Text(header, 0, 0));
             container.addChild(new Spacer(1));
@@ -756,7 +775,14 @@ export default function (pi: ExtensionAPI) {
         },
 
         renderCall(args, theme, context) {
-            return toolLayout("delegate_discard", jobTarget(args?.id, theme), "", theme, context.expanded);
+            return toolLayout(
+                "delegate_discard",
+                jobTarget(args?.id, theme),
+                "",
+                theme,
+                context.expanded,
+                context.keyHint,
+            );
         },
 
         renderResult(result, _options, theme, context) {

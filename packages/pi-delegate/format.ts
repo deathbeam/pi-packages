@@ -1,4 +1,4 @@
-import { getMarkdownTheme, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type KeybindingHints, type Theme } from "@earendil-works/pi-coding-agent";
 import {
     type Component,
     Container,
@@ -301,14 +301,20 @@ export function resultFallback(body: string, theme: Theme, isError: boolean): Te
     return new Text(`\n${mark} ${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
 }
 
-export function moreLines(theme: Theme, hidden: number): string {
+export function moreLines(theme: Theme, hidden: number, keyHint: KeybindingHints["keyHint"]): string {
     return theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand");
 }
 
-export function appendOutput(container: Container, body: string, expanded: boolean, theme: Theme): void {
+export function appendOutput(
+    container: Container,
+    body: string,
+    expanded: boolean,
+    theme: Theme,
+    keyHint: KeybindingHints["keyHint"],
+): void {
     const { shown, hidden } = outputPreview(body, expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
     container.addChild(new Markdown(shown.join("\n"), 0, 0, getMarkdownTheme()));
-    if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden), 0, 0));
+    if (hidden > 0) container.addChild(new Text(moreLines(theme, hidden, keyHint), 0, 0));
 }
 
 export function toolLayout(
@@ -317,6 +323,7 @@ export function toolLayout(
     payload: string,
     theme: Theme,
     expanded: boolean,
+    keyHint: KeybindingHints["keyHint"],
 ): Component {
     const container = new Container();
     if (toolName)
@@ -337,7 +344,7 @@ export function toolLayout(
         render: (width) => {
             // Wrapping turns one long line into many, so the cap counts rendered rows, not source lines.
             const { shown, hidden } = capLines(body.render(width), expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
-            return hidden ? [...shown, truncateToWidth(moreLines(theme, hidden), width)] : shown;
+            return hidden ? [...shown, truncateToWidth(moreLines(theme, hidden, keyHint), width)] : shown;
         },
         invalidate: () => body.invalidate(),
     });
@@ -368,6 +375,7 @@ export function launchResult(
     status: string,
     expanded: boolean,
     theme: Theme,
+    keyHint: KeybindingHints["keyHint"],
 ): Component {
     const container = new Container();
     // The mark is the call's outcome (launch succeeded); job progress stays in the widget and report.
@@ -378,6 +386,6 @@ export function launchResult(
             new Text(theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")), 0, 0),
         );
     // Background results arrive as their own message; headless runs still show the output here.
-    if (!details.background && body) appendOutput(container, body, expanded, theme);
+    if (!details.background && body) appendOutput(container, body, expanded, theme, keyHint);
     return container;
 }

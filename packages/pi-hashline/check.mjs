@@ -590,6 +590,7 @@ const agentLoopRun = async (tool, args) =>
     // built-in edit renderers by tool name; read defines a custom (prefix-
     // stripping) result renderer; see 9.
     const fakeTheme = { fg: (name, txt) => `«${name}»${txt}`, bg: (_n, txt) => txt, bold: (txt) => txt };
+    const fakeKeyHint = (_keybinding, description) => `«key»${description}`;
     const renderToString = (comp) => comp.render(120).join("\n");
     const stripAnsi = (s) => s.replace(/\u001b\[[0-9;]*m/g, "");
     if (byName.edit.renderCall !== undefined) {
@@ -615,6 +616,7 @@ const agentLoopRun = async (tool, args) =>
         state: {},
         lastComponent: undefined,
         isError: false,
+        keyHint: fakeKeyHint,
         args: { path: warnFile },
     });
     const wText = stripAnsi(renderToString(wComp));
@@ -651,6 +653,7 @@ const agentLoopRun = async (tool, args) =>
                 state: {},
                 lastComponent: undefined,
                 isError: false,
+                keyHint: fakeKeyHint,
                 args: { path: endingsFile },
             }),
         ),
@@ -665,7 +668,13 @@ const agentLoopRun = async (tool, args) =>
         content: [{ type: "text", text: "anchors" }],
         details: { diff: longDiff, warnings: [] },
     };
-    const longCtx = { state: {}, lastComponent: undefined, isError: false, args: { path: warnFile } };
+    const longCtx = {
+        state: {},
+        lastComponent: undefined,
+        isError: false,
+        keyHint: fakeKeyHint,
+        args: { path: warnFile },
+    };
     const collapsedText = stripAnsi(
         renderToString(byName.edit.renderResult(longRes, { isPartial: false, expanded: false }, fakeTheme, longCtx)),
     );
@@ -697,6 +706,7 @@ const agentLoopRun = async (tool, args) =>
             state: {},
             lastComponent: undefined,
             isError: false,
+            keyHint: fakeKeyHint,
             args: { path: escFile },
         }),
     );
@@ -715,7 +725,7 @@ const agentLoopRun = async (tool, args) =>
             },
             { isPartial: false, expanded: true },
             fakeTheme,
-            { state: {}, lastComponent: undefined, isError: false, args: { path: warnFile } },
+            { state: {}, lastComponent: undefined, isError: false, keyHint: fakeKeyHint, args: { path: warnFile } },
         ),
     );
     if (warningDisplay.includes("\u001b[31m") || warningDisplay.includes("\ufff9")) {
@@ -750,6 +760,7 @@ const agentLoopRun = async (tool, args) =>
         cwd: dir,
         expanded: true,
         isError: false,
+        keyHint: fakeKeyHint,
         showImages: true,
         args: { path: tsFile },
     };
@@ -912,6 +923,7 @@ const agentLoopRun = async (tool, args) =>
         cwd: dir,
         expanded: false,
         isError: false,
+        keyHint: fakeKeyHint,
     };
     const gComp = byName.grep.renderResult(grepRes, { expanded: false, isPartial: false }, fakeTheme, gCtx);
     const gText = stripAnsi(renderToString(gComp));
