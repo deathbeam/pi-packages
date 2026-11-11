@@ -129,12 +129,135 @@ function addStats(stats: Stats, record: UsageRecord): void {
     stats.cacheWrite += record.cacheWrite;
 }
 
-export type GroupMode = "provider" | "model" | "project";
+type TimeMode = "day" | "week" | "month";
+export type GroupMode = "provider" | "model" | "project" | TimeMode;
+export type UsageFilter = { mode: GroupMode; key: string };
+
+export const isTimeMode = (mode: GroupMode): mode is TimeMode => mode === "day" || mode === "week" || mode === "month";
+
+export function isTimeFilter(filter: UsageFilter | undefined): filter is UsageFilter & { mode: TimeMode } {
+    return filter !== undefined && isTimeMode(filter.mode);
+}
+
+export function clearTimeFilters(stack: { filters: UsageFilter[] }[]): void {
+    for (let i = stack.length - 1; i >= 0; i--) {
+        stack[i]!.filters = stack[i]!.filters.filter((filter) => !isTimeMode(filter.mode));
+        if (!stack[i]!.filters.length) stack.splice(i, 1);
+    }
+}
+
+export function cacheView<T>(derive: () => T) {
+    let cached: { key: string; value: T } | undefined;
+    return (period: number, mode: GroupMode, filters: UsageFilter[], now = Date.now()): T => {
+        const key = JSON.stringify([period, mode, filters, dayKey(now)]);
+        if (!cached || cached.key !== key) cached = { key, value: derive() };
+        return cached.value;
+    };
+}
+
+export function dayKey(ts: number): string {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function bucketStart(ts: number, mode: TimeMode): number {
+    const d = new Date(ts);
+    d.setHours(0, 0, 0, 0);
+    if (mode === "week") d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    if (mode === "month") d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+}
+
+export function bucketKey(ts: number, mode: TimeMode): string {
+    const key = dayKey(bucketStart(ts, mode));
+    return mode === "month" ? key.slice(0, 7) : key;
+}
+
+export function bucketWindow(key: string, mode: TimeMode, offset = 0): { since: number; until: number } {
+    const date = new Date(`${mode === "month" ? key + "-01" : key}T00:00`);
+    const shift = (n: number) => {
+        if (mode === "month") date.setMonth(date.getMonth() + n);
+        else date.setDate(date.getDate() + n * (mode === "week" ? 7 : 1));
+        // A skipped midnight can leave 01:00 on the next calendar day.
+        date.setHours(0, 0, 0, 0);
+    };
+    shift(offset);
+    const since = date.getTime();
+    shift(1);
+    return { since, until: date.getTime() };
+}
+
+export function stepFilter(filters: UsageFilter[], offset: number, now = Date.now()): string | undefined {
+    const last = filters.at(-1);
+    if (!isTimeFilter(last)) return undefined;
+    let { since, until } = bucketWindow(last.key, last.mode, offset);
+    const key = bucketKey(since, last.mode);
+    if (key > bucketKey(now, last.mode)) return undefined;
+    for (const outer of filters.slice(0, -1)) {
+        if (!isTimeMode(outer.mode)) continue;
+        const window = bucketWindow(outer.key, outer.mode);
+        since = Math.max(since, window.since);
+        until = Math.min(until, window.until);
+    }
+    return since < until ? key : undefined;
+}
+
+// UTC ordinals count local calendar days without DST changing their length.
+export function windowDays(since: number, until: number): number {
+    if (since >= until) return 0;
+    const ordinal = (ts: number) => {
+        const d = new Date(ts);
+        return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000;
+    };
+    return ordinal(until - 1) - ordinal(since) + 1;
+}
+
+export function percentChange(current: number, previous: number): number {
+    return previous === 0 ? (current === 0 ? 0 : Infinity) : ((current - previous) / previous) * 100;
+}
+
+function recordKey(record: UsageRecord, mode: GroupMode): string {
+    return isTimeMode(mode) ? bucketKey(record.ts, mode) : mode === "project" ? record.cwd : record[mode];
+}
+
+export function matchesFilter(record: UsageRecord, filter: UsageFilter): boolean {
+    return recordKey(record, filter.mode) === filter.key;
+}
+
+export function usageWindow(records: UsageRecord[], days: number, filters: UsageFilter[], now = Date.now()) {
+    const { since: today, until: end } = bucketWindow(dayKey(now), "day");
+    const timeFilters = filters.filter((f) => isTimeMode(f.mode));
+    let since = today;
+    let until = end;
+    if (timeFilters.length) {
+        since = 0;
+        for (const filter of timeFilters) {
+            const window = bucketWindow(filter.key, filter.mode as TimeMode);
+            since = Math.max(since, window.since);
+            until = Math.min(until, window.until);
+        }
+    } else if (days === Infinity) {
+        let first = Infinity;
+        for (const record of records) if (record.ts < end) first = Math.min(first, record.ts);
+        since = first === Infinity ? end : bucketWindow(dayKey(first), "day").since;
+    } else {
+        since = bucketWindow(dayKey(now), "day", 1 - days).since;
+    }
+    return { since, until, days: windowDays(since, until) };
+}
+
+export function previousSummary(records: UsageRecord[], since: number, days: number): Summary {
+    return summarize(records, bucketWindow(dayKey(since), "day", -days).since, since);
+}
 
 export type GroupRow = {
+    key: string;
     name: string;
     stats: Stats;
     requests: number;
+    perDay?: number;
+    delta?: number;
     /** Nested model rows; only produced by provider grouping. */
     children?: GroupRow[];
 };
@@ -148,16 +271,18 @@ type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; prov
 
 const newTally = (): Tally => ({ stats: emptyStats(), requests: 0 });
 
-/**
- * Aggregate records older than `sinceMs` into rows for one grouping mode.
- * Provider rows nest their models as children; model rows append `(n)` when n providers share the
- * model; project rows are keyed by the session cwd (delegates count toward their own cwd).
- */
-export function buildRows(records: UsageRecord[], sinceMs = 0, mode: GroupMode = "provider"): GroupRow[] {
+export function buildRows(
+    records: UsageRecord[],
+    sinceMs = 0,
+    mode: GroupMode = "provider",
+    untilMs = Infinity,
+): GroupRow[] {
+    if (isTimeMode(mode) && (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs)))
+        throw new RangeError("Time grouping requires a finite window");
     const groups = new Map<string, Tally>();
     for (const record of records) {
-        if (record.ts < sinceMs) continue;
-        const key = mode === "provider" ? record.provider : mode === "model" ? record.model : record.cwd;
+        if (record.ts < sinceMs || record.ts >= untilMs) continue;
+        const key = recordKey(record, mode);
         let group = groups.get(key);
         if (!group) {
             group = newTally();
@@ -175,7 +300,34 @@ export function buildRows(records: UsageRecord[], sinceMs = 0, mode: GroupMode =
             model.requests++;
         }
     }
+    if (isTimeMode(mode)) {
+        if (sinceMs < untilMs) {
+            let key = bucketKey(sinceMs, mode);
+            const last = bucketKey(untilMs - 1, mode);
+            while (key <= last) {
+                if (!groups.has(key)) groups.set(key, newTally());
+                key = bucketKey(bucketWindow(key, mode).until, mode);
+            }
+        }
+        const rows = [...groups]
+            .map(([key, group]): GroupRow => {
+                const window = bucketWindow(key, mode);
+                const days = windowDays(Math.max(sinceMs, window.since), Math.min(untilMs, window.until));
+                return {
+                    key,
+                    name: key,
+                    stats: group.stats,
+                    requests: group.requests,
+                    perDay: days ? group.stats.cost / days : 0,
+                };
+            })
+            .sort((a, b) => b.key.localeCompare(a.key));
+        for (let i = 0; i + 1 < rows.length; i++)
+            rows[i]!.delta = percentChange(rows[i]!.perDay!, rows[i + 1]!.perDay!);
+        return rows;
+    }
     const toRow = ([name, group]: [string, Tally]): GroupRow => ({
+        key: name,
         name: mode === "model" && group.providers!.size > 1 ? `${name} (${group.providers!.size})` : name,
         stats: group.stats,
         requests: group.requests,
@@ -193,13 +345,13 @@ export type Summary = {
     hit: number;
 };
 
-/** Totals for the summary block: one pass over the window. */
-export function summarize(records: UsageRecord[], sinceMs = 0): Summary {
+/** Totals for the summary block: one pass over [sinceMs, untilMs). */
+export function summarize(records: UsageRecord[], sinceMs = 0, untilMs = Infinity): Summary {
     const stats = emptyStats();
     let requests = 0;
     const sessions = new Set<string>();
     for (const record of records) {
-        if (record.ts < sinceMs) continue;
+        if (record.ts < sinceMs || record.ts >= untilMs) continue;
         addStats(stats, record);
         requests++;
         sessions.add(record.sessionId);
@@ -215,28 +367,53 @@ export function summarize(records: UsageRecord[], sinceMs = 0): Summary {
 
 export type DailyCost = { label: string; cost: number };
 
-/** Cost per local calendar day, oldest first, covering the `days` days ending today. */
-export function dailyCosts(records: UsageRecord[], days: number, now = Date.now()): DailyCost[] {
-    const buckets: DailyCost[] = [];
-    const index = new Map<number, number>();
-    const cursor = new Date(now);
-    cursor.setHours(0, 0, 0, 0);
+export const seriesKey = (key: string, parent?: string): string => JSON.stringify([key, parent ?? null]);
+
+export function buildDailySeries(
+    records: UsageRecord[],
+    since: number,
+    until: number,
+    mode: GroupMode,
+    rows: { key: string; parent?: string }[],
+): { total: DailyCost[]; rows: Map<string, DailyCost[]> } {
+    const days = windowDays(since, until);
+    const total: DailyCost[] = [];
+    const positions = new Map<string, number>();
+    let cursor = since;
     for (let i = 0; i < days; i++) {
-        index.set(cursor.getTime(), days - 1 - i);
-        buckets.unshift({
-            label: `${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`,
-            cost: 0,
-        });
-        // setDate walks calendar days, so DST shifts cannot misplace a bucket.
-        cursor.setDate(cursor.getDate() - 1);
+        const key = dayKey(cursor);
+        positions.set(key, i);
+        total.push({ label: key.slice(5), cost: 0 });
+        cursor = bucketWindow(key, "day").until;
     }
+    const costs = new Map<string, Map<number, number>>();
+    const add = (key: string, index: number, cost: number) => {
+        let values = costs.get(key);
+        if (!values) costs.set(key, (values = new Map()));
+        values.set(index, (values.get(index) ?? 0) + cost);
+    };
     for (const record of records) {
-        const day = new Date(record.ts);
-        day.setHours(0, 0, 0, 0);
-        const at = index.get(day.getTime());
-        if (at !== undefined) buckets[at]!.cost += record.cost;
+        if (record.ts < since || record.ts >= until) continue;
+        const index = positions.get(dayKey(record.ts));
+        if (index === undefined) continue;
+        total[index]!.cost += record.cost;
+        const key = recordKey(record, mode);
+        add(seriesKey(key), index, record.cost);
+        if (mode === "provider") add(seriesKey(record.model, record.provider), index, record.cost);
     }
-    return buckets;
+    const result = new Map<string, DailyCost[]>();
+    for (const row of rows) {
+        const key = seriesKey(row.key, row.parent);
+        const values = costs.get(key);
+        const bucket = isTimeMode(mode) ? bucketWindow(row.key, mode) : { since, until };
+        const start = windowDays(since, Math.max(since, bucket.since));
+        const end = windowDays(since, Math.min(until, bucket.until));
+        result.set(
+            key,
+            total.slice(start, end).map((day, i) => ({ label: day.label, cost: values?.get(start + i) ?? 0 })),
+        );
+    }
+    return { total, rows: result };
 }
 
 /** Sum `perBar` consecutive daily buckets into one bar, labeled by its first day. */
