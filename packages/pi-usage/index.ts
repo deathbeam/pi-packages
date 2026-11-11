@@ -10,16 +10,13 @@ import {
     buildDailySeries,
     buildRows,
     cacheView,
-    clearTimeFilters,
     collectUsage,
+    comparison,
     dayKey,
-    isTimeFilter,
-    isTimeMode,
+    dayWindow,
     matchesFilter,
     percentChange,
-    previousSummary,
     seriesKey,
-    stepFilter,
     summarize,
     usageWindow,
     type DailyCost,
@@ -38,28 +35,19 @@ type Column = {
 type BodyRow = GroupRow & { parent?: string };
 type Frame = { filters: UsageFilter[]; group: number; cursor: number; top: number };
 
-const PERIODS = [
-    { label: "Today", days: 1 },
-    { label: "7d", days: 7 },
-    { label: "30d", days: 30 },
-    { label: "All", days: Infinity },
-] as const;
-
-const GROUPS = ["provider", "model", "project", "day", "week", "month"] as const satisfies readonly GroupMode[];
+const GROUPS = ["day", "provider", "model", "project"] as const satisfies readonly GroupMode[];
 const GROUP_LABELS: Record<GroupMode, string> = {
+    day: "Day",
     provider: "Provider",
     model: "Model",
     project: "Project",
-    day: "Day",
-    week: "Week",
-    month: "Month",
 };
 
 const COLUMNS: Column[] = [
     {
         label: "Cost",
         width: 10,
-        cell: (s, _r, _t, row) => formatCost(s.cost, row?.perDay !== undefined),
+        cell: (s) => formatCost(s.cost),
     },
     {
         label: "Share",
@@ -81,8 +69,8 @@ const COLUMNS: Column[] = [
 const SPARK_BARS = "▁▂▃▄▅▆▇█";
 const MIN_NAME_WIDTH = 12;
 
-function formatCost(cost: number, showZero = false): string {
-    if (cost === 0) return showZero ? "$0.00" : "-";
+function formatCost(cost: number): string {
+    if (cost === 0) return "$0.00";
     if (cost < 0.01) return `$${cost.toFixed(4)}`;
     if (cost < 100) return `$${cost.toFixed(2)}`;
     return `$${Math.round(cost).toLocaleString("en-US")}`;
@@ -104,7 +92,7 @@ function hitPct(stats: Stats): string {
 function layout(width: number, allColumns: Column[]): { nameWidth: number; columns: Column[] } {
     const used = (cols: Column[]) => cols.reduce((sum, c) => sum + c.width + 1, 0);
     let columns = allColumns;
-    for (const label of ["Share", "Hit%", "Cache", "Out", "In", "Reqs", "Δ", "/day"]) {
+    for (const label of ["Share", "Hit%", "Cache", "Out", "In", "Reqs", "Δ"]) {
         if (width - used(columns) >= MIN_NAME_WIDTH) break;
         columns = columns.filter((c) => c.label !== label);
     }
@@ -115,9 +103,6 @@ const padWidth = (s: string, w: number): string => s + " ".repeat(Math.max(0, w 
 
 function displayName(mode: GroupMode, name: string): string {
     if (mode === "day") return `${name} ${new Date(`${name}T00:00`).toLocaleDateString("en-US", { weekday: "short" })}`;
-    if (mode === "week") return `${name} wk`;
-    if (mode === "month")
-        return `${name} ${new Date(`${name}-01T00:00`).toLocaleDateString("en-US", { month: "short" })}`;
     if (mode !== "project") return name;
     if (!name) return "(no cwd)";
     const home = homedir();
@@ -185,7 +170,6 @@ export default function (pi: ExtensionAPI) {
                 overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0 },
             } as const;
             await ctx.ui.custom((tui, theme, keys, done) => {
-                let period = 0;
                 let group = 0;
                 let cursor = 0;
                 let top = 0;
@@ -194,29 +178,21 @@ export default function (pi: ExtensionAPI) {
                 let body: BodyRow[] = [];
                 const stack: Frame[] = [];
                 const filters = () => stack.flatMap((frame) => frame.filters);
-                const timeIsInnermost = () => isTimeFilter(filters().at(-1));
+                const dayFilter = () => filters().findLast((f) => f.mode === "day");
                 const derive = (source: UsageRecord[]) => {
                     const active = filters();
                     const records = source.filter((record) =>
-                        active.every((f) => isTimeMode(f.mode) || matchesFilter(record, f)),
+                        active.every((f) => f.mode === "day" || matchesFilter(record, f)),
                     );
-                    const window = usageWindow(records, PERIODS[period].days, active);
+                    const day = active.findLast((f) => f.mode === "day")?.key;
+                    const window = usageWindow(records, day);
                     const mode = GROUPS[group]!;
                     const summary = summarize(records, window.since, window.until);
-                    const compare =
-                        window.days > 0 &&
-                        (active.some((f) => isTimeMode(f.mode)) || PERIODS[period].days !== Infinity);
-                    const previous = compare ? previousSummary(records, window.since, window.days) : undefined;
                     const body = flatten(buildRows(records, window.since, mode, window.until), mode);
-                    const series = buildDailySeries(records, window.since, window.until, mode, body);
-                    return { records, window, mode, summary, previous, body, series };
+                    const series = day ? undefined : buildDailySeries(records, window.since, window.until, mode);
+                    return { mode, summary, body, series, compare: day ? undefined : comparison(records) };
                 };
                 const getView = cacheView(() => derive(state.records!));
-                const changePeriod = (offset: number) => {
-                    period = (period + offset + PERIODS.length) % PERIODS.length;
-                    clearTimeFilters(stack);
-                    cursor = top = 0;
-                };
                 render = () => tui.requestRender();
                 void loaded.then(render);
                 const colorDelta = (delta: number | undefined): string => {
@@ -227,23 +203,21 @@ export default function (pi: ExtensionAPI) {
                         : "▲new";
                     return theme.fg(delta > 0 ? "error" : "success", text);
                 };
-                const timeColumns: Column[] = [
-                    {
-                        label: "/day",
-                        width: 10,
-                        cell: (_s, _r, _t, row) => (row?.perDay === undefined ? "-" : formatCost(row.perDay, true)),
-                    },
-                    { label: "Δ", width: 9, cell: (_s, _r, _t, row) => colorDelta(row?.delta) },
-                ];
+                const deltaColumn: Column = { label: "Δ", width: 9, cell: (_s, _r, _t, row) => colorDelta(row?.delta) };
                 const title = (width: number): string => {
                     const tab = (label: string, active: boolean) =>
                         active ? theme.fg("accent", `[${label}]`) : theme.fg("muted", ` ${label} `);
-                    const left = stack.length
-                        ? theme.fg("accent", theme.bold("Usage")) +
-                          " › " +
-                          [PERIODS[period].label, ...filters().map((f) => displayName(f.mode, f.key))].join(" › ")
-                        : `${theme.fg("accent", theme.bold("Usage"))}  ${PERIODS.map(({ label }, i) => tab(label, i === period)).join(" ")}`;
-                    const right = GROUPS.map((g, i) => tab(GROUP_LABELS[g], i === group)).join(" ");
+                    const left =
+                        theme.fg("accent", theme.bold("Usage")) +
+                        filters()
+                            .map((f) => ` › ${displayName(f.mode, f.key)}`)
+                            .join("");
+                    const tabs = GROUPS.map((g, i) => (i === 0 && dayFilter() ? "" : tab(GROUP_LABELS[g], i === group)))
+                        .filter(Boolean)
+                        .join(" ");
+                    const hint = theme.fg("dim", " (tab/←→)");
+                    const right =
+                        tabs + (visibleWidth(left) + visibleWidth(tabs) + visibleWidth(hint) + 1 <= width ? hint : "");
                     const leftWidth = Math.max(0, width - visibleWidth(right) - 1);
                     return truncateToWidth(
                         truncateToWidth(left, leftWidth, "…") +
@@ -256,10 +230,7 @@ export default function (pi: ExtensionAPI) {
                 };
                 const footer = (width: number): string =>
                     truncateToWidth(
-                        theme.fg(
-                            "dim",
-                            `enter open · esc back · v group · tab period · ←→ ${timeIsInnermost() ? "bucket" : "period"} · q close · ↑↓ scroll`,
-                        ),
+                        theme.fg("dim", "enter open · esc back · tab/←→ group · [ ] day · q close · ↑↓ scroll"),
                         width,
                     );
                 return {
@@ -279,22 +250,15 @@ export default function (pi: ExtensionAPI) {
                             lines.push(rule, footer(width));
                             return lines.slice(0, rows);
                         }
-                        const view = getView(period, GROUPS[group]!, filters());
-                        const { window, mode, summary, previous, series } = view;
-                        const label =
-                            window.days === 1 && dayKey(window.since) === dayKey(Date.now())
-                                ? "yesterday"
-                                : `prev ${window.days}d`;
-                        const trend = previous
-                            ? ` ${colorDelta(percentChange(summary.stats.cost, previous.stats.cost))} vs ${label}`
-                            : "";
+                        const view = getView(GROUPS[group]!, filters());
+                        const { mode, summary, series, compare } = view;
+                        const first = compare
+                            ? `Today ${formatCost(compare.today)} · This week ${formatCost(compare.week)}/day ${colorDelta(percentChange(compare.week, compare.lastWeek))} vs last week · This month ${formatCost(compare.month)}/day ${colorDelta(percentChange(compare.month, compare.lastMonth))} vs last month`
+                            : `Cost ${formatCost(summary.stats.cost)}`;
                         lines.push(
+                            truncateToWidth(first, width),
                             truncateToWidth(
-                                `Cost ${formatCost(summary.stats.cost)}${trend} · ${formatCost(window.days ? summary.stats.cost / window.days : 0)}/day · Reqs ${formatTokens(summary.requests)} · Sessions ${formatTokens(summary.sessions)}`,
-                                width,
-                            ),
-                            truncateToWidth(
-                                `In ${formatTokens(summary.stats.input)} · Out ${formatTokens(summary.stats.output)} · Cache ${formatTokens(summary.stats.cacheRead + summary.stats.cacheWrite)} · Hit ${hitPct(summary.stats)}`,
+                                `In ${formatTokens(summary.stats.input)} · Out ${formatTokens(summary.stats.output)} · Cache ${formatTokens(summary.stats.cacheRead + summary.stats.cacheWrite)} · Hit ${hitPct(summary.stats)} · Reqs ${formatTokens(summary.requests)} · Sessions ${formatTokens(summary.sessions)}`,
                                 width,
                             ),
                         );
@@ -302,10 +266,11 @@ export default function (pi: ExtensionAPI) {
                         rowCount = body.length;
                         cursor = Math.min(cursor, Math.max(0, rowCount - 1));
                         const selected = body[cursor];
+                        const costs = selected && series?.rows.get(seriesKey(selected.key, selected.parent));
                         const daily = selected
-                            ? (series.rows.get(seriesKey(selected.key, selected.parent)) ?? series.total)
-                            : series.total;
-                        const spark = sparkline(daily, width);
+                            ? series?.total.map((d, i) => ({ ...d, cost: costs?.get(i) ?? 0 }))
+                            : series?.total;
+                        const spark = daily && sparkline(daily, width);
                         if (spark)
                             lines.push(
                                 truncateToWidth(
@@ -315,7 +280,7 @@ export default function (pi: ExtensionAPI) {
                             );
                         const { nameWidth, columns } = layout(
                             width,
-                            isTimeMode(mode) ? [COLUMNS[0]!, ...timeColumns, ...COLUMNS.slice(1)] : COLUMNS,
+                            mode === "day" ? [COLUMNS[0]!, deltaColumn, ...COLUMNS.slice(1)] : COLUMNS,
                         );
                         const header = mode === "provider" ? "Provider / Model" : GROUP_LABELS[mode];
                         lines.push(
@@ -335,7 +300,7 @@ export default function (pi: ExtensionAPI) {
                         if (cursor < top) top = cursor;
                         if (viewHeight > 0 && cursor >= top + viewHeight) top = cursor - viewHeight + 1;
                         const visible = body.slice(top, top + viewHeight);
-                        if (rowCount === 0) lines.push(theme.fg("dim", "  No usage in this period"));
+                        if (rowCount === 0) lines.push(theme.fg("dim", "  No usage"));
                         for (const [i, row] of visible.entries()) {
                             let line = tableLine(nameWidth, columns, row, summary.stats.cost);
                             if (top + i === cursor) line = theme.bg("selectedBg", line);
@@ -373,18 +338,21 @@ export default function (pi: ExtensionAPI) {
                                 row.parent === undefined ? [] : [{ mode: "provider", key: row.parent }];
                             selected.push({ mode: rowMode, key: row.key });
                             stack.push({ filters: selected, group, cursor, top });
-                            group = isTimeMode(rowMode) ? 0 : GROUPS.indexOf("day");
+                            group = rowMode === "day" ? 1 : 0;
                             cursor = top = 0;
-                        } else if ((matchesKey(data, "right") || matchesKey(data, "left")) && timeIsInnermost()) {
-                            const active = filters();
-                            const next = stepFilter(active, matchesKey(data, "right") ? 1 : -1);
-                            if (next !== undefined) active.at(-1)!.key = next;
-                        } else if (matchesKey(data, "tab") || matchesKey(data, "right")) {
-                            changePeriod(1);
-                        } else if (matchesKey(data, "shift+tab") || matchesKey(data, "left")) {
-                            changePeriod(-1);
-                        } else if (data === "v") {
-                            group = (group + 1) % GROUPS.length;
+                        } else if ((data === "[" || data === "]") && filters().at(-1)?.mode === "day") {
+                            const filter = filters().at(-1)!;
+                            const next = dayKey(dayWindow(filter.key, data === "]" ? 1 : -1).since);
+                            if (next <= dayKey(Date.now())) filter.key = next;
+                        } else if (
+                            matchesKey(data, "tab") ||
+                            matchesKey(data, "right") ||
+                            matchesKey(data, "shift+tab") ||
+                            matchesKey(data, "left")
+                        ) {
+                            const offset = matchesKey(data, "tab") || matchesKey(data, "right") ? 1 : -1;
+                            do group = (group + offset + GROUPS.length) % GROUPS.length;
+                            while (group === 0 && dayFilter());
                             cursor = top = 0;
                         } else if (keys.matches(data, "tui.select.up") || data === "k") cursor -= 1;
                         else if (keys.matches(data, "tui.select.down") || data === "j") cursor += 1;

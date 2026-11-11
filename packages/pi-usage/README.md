@@ -4,23 +4,20 @@ Use the `/usage` command for a fullscreen dashboard of token usage and costs.
 
 ## Keys
 
-| Key                 | Action                                                        |
-| ------------------- | ------------------------------------------------------------- |
-| Tab, Shift+Tab      | Cycle periods                                                 |
-| ← / →               | Cycle periods, or step the last filter if it is a time bucket |
-| `v`                 | Cycle provider, model, project, day, week, and month groups   |
-| Enter               | Open the selected row                                         |
-| Esc                 | Go back, or close when at the top level                       |
-| `q`                 | Close                                                         |
-| ↑ / ↓, `j` / `k`    | Move the cursor                                               |
-| Page Up / Page Down | Move by a page                                                |
-| `g` / `G`           | Move to the first / last row                                  |
+| Key                   | Action                                       |
+| --------------------- | -------------------------------------------- |
+| Tab, Shift+Tab, ← / → | Cycle groups. Inside an open day, skip day.  |
+| `[` / `]`             | Step the day when it is the innermost filter |
+| Enter                 | Open the selected row                        |
+| Esc                   | Go back, or close when at the top level      |
+| `q`                   | Close                                        |
+| ↑ / ↓, `j` / `k`      | Move the cursor                              |
+| Page Up / Page Down   | Move by a page                               |
+| `g` / `G`             | Move to the first / last row                 |
 
-Switching periods removes time filters and keeps provider, model, and project filters. The sparkline shows daily costs for the selected row.
+Day rows include days without usage. Δ compares cost with the previous day. The sparkline shows the selected row over all history and is hidden when a day is open.
 
-Weeks start on Monday in local time. Time rows include days without usage. `/day` uses the days in the visible window, including today. Δ compares that pace with the next older row. A rise from zero is shown as `▲new`.
-
-The summary compares the current window with the same number of calendar days immediately before it. All has no comparison unless a time bucket is open.
+The summary compares the daily spend so far this week and month with last week and month. Weeks start on Monday in local time. `▲new` means the previous period had no spend.
 
 ## Installation
 

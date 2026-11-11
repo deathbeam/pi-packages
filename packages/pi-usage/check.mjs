@@ -6,18 +6,14 @@ import {
     buildRows,
     buildDailySeries,
     bucketCosts,
-    bucketKey,
-    bucketWindow,
     cacheView,
-    clearTimeFilters,
     collectUsage,
+    comparison,
     dayKey,
-    isTimeFilter,
+    dayWindow,
     matchesFilter,
     percentChange,
-    previousSummary,
     seriesKey,
-    stepFilter,
     summarize,
     usageWindow,
     windowDays,
@@ -84,7 +80,7 @@ try {
     // The delegate toolResult's usage is skipped, so exactly the four assistant messages remain.
     assert.equal(records.length, 4);
     // readdir is alphabetical, so the delegates file is scanned before the parent session.
-    const [inferhub, openrouter, parent, old] = records;
+    const [inferhub, openrouter, parent] = records;
     assert.equal(parent.cwd, "/tmp");
     assert.equal(parent.sessionId, "s1");
     assert.equal(inferhub.cwd, "/home/x/git/proj"); // cwd from the child's own session header
@@ -137,7 +133,7 @@ try {
     assert.equal(buildRows(records, now + 1000, "model").length, 0);
 
     // Day grouping: one row per local day, newest first; untilMs bounds a single-day window.
-    const allWindow = usageWindow(records, Infinity, [], now);
+    const allWindow = usageWindow(records, undefined, now);
     const days = buildRows(records, allWindow.since, "day", allWindow.until);
     assert.equal(days[0].name, dayKey(day(0)));
     assert.equal(days[1].name, dayKey(day(1)));
@@ -146,7 +142,7 @@ try {
     assert.ok(Math.abs(days[1].stats.cost - 0.15) < 1e-12);
     const start = new Date(day(1));
     start.setHours(0, 0, 0, 0);
-    const end = new Date(bucketWindow(dayKey(day(1)), "day").until);
+    const end = new Date(dayWindow(dayKey(day(1))).until);
     assert.equal(summarize(records, start.getTime(), end.getTime()).requests, 2);
     assert.deepEqual(
         buildRows(records, start.getTime(), "provider", end.getTime()).map((r) => r.name),
@@ -169,27 +165,29 @@ try {
 
     const at = (date) => new Date(`${date}T12:00:00`).getTime();
     const midnight = (date) => new Date(`${date}T00:00:00`).getTime();
-    assert.equal(bucketKey(at("2025-05-11"), "week"), "2025-05-05");
-    assert.equal(bucketKey(at("2025-05-12"), "week"), "2025-05-12");
-    assert.equal(bucketKey(bucketWindow("2025-01", "month", -1).since, "month"), "2024-12");
-    assert.equal(bucketWindow("2025-02", "month").until, midnight("2025-03-01"));
     assert.equal(windowDays(midnight("2025-03-08"), midnight("2025-03-11")), 3);
-    const dst = bucketWindow("2025-09-07", "day");
+    const dst = dayWindow("2025-09-07");
     assert.equal(dst.until, midnight("2025-09-08"));
+    assert.equal(dayWindow("2025-09-07", 1).since, midnight("2025-09-08"));
+    assert.equal(dayWindow("2025-09-08", -1).since, midnight("2025-09-07"));
     assert.equal(windowDays(dst.since, dst.until), 1);
-    assert.equal(usageWindow([], 7, [], at("2025-09-07")).days, 7);
-    assert.equal(usageWindow([], 7, [], at("2025-09-13")).since, midnight("2025-09-07"));
     const dstRecords = [
         { ...parent, ts: midnight("2025-09-06") + 1_800_000, cost: 7 },
         { ...parent, ts: at("2025-09-07"), cost: 5 },
         { ...parent, ts: midnight("2025-09-08") + 1_800_000, cost: 9 },
     ];
-    assert.equal(previousSummary(dstRecords, dst.since, 1).stats.cost, 7);
     assert.equal(summarize(dstRecords, dst.since, dst.until).stats.cost, 5);
     const dstRows = buildRows(dstRecords, dst.since, "day", dst.until);
     assert.equal(dstRows.length, 1);
-    assert.equal(dstRows[0].perDay, 5);
-    const dstSeries = buildDailySeries(dstRecords, midnight("2025-09-06"), midnight("2025-09-10"), "day", []);
+    assert.equal(dstRows[0].stats.cost, 5);
+    assert.deepEqual(comparison(dstRecords, at("2025-09-08")), {
+        today: 9,
+        week: 9,
+        lastWeek: 12 / 7,
+        month: 21 / 8,
+        lastMonth: 0,
+    });
+    const dstSeries = buildDailySeries(dstRecords, midnight("2025-09-06"), midnight("2025-09-10"), "day");
     assert.deepEqual(
         dstSeries.total.map((d) => [d.label, d.cost]),
         [
@@ -201,80 +199,55 @@ try {
     );
 
     const sample = [
+        { ...parent, ts: at("2025-04-20"), cost: 30 },
         { ...parent, ts: at("2025-05-08"), cost: 10 },
-        { ...parent, ts: at("2025-05-14"), cost: 28 },
+        { ...parent, provider: "other", ts: at("2025-05-14"), cost: 28 },
         { ...parent, ts: at("2025-05-21"), cost: 9 },
         { ...parent, ts: at("2025-05-22"), cost: 100 },
     ];
-    const weeks = buildRows(sample, midnight("2025-05-07"), "week", midnight("2025-05-22"));
-    assert.deepEqual(
-        weeks.map((row) => row.key),
-        ["2025-05-19", "2025-05-12", "2025-05-05"],
+    const pace = comparison(sample, at("2025-05-21"));
+    assert.deepEqual(pace, { today: 9, week: 3, lastWeek: 4, month: 47 / 21, lastMonth: 1 });
+    assert.deepEqual(comparison([], at("2025-05-21")), { today: 0, week: 0, lastWeek: 0, month: 0, lastMonth: 0 });
+    assert.equal(
+        comparison(
+            sample.filter((r) => matchesFilter(r, { mode: "provider", key: "other" })),
+            at("2025-05-21"),
+        ).lastWeek,
+        4,
     );
-    assert.deepEqual(
-        weeks.map((row) => row.perDay),
-        [3, 4, 2],
+    const monday = comparison(
+        [
+            { ...parent, ts: at("2025-05-18"), cost: 7 },
+            { ...parent, ts: at("2025-05-19"), cost: 10 },
+        ],
+        at("2025-05-19"),
     );
-    assert.deepEqual(
-        weeks.map((row) => row.delta),
-        [-25, 100, undefined],
+    assert.equal(monday.week, 10);
+    assert.equal(monday.lastWeek, 1);
+    const leap = comparison(
+        [
+            { ...parent, ts: at("2024-02-29"), cost: 58 },
+            { ...parent, ts: at("2024-03-01"), cost: 6 },
+        ],
+        at("2024-03-03"),
     );
+    assert.equal(leap.month, 2);
+    assert.equal(leap.lastMonth, 2);
     assert.equal(percentChange(0, 0), 0);
     assert.equal(percentChange(1, 0), Infinity);
     assert.equal(percentChange(0, 1), -100);
-    const months = buildRows(sample, midnight("2025-03-20"), "month", midnight("2025-05-22"));
-    assert.deepEqual(
-        months.map((row) => row.key),
-        ["2025-05", "2025-04", "2025-03"],
-    );
-    assert.equal(months[0].stats.cost, 47);
-    assert.equal(months[1].stats.cost, 0);
-    assert.equal(months[2].perDay, 0);
-    assert.equal(months[0].delta, Infinity);
+    assert.equal(days[1].delta, Infinity);
+    assert.equal(days[2].delta, 0);
+    assert.equal(days.at(-1).delta, undefined);
     assert.equal(buildRows([], midnight("2025-05-01"), "day", midnight("2025-05-04")).length, 3);
-    assert.equal(buildRows([], midnight("2025-05-04"), "day", midnight("2025-05-04")).length, 0);
     assert.throws(() => buildRows([], 0, "day"), RangeError);
-    assert.deepEqual(
-        buildRows([], midnight("2099-01-01"), "day", midnight("2099-01-03")).map((r) => r.key),
-        ["2099-01-02", "2099-01-01"],
-    );
-
-    const weekFilter = { mode: "week", key: "2025-05-19" };
-    const window = usageWindow(sample, 30, [weekFilter], at("2025-05-21"));
-    assert.deepEqual(window, { since: midnight("2025-05-19"), until: midnight("2025-05-22"), days: 3 });
-    assert.equal(previousSummary(sample, window.since, window.days).stats.cost, 0);
-    assert.equal(previousSummary(sample, midnight("2025-05-19"), 7).stats.cost, 28);
-    assert.equal(matchesFilter(sample[2], weekFilter), true);
-    assert.equal(matchesFilter(sample[1], weekFilter), false);
-    assert.equal(models[1].key, "glm-5.3");
-    const nested = usageWindow(sample, 30, [weekFilter, { mode: "day", key: "2025-05-21" }], at("2025-05-21"));
-    assert.deepEqual(nested, { since: midnight("2025-05-21"), until: midnight("2025-05-22"), days: 1 });
-
-    const monday = { mode: "day", key: "2025-05-19" };
-    assert.equal(stepFilter([weekFilter, monday], -1, at("2025-05-21")), undefined);
-    assert.equal(stepFilter([weekFilter, monday], 1, at("2025-05-21")), "2025-05-20");
-    assert.equal(stepFilter([{ mode: "day", key: "2025-05-21" }], 1, at("2025-05-21")), undefined);
-    assert.equal(stepFilter([weekFilter, { mode: "provider", key: "anthropic" }], -1, at("2025-05-21")), undefined);
-    const outer = [
-        { mode: "month", key: "2025-05" },
-        { mode: "week", key: "2025-05-26" },
-        { mode: "day", key: "2025-05-31" },
-    ];
-    assert.equal(stepFilter(outer, 1, at("2025-06-03")), undefined);
-    assert.equal(stepFilter(outer, -1, at("2025-06-03")), "2025-05-30");
-    assert.equal(isTimeFilter([weekFilter, monday].at(-1)), true);
-    const keep = { filters: [{ mode: "provider", key: "anthropic" }], cursor: 3 };
-    const stack = [{ filters: [weekFilter], cursor: 0 }, keep, { filters: [monday], cursor: 1 }];
-    assert.equal(isTimeFilter(keep.filters.at(-1)), false);
-    clearTimeFilters(stack);
-    assert.deepEqual(stack, [keep]);
+    assert.deepEqual(usageWindow(sample, "2025-05-21", at("2025-05-21")), dayWindow("2025-05-21"));
 
     let scans = 0;
     const view = cacheView(() => ++scans);
-    for (let cursor = 0; cursor < 3; cursor++) assert.equal(view(2, "week", [weekFilter], now), 1);
-    assert.equal(view(2, "day", [weekFilter], now), 2);
-    assert.equal(view(2, "day", keep.filters, now), 3);
-    assert.equal(view(3, "day", keep.filters, now), 4);
+    for (let cursor = 0; cursor < 3; cursor++) assert.equal(view("day", [], now), 1);
+    assert.equal(view("provider", [], now), 2);
+    assert.equal(view("provider", [{ mode: "provider", key: "anthropic" }], now), 3);
 
     const seriesRecords = [
         { ...parent, provider: "a", model: "shared", ts: at("2025-05-19"), cost: 2 },
@@ -282,16 +255,16 @@ try {
         { ...parent, provider: "a", model: "other", ts: at("2025-05-21"), cost: 4 },
         { ...parent, provider: "a", model: "shared", ts: at("2025-05-18"), cost: 100 },
     ];
-    const seriesRows = [{ key: "a" }, { key: "shared", parent: "a" }, { key: "b" }];
     let passes = 0;
     const once = [...seriesRecords];
     once[Symbol.iterator] = function* () {
         passes++;
         yield* seriesRecords;
     };
-    const series = buildDailySeries(once, midnight("2025-05-19"), midnight("2025-05-22"), "provider", seriesRows);
+    const series = buildDailySeries(once, midnight("2025-05-19"), midnight("2025-05-22"), "provider");
     assert.equal(passes, 1);
-    const costsOf = (result, key, parent) => result.rows.get(seriesKey(key, parent)).map((d) => d.cost);
+    const costsOf = (result, key, parent) =>
+        result.total.map((_, i) => result.rows.get(seriesKey(key, parent))?.get(i) ?? 0);
     assert.deepEqual(
         series.total.map((d) => d.cost),
         [2, 3, 4],
@@ -299,24 +272,12 @@ try {
     assert.deepEqual(costsOf(series, "a"), [2, 0, 4]);
     assert.deepEqual(costsOf(series, "shared", "a"), [2, 0, 0]);
     assert.deepEqual(costsOf(series, "b"), [0, 3, 0]);
-    const startSeries = midnight("2025-05-19"),
-        endSeries = midnight("2025-05-22");
-    const modelSeries = buildDailySeries(seriesRecords, startSeries, endSeries, "model", [{ key: "shared" }]);
-    assert.deepEqual(costsOf(modelSeries, "shared"), [2, 3, 0]);
-    const projectSeries = buildDailySeries(seriesRecords, startSeries, endSeries, "project", [{ key: parent.cwd }]);
-    assert.deepEqual(costsOf(projectSeries, parent.cwd), [2, 3, 4]);
-    const timeSeries = buildDailySeries(sample, midnight("2025-05-07"), endSeries, "week", weeks);
-    assert.deepEqual(costsOf(timeSeries, "2025-05-19"), [0, 0, 9]);
-    assert.deepEqual(
-        timeSeries.rows.get(seriesKey("2025-05-05")).map((d) => d.label),
-        ["05-07", "05-08", "05-09", "05-10", "05-11"],
-    );
-    const zeroSeries = buildDailySeries([], midnight("2025-05-07"), endSeries, "week", weeks);
-    assert.deepEqual(costsOf(zeroSeries, "2025-05-19"), [0, 0, 0]);
+    const daySeries = buildDailySeries(seriesRecords, midnight("2025-05-19"), midnight("2025-05-22"), "day");
+    assert.deepEqual(costsOf(daySeries, "2025-05-20"), [0, 3, 0]);
 
     // Daily buckets: local calendar days, oldest first, out-of-range records excluded.
-    const three = usageWindow(records, 3, [], now);
-    const costs = buildDailySeries(records, three.since, three.until, "provider", []).total;
+    const three = { since: dayWindow(dayKey(now), -2).since, until: dayWindow(dayKey(now)).until };
+    const costs = buildDailySeries(records, three.since, three.until, "provider").total;
     assert.equal(costs.length, 3);
     assert.equal(costs[2].cost, 0.5); // today
     assert.ok(Math.abs(costs[1].cost - 0.15) < 1e-12); // yesterday

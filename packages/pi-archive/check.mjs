@@ -371,10 +371,12 @@ assert.ok(
 // the injected entry stays in the transcript, and the guard above keeps it from repeating. Gating on
 // messageType "user" would drop it when the user then steers into that run instead of starting a new one.
 assert.match(
-    (await beforeAgentStart(
-        { type: "before_agent_start", messageType: "custom", message: { customType: "report", content: "x" } },
-        archiveCtx([]),
-    ))?.message?.content ?? "",
+    (
+        await beforeAgentStart(
+            { type: "before_agent_start", messageType: "custom", message: { customType: "report", content: "x" } },
+            archiveCtx([]),
+        )
+    )?.message?.content ?? "",
     /^Recent sessions in this project/,
 );
 
