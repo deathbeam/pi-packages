@@ -5,15 +5,16 @@ import { join } from "node:path";
 import {
     buildRows,
     buildDailySeries,
-    bucketCosts,
     cacheView,
     collectUsage,
     comparison,
+    dailyTotals,
     dayKey,
     dayWindow,
     matchesFilter,
     percentChange,
     seriesKey,
+    startOfDay,
     summarize,
     usageWindow,
     windowDays,
@@ -140,31 +141,29 @@ try {
     assert.equal(days.at(-1).name, dayKey(day(40)));
     assert.equal(days.find((r) => r.name === dayKey(day(2))).stats.cost, 0);
     assert.ok(Math.abs(days[1].stats.cost - 0.15) < 1e-12);
-    const start = new Date(day(1));
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(dayWindow(dayKey(day(1))).until);
-    assert.equal(summarize(records, start.getTime(), end.getTime()).requests, 2);
+    const start = startOfDay(day(1));
+    const end = dayWindow(dayKey(day(1))).until;
+    assert.equal(summarize(records, start, end).requests, 2);
     assert.deepEqual(
-        buildRows(records, start.getTime(), "provider", end.getTime()).map((r) => r.name),
+        buildRows(records, start, "provider", end).map((r) => r.name),
         ["inferhub", "openrouter"],
     );
 
-    // Summary: totals, request and session counts, cache hit ratio.
+    // Summary: totals, request and session counts.
     const all = summarize(records);
     assert.ok(Math.abs(all.stats.cost - 0.85) < 1e-12);
     assert.equal(all.requests, 4);
     assert.equal(all.sessions, 2);
     assert.equal(all.stats.input, 161);
-    assert.ok(Math.abs(all.hit - 500 / 661) < 1e-12); // cacheRead / (input + cacheRead + cacheWrite)
     const recent = summarize(records, day(29));
     assert.ok(Math.abs(recent.stats.cost - 0.65) < 1e-12);
     assert.equal(recent.requests, 3);
-    assert.ok(Math.abs(recent.hit - 500 / 660) < 1e-12); // only the delegate child has cache reads
     const empty = summarize([], 0);
     assert.equal(empty.sessions, 0);
 
     const at = (date) => new Date(`${date}T12:00:00`).getTime();
-    const midnight = (date) => new Date(`${date}T00:00:00`).getTime();
+    const midnight = (date) => startOfDay(new Date(`${date}T12:00:00`).getTime());
+    assert.equal(startOfDay(at("2025-09-07")), midnight("2025-09-07"));
     assert.equal(windowDays(midnight("2025-03-08"), midnight("2025-03-11")), 3);
     const dst = dayWindow("2025-09-07");
     assert.equal(dst.until, midnight("2025-09-08"));
@@ -285,22 +284,15 @@ try {
     const total = costs.reduce((sum, d) => sum + d.cost, 0);
     assert.equal(total, 0.65); // the 40-day-old record is excluded
 
-    // Downsampling for the sparkline: 10 days into 4 bars (3+3+3+1) sums correctly and keeps the total.
-    const ten = Array.from({ length: 10 }, (_, i) => ({ label: `d${i}`, cost: i + 1 }));
-    const bars = bucketCosts(ten, 3);
-    assert.deepEqual(
-        bars.map((b) => b.cost),
-        [1 + 2 + 3, 4 + 5 + 6, 7 + 8 + 9, 10],
-    );
-    assert.deepEqual(
-        bars.map((b) => b.label),
-        ["d0", "d3", "d6", "d9"],
-    );
-    assert.equal(
-        bars.reduce((sum, b) => sum + b.cost, 0),
-        55,
-    );
-    assert.equal(bucketCosts(ten, 1), ten); // no bucketing when every day fits
+    // Sparkline data: total cost per day across all history, from the first recorded day through today.
+    const totals = dailyTotals(records, now);
+    assert.equal(totals.length, 41); // day(40) through today
+    assert.equal(totals[0].label, dayKey(day(40)).slice(5));
+    assert.equal(totals.at(-1).label, dayKey(day(0)).slice(5));
+    assert.equal(totals.at(-1).cost, 0.5); // today
+    assert.ok(Math.abs(totals.at(-2).cost - 0.15) < 1e-12); // yesterday
+    assert.ok(Math.abs(totals.reduce((sum, d) => sum + d.cost, 0) - 0.85) < 1e-12);
+    assert.deepEqual(dailyTotals([], now), []);
 
     console.log("pi-usage check passed");
 } finally {

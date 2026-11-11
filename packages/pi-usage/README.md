@@ -15,7 +15,7 @@ Use the `/usage` command for a fullscreen dashboard of token usage and costs.
 | Page Up / Page Down   | Move by a page                               |
 | `g` / `G`             | Move to the first / last row                 |
 
-Day rows include days without usage. Δ compares cost with the previous day. The sparkline shows the selected row over all history and is hidden when a day is open.
+Day rows include days without usage. Δ compares cost with the previous day. The sparkline always shows total cost per day across all history; the day in context is highlighted.
 
 The summary compares the daily spend so far this week and month with last week and month. Weeks start on Monday in local time. `▲new` means the previous period had no spend.
 

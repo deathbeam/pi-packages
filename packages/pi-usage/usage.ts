@@ -28,7 +28,7 @@ export type Stats = {
     cacheWrite: number;
 };
 
-export function emptyStats(): Stats {
+function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 }
 
@@ -146,15 +146,18 @@ export function dayKey(ts: number): string {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+export function startOfDay(ts: number): number {
+    const date = new Date(ts);
+    date.setHours(0, 0, 0, 0);
+    return date.getTime();
+}
+
 export function dayWindow(key: string, offset = 0): { since: number; until: number } {
     const date = new Date(`${key}T00:00`);
     date.setDate(date.getDate() + offset);
-    date.setHours(0, 0, 0, 0);
-    const since = date.getTime();
+    const since = startOfDay(date.getTime());
     date.setDate(date.getDate() + 1);
-    // A skipped midnight can leave 01:00 on the next calendar day.
-    date.setHours(0, 0, 0, 0);
-    return { since, until: date.getTime() };
+    return { since, until: startOfDay(date.getTime()) };
 }
 
 // UTC ordinals count local calendar days without DST changing their length.
@@ -191,16 +194,13 @@ export function comparison(records: UsageRecord[], now = Date.now()) {
     const { since: today, until } = dayWindow(dayKey(now));
     const week = new Date(today);
     week.setDate(week.getDate() - ((week.getDay() + 6) % 7));
-    week.setHours(0, 0, 0, 0);
-    const weekStart = week.getTime();
+    const weekStart = startOfDay(week.getTime());
     const lastWeek = dayWindow(dayKey(weekStart), -7).since;
     const month = new Date(today);
     month.setDate(1);
-    month.setHours(0, 0, 0, 0);
-    const monthStart = month.getTime();
+    const monthStart = startOfDay(month.getTime());
     month.setMonth(month.getMonth() - 1);
-    month.setHours(0, 0, 0, 0);
-    const lastMonth = month.getTime();
+    const lastMonth = startOfDay(month.getTime());
     let todayCost = 0,
         weekCost = 0,
         lastWeekCost = 0,
@@ -302,8 +302,6 @@ export type Summary = {
     requests: number;
     /** Distinct session ids (files) seen in the window. */
     sessions: number;
-    /** cacheRead / (input + cacheRead + cacheWrite); 0 without any tokens. */
-    hit: number;
 };
 
 /** Totals for the summary block: one pass over [sinceMs, untilMs). */
@@ -317,13 +315,7 @@ export function summarize(records: UsageRecord[], sinceMs = 0, untilMs = Infinit
         requests++;
         sessions.add(record.sessionId);
     }
-    const cacheTotal = stats.input + stats.cacheRead + stats.cacheWrite;
-    return {
-        stats,
-        requests,
-        sessions: sessions.size,
-        hit: cacheTotal > 0 ? stats.cacheRead / cacheTotal : 0,
-    };
+    return { stats, requests, sessions: sessions.size };
 }
 
 export type DailyCost = { label: string; cost: number };
@@ -364,13 +356,8 @@ export function buildDailySeries(
     return { total, rows: costs };
 }
 
-/** Sum `perBar` consecutive daily buckets into one bar, labeled by its first day. */
-export function bucketCosts(days: DailyCost[], perBar: number): DailyCost[] {
-    if (perBar <= 1) return days;
-    const bars: DailyCost[] = [];
-    for (let i = 0; i < days.length; i += perBar) {
-        const group = days.slice(i, i + perBar);
-        bars.push({ label: group[0]!.label, cost: group.reduce((sum, d) => sum + d.cost, 0) });
-    }
-    return bars;
+/** Total cost per local calendar day from the first recorded day through today. */
+export function dailyTotals(records: UsageRecord[], now = Date.now()): DailyCost[] {
+    const { since, until } = usageWindow(records, undefined, now);
+    return buildDailySeries(records, since, until, "day").total;
 }

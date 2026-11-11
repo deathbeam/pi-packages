@@ -6,17 +6,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
-    bucketCosts,
-    buildDailySeries,
     buildRows,
     cacheView,
     collectUsage,
     comparison,
+    dailyTotals,
     dayKey,
     dayWindow,
     matchesFilter,
     percentChange,
-    seriesKey,
     summarize,
     usageWindow,
     type DailyCost,
@@ -124,17 +122,20 @@ function tableLine(nameWidth: number, columns: Column[], row: GroupRow, totalCos
         .trimEnd();
 }
 
-function sparkline(daily: DailyCost[], width: number): { first: string; bars: string; last: string } | undefined {
-    if (daily.length <= 1) return undefined;
-    const first = daily[0]!.label;
-    const last = daily[daily.length - 1]!.label;
-    const bars = bucketCosts(daily, Math.ceil(daily.length / Math.max(1, width - 12)));
+type SparkBar = { label: string; char: string };
+
+function sparkline(daily: DailyCost[], width: number): { first: string; last: string; bars: SparkBar[] } | undefined {
+    const recent = daily.slice(-Math.max(1, width - 12));
+    if (recent.length === 0) return undefined;
     let max = 0;
-    for (const bar of bars) if (bar.cost > max) max = bar.cost;
+    for (const day of recent) if (day.cost > max) max = day.cost;
     return {
-        first,
-        bars: bars.map((d) => (d.cost <= 0 ? " " : SPARK_BARS[Math.max(1, Math.round((7 * d.cost) / max))])).join(""),
-        last,
+        first: recent[0]!.label,
+        last: recent[recent.length - 1]!.label,
+        bars: recent.map(({ label, cost }) => ({
+            label,
+            char: cost <= 0 ? " " : SPARK_BARS[Math.max(1, Math.round((7 * cost) / max))]!,
+        })),
     };
 }
 
@@ -189,10 +190,11 @@ export default function (pi: ExtensionAPI) {
                     const mode = GROUPS[group]!;
                     const summary = summarize(records, window.since, window.until);
                     const body = flatten(buildRows(records, window.since, mode, window.until), mode);
-                    const series = day ? undefined : buildDailySeries(records, window.since, window.until, mode);
-                    return { mode, summary, body, series, compare: day ? undefined : comparison(records) };
+                    return { mode, summary, body, compare: day ? undefined : comparison(records) };
                 };
                 const getView = cacheView(() => derive(state.records!));
+                let allDays: DailyCost[] | undefined;
+                const allDaily = () => (allDays ??= dailyTotals(state.records!));
                 render = () => tui.requestRender();
                 void loaded.then(render);
                 const colorDelta = (delta: number | undefined): string => {
@@ -251,7 +253,7 @@ export default function (pi: ExtensionAPI) {
                             return lines.slice(0, rows);
                         }
                         const view = getView(GROUPS[group]!, filters());
-                        const { mode, summary, series, compare } = view;
+                        const { mode, summary, compare } = view;
                         const first = compare
                             ? `Today ${formatCost(compare.today)} · This week ${formatCost(compare.week)}/day ${colorDelta(percentChange(compare.week, compare.lastWeek))} vs last week · This month ${formatCost(compare.month)}/day ${colorDelta(percentChange(compare.month, compare.lastMonth))} vs last month`
                             : `Cost ${formatCost(summary.stats.cost)}`;
@@ -266,15 +268,24 @@ export default function (pi: ExtensionAPI) {
                         rowCount = body.length;
                         cursor = Math.min(cursor, Math.max(0, rowCount - 1));
                         const selected = body[cursor];
-                        const costs = selected && series?.rows.get(seriesKey(selected.key, selected.parent));
-                        const daily = selected
-                            ? series?.total.map((d, i) => ({ ...d, cost: costs?.get(i) ?? 0 }))
-                            : series?.total;
-                        const spark = daily && sparkline(daily, width);
+                        const contextDay = dayFilter()?.key ?? (mode === "day" ? selected?.key : undefined);
+                        const contextLabel = contextDay?.slice(5);
+                        const spark = sparkline(allDaily(), width);
                         if (spark)
                             lines.push(
                                 truncateToWidth(
-                                    `${theme.fg("dim", `${spark.first} `)}${theme.fg("accent", spark.bars)}${theme.fg("dim", ` ${spark.last}`)}`,
+                                    theme.fg("dim", `${spark.first} `) +
+                                        spark.bars
+                                            .map((bar) =>
+                                                theme.fg(
+                                                    contextLabel === undefined || bar.label === contextLabel
+                                                        ? "accent"
+                                                        : "borderMuted",
+                                                    bar.char,
+                                                ),
+                                            )
+                                            .join("") +
+                                        theme.fg("dim", ` ${spark.last}`),
                                     width,
                                 ),
                             );
@@ -338,7 +349,10 @@ export default function (pi: ExtensionAPI) {
                                 row.parent === undefined ? [] : [{ mode: "provider", key: row.parent }];
                             selected.push({ mode: rowMode, key: row.key });
                             stack.push({ filters: selected, group, cursor, top });
-                            group = rowMode === "day" ? 1 : 0;
+                            // Land on the first grouping that is not already filtered.
+                            const used = new Set(filters().map((f) => f.mode));
+                            group = GROUPS.findIndex((g) => !used.has(g));
+                            if (group < 0) group = dayFilter() ? 1 : 0;
                             cursor = top = 0;
                         } else if ((data === "[" || data === "]") && filters().at(-1)?.mode === "day") {
                             const filter = filters().at(-1)!;
