@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-keenable",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Minimal extension for web search and fetch using Keenable API",
   "type": "module",
   "license": "MIT",

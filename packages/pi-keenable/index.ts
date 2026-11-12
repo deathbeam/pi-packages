@@ -98,7 +98,7 @@ export default function (pi: ExtensionAPI) {
         async execute(_id, rawParams, signal) {
             const p = definedParams(rawParams);
             const q = new URLSearchParams({ url: p.url });
-            if (p.max_chars !== undefined) q.set("maxChars", String(p.max_chars));
+            if (p.max_chars !== undefined) q.set("max_chars", String(p.max_chars));
             if (p.live) q.set("live", "true");
             if (p.prompt) q.set("prompt", p.prompt);
             const r = await keen(`/v1/fetch?${q}`, {}, signal);

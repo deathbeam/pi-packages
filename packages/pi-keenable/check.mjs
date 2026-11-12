@@ -27,7 +27,7 @@ try {
     });
     assert.equal(last().pathname, "/v1/fetch/public");
     assert.equal(last().searchParams.get("url"), "https://example.com/a?b=1");
-    assert.equal(last().searchParams.get("maxChars"), "10");
+    assert.equal(last().searchParams.get("max_chars"), "10");
     assert.equal(last().searchParams.get("live"), "true");
     assert.equal(last().searchParams.get("prompt"), "hi");
     assert.equal(calls.at(-1).init.headers["X-Keenable-Title"], "pi-keenable");
