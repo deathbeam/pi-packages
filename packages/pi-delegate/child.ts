@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { limitOutput, resultPreview, toolCallDetail } from "./format.ts";
+import { limitOutput, resultPreview, textParts, toolCallDetail } from "./format.ts";
 
 type Child = ChildProcessWithoutNullStreams;
 
@@ -157,7 +157,7 @@ export function runChild(
                     case "message_end": {
                         const role = event.message?.role;
                         if (role !== "assistant" && role !== "user") return;
-                        const text = transcriptText(event.message.content).join("");
+                        const text = textParts(event.message.content).join("");
                         if (role === "assistant") {
                             childError = event.message.errorMessage;
                             if (text) liveText = text;
@@ -298,16 +298,6 @@ export function runChild(
     };
 }
 
-/** Text parts of a message's content, in order. */
-function transcriptText(content: unknown): string[] {
-    if (typeof content === "string") return [content];
-    if (!Array.isArray(content)) return [];
-    return content
-        .map((part) => (part && typeof part === "object" ? (part as { type?: string; text?: string }) : {}))
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text!);
-}
-
 /**
  * Replays the child's persisted transcript as the activity a revived job continues from, so the
  * inspector keeps the old history. A missing or unreadable transcript seeds nothing: the revive
@@ -360,7 +350,7 @@ export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
             continue;
         }
         // Assistant text lands before its tool calls, matching the live event order.
-        const text = transcriptText(message.content).join("");
+        const text = textParts(message.content).join("");
         if (text) activity.push({ kind: message.role, text });
         if (message.role !== "assistant") continue;
         for (const part of Array.isArray(message.content) ? message.content : []) {

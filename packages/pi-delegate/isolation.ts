@@ -116,13 +116,17 @@ export function cloneCwd(iso: IsolationState, cwd: string): string {
 /** Clone location plus a stat of everything the delegate changed, for the job's report. */
 export function isolationSummary(iso: IsolationState): string {
     const lines = [`Isolated clone: ${iso.clone}`];
+    const indexFile = join(iso.clone, ".git", "pi-delegate-summary-index");
     try {
-        // Staging first pulls uncommitted and untracked changes into the stat.
-        git(["add", "-A"], { cwd: iso.clone });
-        const stat = git(["diff", "--stat", iso.base], { cwd: iso.clone }).trimEnd();
+        // A scratch index stages uncommitted and untracked changes for the stat without touching the clone's own index.
+        git(["read-tree", "HEAD"], { cwd: iso.clone, indexFile });
+        git(["add", "-A"], { cwd: iso.clone, indexFile });
+        const stat = git(["diff", "--stat", iso.base], { cwd: iso.clone, indexFile }).trimEnd();
         if (stat) lines.push(`Changes in this clone:\n${stat}`);
     } catch {
         // The clone may already be applied or gone; the path alone still says where the work lives.
+    } finally {
+        rmSync(indexFile, { force: true });
     }
     return lines.join("\n");
 }

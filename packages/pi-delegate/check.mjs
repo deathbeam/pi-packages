@@ -10,9 +10,9 @@ import { join } from "node:path";
 import { initTheme, renderDiff } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
+    capDiff,
     COLLAPSED_OUTPUT_LINES,
     jobLine,
-    launchDetails,
     limitOutput,
     outputPreview,
     piDiff,
@@ -28,6 +28,7 @@ import {
 import { priorActivity, runChild } from "./child.ts";
 import { resolveModel } from "./agents.ts";
 import { createJobStore } from "./store.ts";
+import { applyClone, createIsolation, isolationSummary, removeClone } from "./isolation.ts";
 // Hermetic: configFor and the pinned session dir must not read the host's real agent settings.
 const agentDir = mkdtempSync(join(tmpdir(), "pi-delegate-check-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -173,8 +174,6 @@ const bare = { fg: (_color, text) => text };
 assert.notEqual(statusText(bare, "running", 0), statusText(bare, "running", SPINNER_INTERVAL_MS));
 for (const status of ["done", "failed", "cancelled", "interrupted"])
     assert.equal(statusText(bare, status, 0), statusText(bare, status, SPINNER_INTERVAL_MS), `${status} icon spins`);
-assert.equal(launchDetails({ model: "x/y", tools: ["read", "ls"] }).join("\n"), "  Model: x/y\n  Tools: read, ls");
-assert.deepEqual(launchDetails({ tools: [] }), ["  Model: default", "  Tools: none"]);
 assert.deepEqual(outputPreview("a\nb", 5), { shown: ["a", "b"], hidden: 0 });
 assert.deepEqual(outputPreview("a\nb\nc", 2), { shown: ["a", "b"], hidden: 1 });
 assert.deepEqual(outputPreview("```\ncode\nmore", 2), { shown: ["```", "code", "```"], hidden: 1 });
@@ -196,6 +195,30 @@ const unified = [
 const converted = piDiff(unified).split("\n");
 assert.deepEqual(converted, ["x.ts", " 1 line1", "-2 old2", "+2 new2", "+3 new2b", " 4 line3"]);
 for (const line of converted.slice(1)) assert.match(line, /^([-+ ]) *\d+ /);
+// One line-number width for the whole diff, so a later hunk with wider numbers stays aligned.
+const multiHunk = [
+    "diff --git a/y.ts b/y.ts",
+    "--- a/y.ts",
+    "+++ b/y.ts",
+    "@@ -1,2 +1,2 @@",
+    "-a",
+    "+b",
+    " c",
+    "@@ -98,2 +98,2 @@",
+    "-d",
+    "+e",
+    " f",
+].join("\n");
+assert.deepEqual(piDiff(multiHunk).split("\n"), [
+    "y.ts",
+    "- 1 a",
+    "+ 1 b",
+    "  2 c",
+    "    ...",
+    "-98 d",
+    "+98 e",
+    " 99 f",
+]);
 const codes = renderDiff(piDiff(unified))
     .split("\n")
     .map((line) => /^\u001b\[([0-9;]+)m/.exec(line)?.[1]);
@@ -253,6 +276,13 @@ assert.equal(Buffer.byteLength(longCjk, "utf8"), 999);
 const longEmoji = limitOutput("🙂".repeat(1000), 1000).split("\n\n")[0];
 assert.ok(/^[\u{1F642}]+$/u.test(longEmoji));
 assert.equal(Array.from(longEmoji).length, 250);
+// The 50 KiB cap keeps the truncation marker out of the patch a diff renderer parses.
+const bigPatch = `diff --git a/big b/big\n--- a/big\n+++ b/big\n@@ -1,1 +1,2 @@\n a\n+${"x".repeat(60 * 1024)}\n`;
+const cappedDiff = capDiff(bigPatch);
+assert.ok(cappedDiff.diff.length < bigPatch.length);
+assert.doesNotMatch(cappedDiff.diff, /Output truncated/);
+assert.match(cappedDiff.note, /Output truncated/);
+assert.doesNotMatch(piDiff(cappedDiff.diff), /Output truncated/);
 // The protocol test uses a fake child: stdout splits a UTF-8 code point and steer returns a failed ack.
 function fakeChild() {
     const child = new EventEmitter();
@@ -618,6 +648,114 @@ try {
     process.argv = argv;
 }
 
+// A launch that cannot spawn must not leave an isolated clone behind.
+const leakRepo = mkdtempSync(join(tmpdir(), "pi-delegate-leak-"));
+try {
+    const git = (...args) => execFileSync("git", args, { cwd: leakRepo, encoding: "utf8" });
+    git("init", "-q");
+    git("config", "user.email", "check@example.com");
+    git("config", "user.name", "check");
+    writeFileSync(join(leakRepo, "seed.txt"), "seed\n");
+    git("add", "seed.txt");
+    git("commit", "-q", "-m", "seed");
+    process.argv = [argv[0]];
+    try {
+        await assert.rejects(
+            delegate.execute(
+                "call",
+                { agent: "explore", description: "leak", task: "trace it", isolated: true },
+                undefined,
+                () => {},
+                { ...ctx, cwd: leakRepo },
+            ),
+            /CLI entrypoint/,
+        );
+    } finally {
+        process.argv = argv;
+    }
+    assert.equal(existsSync(join(leakRepo, ".pi", "worktrees")), false, "failed launch left a clone behind");
+} finally {
+    rmSync(leakRepo, { recursive: true, force: true });
+}
+
+// Isolation snapshots the main tree as the user sees it: uncommitted and untracked work, but never .pi/worktrees.
+const snapRepo = mkdtempSync(join(tmpdir(), "pi-delegate-snap-"));
+try {
+    const git = (...args) => execFileSync("git", args, { cwd: snapRepo, encoding: "utf8" });
+    git("init", "-q");
+    git("config", "user.email", "check@example.com");
+    git("config", "user.name", "check");
+    writeFileSync(join(snapRepo, "tracked.txt"), "one\n");
+    git("add", "tracked.txt");
+    git("commit", "-q", "-m", "seed");
+    writeFileSync(join(snapRepo, "tracked.txt"), "two\n");
+    writeFileSync(join(snapRepo, "untracked.txt"), "new\n");
+    mkdirSync(join(snapRepo, ".pi", "worktrees", "junk"), { recursive: true });
+    writeFileSync(join(snapRepo, ".pi", "worktrees", "junk", "secret.txt"), "no\n");
+    const iso = createIsolation(snapRepo, "snap1");
+    try {
+        assert.equal(readFileSync(join(iso.clone, "tracked.txt"), "utf8"), "two\n", "uncommitted edit missing");
+        assert.equal(readFileSync(join(iso.clone, "untracked.txt"), "utf8"), "new\n", "untracked file missing");
+        assert.equal(
+            existsSync(join(iso.clone, ".pi", "worktrees", "junk", "secret.txt")),
+            false,
+            ".pi/worktrees leaked into the snapshot",
+        );
+        // The report stages through a scratch index, so it must not touch the clone's own index.
+        writeFileSync(join(iso.clone, "later.txt"), "x\n");
+        assert.match(isolationSummary(iso), /later\.txt/);
+        assert.match(
+            execFileSync("git", ["status", "--porcelain"], { cwd: iso.clone, encoding: "utf8" }),
+            /^\?\? later\.txt$/m,
+            "isolationSummary staged into the clone's index",
+        );
+    } finally {
+        removeClone(iso);
+    }
+} finally {
+    rmSync(snapRepo, { recursive: true, force: true });
+}
+
+// A real conflict keeps the clone, aborts the rebase, and leaves the main tree untouched.
+const conflictRepo = mkdtempSync(join(tmpdir(), "pi-delegate-conflict-"));
+try {
+    const git = (...args) => execFileSync("git", args, { cwd: conflictRepo, encoding: "utf8" });
+    git("init", "-q");
+    git("config", "user.email", "check@example.com");
+    git("config", "user.name", "check");
+    writeFileSync(join(conflictRepo, "shared.txt"), "base\n");
+    git("add", "shared.txt");
+    git("commit", "-q", "-m", "seed");
+    const iso = createIsolation(conflictRepo, "conflict1");
+    try {
+        writeFileSync(join(iso.clone, "shared.txt"), "delegate\n");
+        execFileSync(
+            "git",
+            ["-c", "user.name=delegate", "-c", "user.email=delegate@localhost", "commit", "-am", "delegate"],
+            { cwd: iso.clone },
+        );
+        writeFileSync(join(conflictRepo, "shared.txt"), "main\n");
+        const result = applyClone(iso);
+        assert.equal(result.kind, "conflict");
+        assert.deepEqual(result.files, ["shared.txt"]);
+        assert.ok(result.snapshot);
+        assert.equal(
+            readFileSync(join(conflictRepo, "shared.txt"), "utf8"),
+            "main\n",
+            "conflict touched the main tree",
+        );
+        assert.equal(
+            execFileSync("git", ["status", "--porcelain"], { cwd: iso.clone, encoding: "utf8" }).trim(),
+            "",
+            "conflict left the clone mid-rebase",
+        );
+    } finally {
+        removeClone(iso);
+    }
+} finally {
+    rmSync(conflictRepo, { recursive: true, force: true });
+}
+
 // A real RPC child populates recent jobs; a second stays live in the two-column observer.
 const fakeCliDir = mkdtempSync(join(tmpdir(), "pi-delegate-fake-cli-"));
 const fakeCli = join(fakeCliDir, "pi.mjs");
@@ -627,6 +765,7 @@ writeFileSync(
 import { appendFileSync, existsSync } from "node:fs";
 const COMMANDS_LOG = '${join(fakeCliDir, "commands.log")}';
 let stage = 0;
+let promptMessage = "";
 const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
 process.stdin.on("data", (data) => {
     for (const line of data.toString().trim().split("\\n")) {
@@ -634,6 +773,7 @@ process.stdin.on("data", (data) => {
         if (command.type === "get_state") {
             send({ type: "response", command: "get_state", id: command.id, success: true, data: { messageCount: existsSync("/tmp/pi-delegate-fake-empty") ? 0 : 5 } });
         } else if (command.type === "prompt") {
+            promptMessage = command.message;
             send({ type: "response", command: "prompt", id: command.id, success: true });
             send({ type: "message_end", message: { role: "user", content: [{ type: "text", text: command.message }], timestamp: Date.now() } });
             if (command.message.startsWith("revive")) {
@@ -660,6 +800,12 @@ process.stdin.on("data", (data) => {
             if (stage === 2) send({ type: "message_end", message: { role: "assistant", usage: { totalTokens: 37000 }, content: [{ type: "text", text: "## Done\\n\\n| Path | Count |\\n| --- | ---: |\\n| a.ts | 2 |" }] } });
             send({ type: "response", command: "steer", id: command.id, success: true });
             if (stage === 2) send({ type: "agent_settled" });
+        } else if (command.type === "abort") {
+            // A slow exit is the window in which a revive that does not wait would overlap this child.
+            setTimeout(() => {
+                send({ type: "response", command: "abort", id: command.id, success: true });
+                send({ type: "agent_settled", aborted: true });
+            }, promptMessage === "close during revive" ? 300 : 0);
         }
     }
 });
@@ -1019,6 +1165,10 @@ try {
         listed.details.jobs.some((job) => job.id === second.details.id && job.agent === "explore"),
         "running job missing from list details",
     );
+    assert.ok(
+        listed.details.jobs.every((job) => job.activity.length === 0),
+        "delegate_list copied activity history into its result",
+    );
     // The list shows finished jobs too, each with its terminal status.
     assert.ok(
         listed.details.jobs.some((job) => job.id === first.details.id && job.status === "done"),
@@ -1114,6 +1264,7 @@ try {
     let launchTool;
     let steerTool;
     let cancelTool;
+    let listTool;
     let recoverInspect;
     let interruptedNotice;
     extension({
@@ -1126,6 +1277,7 @@ try {
             if (tool.name === "delegate") launchTool = tool;
             else if (tool.name === "delegate_steer") steerTool = tool;
             else if (tool.name === "delegate_cancel") cancelTool = tool;
+            else if (tool.name === "delegate_list") listTool = tool;
         },
         registerMessageRenderer() {},
         sendMessage: (message) => (interruptedNotice = message),
@@ -1262,6 +1414,34 @@ try {
     phantomView.handleInput("\x1b");
     await openingPhantom;
     tui.terminal.rows = 24;
+    // A swap without an explicit level leaves the level to pi, so the display shows the bare model.
+    const swapTarget = await launchTool.execute(
+        "call",
+        { agent: "explore", description: "level-less swap", task: "trace it" },
+        undefined,
+        () => {},
+        { ...ctx, mode: "tui", hasUI: true, ui },
+    );
+    await steerTool.execute(
+        "call",
+        { id: swapTarget.details.id, message: "swap without level", model: "anthropic/flash" },
+        undefined,
+        () => {},
+        { ...ctx, mode: "tui", hasUI: true, ui },
+    );
+    const listedSwap = await listTool.execute();
+    assert.equal(
+        listedSwap.details.jobs.find((job) => job.id === swapTarget.details.id).model,
+        "anthropic/flash",
+        "a level-less swap invented a thinking suffix",
+    );
+    assert.match(readFileSync(join(fakeCliDir, "commands.log"), "utf8"), /set_model anthropic flash\n$/);
+    await cancelTool.execute("call", { id: swapTarget.details.id }, undefined, () => {}, {
+        ...ctx,
+        mode: "tui",
+        hasUI: true,
+        ui,
+    });
     // Reviving a recreated (empty) pinned transcript must fail instead of prompting into a blank session.
     const orphan2 = {
         ...jobEntry("orphan2", "running"),
@@ -1373,6 +1553,83 @@ try {
     const revivedReport = await Promise.race([deliveredRevived, timeout]);
     assert.equal(revivedReport.details.id, cancelled.details.id);
     assert.equal(revivedReport.details.error, undefined);
+    // Cancel then steer at once: the revive waits for the cancelled child to exit instead of double-spawning its session.
+    const raceCliDir = mkdtempSync(join(tmpdir(), "pi-delegate-race-"));
+    try {
+        const raceCli = join(raceCliDir, "pi.mjs");
+        writeFileSync(
+            raceCli,
+            `
+import { appendFileSync } from "node:fs";
+const LOG = '${join(raceCliDir, "spawn.log")}';
+const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+appendFileSync(LOG, "start " + process.pid + "\\n");
+process.on("exit", () => appendFileSync(LOG, "exit " + process.pid + "\\n"));
+process.stdin.on("data", (data) => {
+    for (const line of data.toString().trim().split("\\n")) {
+        const command = JSON.parse(line);
+        if (command.type === "get_state") {
+            send({ type: "response", command: "get_state", id: command.id, success: true, data: { messageCount: 5 } });
+        } else if (command.type === "prompt") {
+            send({ type: "response", command: "prompt", id: command.id, success: true });
+            if (command.message.startsWith("revive")) {
+                send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Revived and finished." }], timestamp: Date.now() } });
+                send({ type: "agent_settled" });
+            }
+        } else if (command.type === "abort") {
+            // A slow exit is the window in which a revive that does not wait would overlap this child.
+            setTimeout(() => {
+                send({ type: "response", command: "abort", id: command.id, success: true });
+                send({ type: "agent_settled", aborted: true });
+            }, 300);
+        }
+    }
+});
+`,
+        );
+        const raceLog = () => {
+            try {
+                return readFileSync(join(raceCliDir, "spawn.log"), "utf8").trim().split("\n").filter(Boolean);
+            } catch {
+                return [];
+            }
+        };
+        process.argv = [argv[0], raceCli];
+        try {
+            const raced = await delegate.execute(
+                "call",
+                { agent: "explore", description: "cancel race", task: "trace it" },
+                undefined,
+                () => {},
+                tuiCtx,
+            );
+            await cancel.execute("call", { id: raced.details.id }, undefined, () => {}, tuiCtx);
+            const racedSteer = await steer.execute(
+                "call",
+                { id: raced.details.id, message: "revive: finish it" },
+                undefined,
+                () => {},
+                tuiCtx,
+            );
+            assert.equal(racedSteer.details.id, raced.details.id);
+            assert.match(racedSteer.content[0].text, /^Revived delegate/);
+        } finally {
+            process.argv = argv;
+        }
+        let events = [];
+        for (let i = 0; i < 300; i++) {
+            events = raceLog();
+            if (events.length >= 4) break;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.deepEqual(
+            events.map((event) => event.split(" ")[0]),
+            ["start", "exit", "start", "exit"],
+            "revive spawned before the cancelled child exited",
+        );
+    } finally {
+        rmSync(raceCliDir, { recursive: true, force: true });
+    }
     // A clone belongs to no single job: any id that ran in it can apply it once, and only one job runs in it at a time.
     const applyTool = registered.find((tool) => tool.name === "delegate_apply");
     const isoRepo = mkdtempSync(join(tmpdir(), "pi-delegate-iso-"));
@@ -1468,6 +1725,24 @@ try {
             savedEntries.filter((entry) => entry.data?.id === discardedOwner.details.id).at(-1).data.cloneClosed,
             true,
         );
+        // A parallel discard can close the clone while a revive waits for the cancelled child; re-check before spawning.
+        const closing = await delegate.execute(
+            "call",
+            { agent: "explore", description: "close during revive", task: "close during revive", isolated: true },
+            undefined,
+            () => {},
+            isoCtx,
+        );
+        await cancel.execute("call", { id: closing.details.id }, undefined, () => {}, isoCtx);
+        const reviving = steer.execute(
+            "call",
+            { id: closing.details.id, message: "revive: finish it" },
+            undefined,
+            () => {},
+            isoCtx,
+        );
+        await discardTool.execute("call", { id: closing.details.id }, undefined, () => {});
+        await assert.rejects(reviving, /already applied or discarded/);
         assert.equal("discard" in applyTool.parameters.properties, false, "delegate_apply still takes discard");
     } finally {
         rmSync(isoRepo, { recursive: true, force: true });

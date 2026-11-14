@@ -57,12 +57,22 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         const stale = history.findIndex((item) => item.id === id);
         if (stale >= 0) history.splice(stale, 1);
     };
+    const commit = (entry: InspectJob) => {
+        drop(entry.id);
+        history.unshift(entry);
+        append(JOB_ENTRY, snapshot(entry));
+        notify();
+    };
     const find = (id: string) => running.get(id) ?? history.find((item) => item.id === id);
+    const plain = (job: InspectJob) => {
+        const { controller, steer, swapModel, ...rest } = job as InspectJob & Partial<DelegateJob>;
+        return rest;
+    };
     /** The serializable form of a job: runtime handles stay out. */
     const snapshot = (job: InspectJob): InspectJob => {
-        const { controller, steer, swapModel, ...plain } = job as InspectJob & Partial<DelegateJob>;
+        const rest = plain(job);
         // Copy activity: the live job keeps appending to its own array after the launch snapshot.
-        return { ...plain, activity: [...plain.activity] };
+        return { ...rest, activity: [...rest.activity] };
     };
     const addActivity = (job: DelegateJob, activity: ChildActivity) => {
         const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
@@ -84,6 +94,8 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         live: (): DelegateJob[] => [...running.values()],
         find,
         snapshot,
+        /** A row for delegate_list: the snapshot without the activity history a list result never renders. */
+        summary: (job: InspectJob): InspectJob => ({ ...plain(job), activity: [] }),
         /** A job by id; the common "unknown delegate job" failure lives here so every tool phrases it alike. */
         findOrThrow: (id: string): InspectJob => {
             const job = find(id);
@@ -110,20 +122,11 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             running.delete(job.id);
             job.status = status;
             if (detail) addActivity(job, { kind: "status", text: detail });
-            const entry: InspectJob = { ...snapshot(job), endedAt: Date.now() };
-            drop(entry.id);
-            history.unshift(entry);
-            append(JOB_ENTRY, entry);
-            notify();
+            commit({ ...snapshot(job), endedAt: Date.now() });
             return true;
         },
         /** Appends a corrected entry for a finished job changed after completion (isolation applied, discarded, or re-based). */
-        save: (job: InspectJob) => {
-            drop(job.id);
-            history.unshift(job);
-            append(JOB_ENTRY, snapshot(job));
-            notify();
-        },
+        save: (job: InspectJob) => commit(job),
         /** Rebuilds history from the branch and returns the jobs it marked interrupted. */
         restore: (branch: readonly unknown[]): InspectJob[] => {
             history.length = 0;

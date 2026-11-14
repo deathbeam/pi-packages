@@ -2,11 +2,12 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, renderDiff } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import {
     appendOutput,
+    capDiff,
     capLines,
     COLLAPSED_OUTPUT_LINES,
     type DelegateDetails,
@@ -26,6 +27,7 @@ import {
     SPINNER_INTERVAL_MS,
     statusText,
     tally,
+    textParts,
     toolLayout,
     widgetJobs,
 } from "./format.ts";
@@ -49,6 +51,8 @@ type SteerDetails = Pick<
     message: string;
     elapsedMs: number;
 };
+
+type RenderContext = { expanded: boolean; isError: boolean; keyHint: KeybindingHints["keyHint"] };
 
 const DELEGATION_TOOLS = new Set([
     "delegate",
@@ -75,13 +79,13 @@ function jobId(value: unknown): string {
         .trim()
         .replace(/^job\s+/i, "");
 }
-/** Strict models inject literal "null" for optional params they omit; drop it before reading any. */
-function dropNulls<T extends Record<string, unknown>>(raw: T): T {
-    return Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== null && value !== "null")) as T;
+/** Strict models inject literal "null" for optional params they omit; treat it as absent. */
+function optional<T>(value: T): T | undefined {
+    return (value as unknown) === null || value === "null" ? undefined : value;
 }
 
-function resultText(result: { content: readonly { type: string; text?: string }[] }): string {
-    return result.content.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("\n");
+function resultText(result: { content: unknown }): string {
+    return textParts(result.content).join("\n");
 }
 
 /** One resolution path for launches and swaps; the error names the requested model. */
@@ -103,6 +107,23 @@ function jobRow(theme: Theme, job: InspectJob, now: number): string {
 
 export default function (pi: ExtensionAPI) {
     const store = createJobStore(pi.appendEntry);
+    // A cancelled child can outlive its job row; a revive waits for it so two children never share a pinned session.
+    const exiting = new Map<string, Promise<void>>();
+
+    /** Waits for a cancelled child to exit; a child that never closes must not block steering forever. */
+    const waitForExit = async (id: string) => {
+        const closed = exiting.get(id);
+        if (!closed) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<"timeout">((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), 6_000);
+            timer.unref();
+        });
+        const result = await Promise.race([closed.then(() => "closed" as const), timeout]);
+        clearTimeout(timer);
+        if (result === "timeout") throw new Error(`Delegate job "${id}" is still exiting; call delegate_steer again.`);
+    };
+
     let ticker: ReturnType<typeof setInterval> | undefined;
     // Prompts are read once; drift happens one quick search at a time, so count it and nudge at 5, 10, 20, ...
     let directCalls = 0;
@@ -112,6 +133,24 @@ export default function (pi: ExtensionAPI) {
         const id = jobId(rawId);
         const job = store.find(id);
         return job ? jobIdentity(theme, job) : theme.fg("muted", id || "…");
+    };
+
+    /** The renderCall shared by every delegate tool: identity plus an optional payload. */
+    const callRenderer =
+        (toolName: string, identity: (args: any, theme: Theme) => string, payload: (args: any) => string = () => "") =>
+        (args: any, theme: Theme, context: RenderContext) =>
+            toolLayout(toolName, identity(args, theme), payload(args), theme, context.expanded, context.keyHint);
+
+    /** The job-id tools all identify the job the same way. */
+    const idCall = (toolName: string, payload: (args: any) => string = () => "") =>
+        callRenderer(toolName, (args, theme) => jobTarget(args?.id, theme), payload);
+
+    /** The mark is the call's outcome, not the job's status; a one-line header covers the simple tools. */
+    const headerResult = (tail: string) => (result: any, _options: any, theme: Theme, context: RenderContext) => {
+        const details = result.details as { id: string; agent: string } | undefined;
+        const body = resultText(result);
+        if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
+        return new Text(`\n${resultHeader(theme, details, tail)}`, 0, 0);
     };
 
     /** The clone is the unit: every job id that ran in it is only a handle, so state changes reach all of them. */
@@ -227,6 +266,8 @@ export default function (pi: ExtensionAPI) {
         signal: AbortSignal | undefined,
         prompt = task,
     ) => {
+        const entrypoint = process.argv[1];
+        if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const { model, thinking } = mustResolveModel(fields.model, ctx, agent.model);
         const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
             (tool) => !DELEGATION_TOOLS.has(tool),
@@ -277,8 +318,6 @@ export default function (pi: ExtensionAPI) {
         ];
         if (thinking) args.push("--thinking", thinking);
         if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
-        const entrypoint = process.argv[1];
-        if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const cwd = isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd;
         if (isolation)
             args.push(
@@ -301,6 +340,11 @@ export default function (pi: ExtensionAPI) {
         );
         job.steer = run.steer;
         job.swapModel = run.swapModel;
+        const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+        exiting.set(job.id, closed);
+        void closed.then(() => {
+            if (exiting.get(job.id) === closed) exiting.delete(job.id);
+        });
         if (!details.background) {
             try {
                 const output = await run.done;
@@ -437,27 +481,27 @@ export default function (pi: ExtensionAPI) {
         name: "delegate",
         label: "Delegate",
         description: [
-            "Start a delegate: a background run of one of the agents below on one focused task. Returns a job id immediately; the report arrives later as a follow-up message.",
+            "Start a delegate: a background run of one of the agents below on one focused task. Returns a job id immediately; its report arrives as a follow-up message.",
             "",
             "Available agents:",
             ...agentList,
             "",
-            "A delegate gets the project instructions but not this conversation: it cannot see the user's request, the files you read, or your decisions. Write `task` as a self-contained brief: the goal and why, what you already know (paths, symbols, errors), scope and constraints, whether to edit files or only report, and what to return (format, length, path:line evidence).",
+            "A delegate gets the project instructions but not this conversation. Write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence).",
             "",
-            "With isolated: true, the delegate runs in an isolated git clone at .pi/worktrees/<job id>, starting from the main tree exactly as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
+            "With isolated: true, the delegate runs in a git clone at .pi/worktrees/<job id>, starting from the main tree as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
             "",
-            "To run another delegate in an isolated job's clone, pass that job id as `clone`. delegate_apply or delegate_discard with any job id from that clone acts on the whole clone, and only one job can run in a clone at a time.",
+            "Pass an isolated job id as `clone` to run another delegate in its clone. delegate_apply or delegate_discard with any job id from that clone acts on the whole clone, and only one job runs in a clone at a time.",
             "",
             "To follow up on or redirect an existing job, see delegate_steer.",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
         promptGuidelines: [
-            "You are the orchestrator, and delegating is your default: plan, split the work, brief delegates, and integrate their reports. Delegate on your own initiative. Your context is the scarce resource: everything you read stays in it, is re-sent with every later request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
-            "Delegate exploration, research, implementation beyond a small edit, build/test/debug loops, and reviews. Work directly only for reading one known file or the lines you are about to edit, one targeted search, a small edit (about 30 lines in one file), a quick verification (one test run or one cited line), or a command the user asked you to run. Shell one-liners and scripts that search or read code count as exploration, not quick commands.",
+            "You are the orchestrator: plan, split the work, brief delegates, and integrate their reports. Delegate on your own initiative. Your context is the scarce resource: everything you read stays in it, is re-sent with every request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
+            "Delegate exploration, research, implementation beyond a small edit, build/test/debug loops, and reviews. Work directly only for reading one known file or the lines you are about to edit, one targeted search, a small edit (about 30 lines in one file), a quick verification (one test run or one cited line), or a command the user asked you to run. Shell one-liners and scripts that search or read code count as exploration.",
             "Your failure mode is drifting into doing the work yourself, one quick search at a time. Decide what to delegate before your first exploratory call; if one targeted search does not settle it, delegate the rest.",
-            "Start every independent delegate before waiting on any, ideally in one message. Trust reports instead of repeating their searches; check only what you act on. If a report falls short, delegate a follow-up that names the gap instead of redoing the work yourself.",
-            "While delegates run, stay outside their scopes. When a report is the next dependency, end your turn with a brief waiting status. Completion will wake you.",
+            "Start every independent delegate before waiting on any, ideally in one message. Trust reports instead of repeating their searches; check only what you act on. If a report falls short, delegate a follow-up that names the gap.",
+            "While delegates run, stay outside their scopes. When a report is the next dependency, end your turn with a brief waiting status; completion will wake you.",
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
@@ -482,10 +526,11 @@ export default function (pi: ExtensionAPI) {
             ),
         }),
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-            const params = dropNulls(rawParams);
-            const { agent: agentName, description, task, model, isolated } = params;
+            const { agent: agentName, description, task } = rawParams;
             if (!agentName || !description || !task) throw new Error("agent, description and task are required.");
-            const cloneId = jobId(params.clone);
+            const model = optional(rawParams.model);
+            const isolated = optional(rawParams.isolated);
+            const cloneId = jobId(optional(rawParams.clone));
             if (cloneId && isolated === false) throw new Error("clone always runs isolated; omit isolated: false.");
             const clone = cloneId ? clonedJob(cloneId).isolation : undefined;
             const agent = agentByName(ctx.cwd, agentName);
@@ -493,24 +538,21 @@ export default function (pi: ExtensionAPI) {
             return runDelegate(ctx, agent, undefined, { description, model, isolated: effective, clone }, task, signal);
         },
 
-        renderCall(args, theme, context) {
-            const agent = argText(args?.agent).trim();
-            const description = argText(args?.description).trim();
-            const identity = [
-                agent ? theme.fg("toolTitle", theme.bold(agent)) : "",
-                description ? theme.fg("accent", description) : "",
-            ]
-                .filter(Boolean)
-                .join(" ");
-            return toolLayout(
-                "delegate",
-                identity || theme.fg("muted", "…"),
-                argText(args?.task),
-                theme,
-                context.expanded,
-                context.keyHint,
-            );
-        },
+        renderCall: callRenderer(
+            "delegate",
+            (args, theme) => {
+                const agent = argText(args?.agent).trim();
+                const description = argText(args?.description).trim();
+                const identity = [
+                    agent ? theme.fg("toolTitle", theme.bold(agent)) : "",
+                    description ? theme.fg("accent", description) : "",
+                ]
+                    .filter(Boolean)
+                    .join(" ");
+                return identity || theme.fg("muted", "…");
+            },
+            (args) => argText(args?.task),
+        ),
 
         renderResult(result, { expanded }, theme, context) {
             const details = result.details as DelegateDetails | undefined;
@@ -548,15 +590,15 @@ export default function (pi: ExtensionAPI) {
             ),
         }),
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-            const params = dropNulls(rawParams);
-            const id = jobId(params.id);
+            const id = jobId(rawParams.id);
+            const model = optional(rawParams.model);
             const running = store.liveJob(id);
             if (running) {
                 // A live job without steer would fall into the revive path and double-spawn its pinned session.
                 if (!running.steer) throw new Error(`No steerable delegate job "${id}".`);
                 try {
-                    if (params.model) await swapModel(running, params.model, ctx);
-                    await running.steer(params.message);
+                    if (model) await swapModel(running, model, ctx);
+                    await running.steer(rawParams.message);
                 } catch (error) {
                     // The swap or steer await can outlast the job (a model ack waits up to 30s); raw child errors are cryptic.
                     if (!store.liveJob(id))
@@ -569,7 +611,7 @@ export default function (pi: ExtensionAPI) {
                     id: running.id,
                     agent: running.agent,
                     description: running.description,
-                    message: params.message,
+                    message: rawParams.message,
                     toolCalls: running.toolCalls,
                     contextTokens: running.contextTokens,
                     contextWindow: running.contextWindow,
@@ -585,8 +627,9 @@ export default function (pi: ExtensionAPI) {
                     details,
                 };
             }
+            await waitForExit(id);
             const prior = store.findOrThrow(id);
-            // An applied or discarded clone cannot be continued; a revive would run in the main tree.
+            // A parallel apply/discard can close the clone while we wait; re-check before spawning in the main tree.
             if (prior.cloneClosed)
                 throw new Error(
                     `The isolated clone of delegate job "${id}" was already applied or discarded; delegate_steer cannot continue it. Start a fresh delegate with a condensed brief instead.`,
@@ -598,25 +641,16 @@ export default function (pi: ExtensionAPI) {
                 prior,
                 {
                     description: prior.description,
-                    model: params.model ?? prior.model,
+                    model: model ?? prior.model,
                     isolated: Boolean(prior.isolation),
                 },
                 prior.task,
                 signal,
-                params.message,
+                rawParams.message,
             );
         },
 
-        renderCall(args, theme, context) {
-            return toolLayout(
-                "delegate_steer",
-                jobTarget(args?.id, theme),
-                argText(args?.message),
-                theme,
-                context.expanded,
-                context.keyHint,
-            );
-        },
+        renderCall: idCall("delegate_steer", (args) => argText(args?.message)),
 
         renderResult(result, { expanded }, theme, context) {
             const details = result.details as SteerDetails | DelegateDetails | undefined;
@@ -657,25 +691,9 @@ export default function (pi: ExtensionAPI) {
                 details: { id: job.id, agent: job.agent },
             };
         },
+        renderCall: idCall("delegate_cancel"),
 
-        renderCall(args, theme, context) {
-            return toolLayout(
-                "delegate_cancel",
-                jobTarget(args?.id, theme),
-                "",
-                theme,
-                context.expanded,
-                context.keyHint,
-            );
-        },
-
-        renderResult(result, _options, theme, context) {
-            const details = result.details as { id: string; agent: string } | undefined;
-            const body = resultText(result);
-            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            // The mark is the call's outcome (cancellation requested), not the job's cancelled status.
-            return new Text(`\n${resultHeader(theme, details, "cancellation requested")}`, 0, 0);
-        },
+        renderResult: headerResult("cancellation requested"),
     });
 
     pi.registerTool({
@@ -688,8 +706,7 @@ export default function (pi: ExtensionAPI) {
             id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),
         }),
         async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
-            const params = dropNulls(rawParams);
-            const id = jobId(params.id);
+            const id = jobId(rawParams.id);
             const { job, isolation } = clonedJob(id);
             requireIdleClone(isolation);
             const result = applyClone(isolation);
@@ -704,6 +721,7 @@ export default function (pi: ExtensionAPI) {
                 );
             }
             const stat = result.kind === "applied" ? `\n${result.stat}` : "";
+            const capped = result.kind === "applied" ? capDiff(result.diff) : { diff: undefined, note: undefined };
             closeClone(isolation);
             return {
                 content: [
@@ -715,23 +733,13 @@ export default function (pi: ExtensionAPI) {
                                 : `Applied the changes of delegate "${job.agent}" (job ${job.id}) to the main tree:${stat}\n(clone removed)`,
                     },
                 ],
-                details: { id: job.id, agent: job.agent, diff: result.kind === "applied" ? result.diff : undefined },
+                details: { id: job.id, agent: job.agent, diff: capped.diff, diffNote: capped.note },
             };
         },
-
-        renderCall(args, theme, context) {
-            return toolLayout(
-                "delegate_apply",
-                jobTarget(args?.id, theme),
-                "",
-                theme,
-                context.expanded,
-                context.keyHint,
-            );
-        },
-
+        renderCall: idCall("delegate_apply"),
         renderResult(result, { expanded }, theme, context) {
-            const details = result.details as { id: string; agent: string; diff?: string } | undefined;
+            const details = result.details as
+                { id: string; agent: string; diff?: string; diffNote?: string } | undefined;
             const body = resultText(result);
             if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
             const header = `\n${resultHeader(theme, details, "changes applied")}`;
@@ -740,6 +748,8 @@ export default function (pi: ExtensionAPI) {
             // Collapsed shows the head like the other delegate previews; expanded shows the full colored diff.
             const { shown, hidden } = capLines(diff.split("\n"), expanded ? Infinity : COLLAPSED_OUTPUT_LINES);
             if (hidden) shown.push(moreLines(theme, hidden, context.keyHint));
+            // The truncation note is plain text: piDiff would otherwise number it as a context line.
+            if (details.diffNote) shown.push(theme.fg("muted", details.diffNote));
             const container = new Container();
             container.addChild(new Text(header, 0, 0));
             container.addChild(new Spacer(1));
@@ -758,8 +768,7 @@ export default function (pi: ExtensionAPI) {
             id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),
         }),
         async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
-            const params = dropNulls(rawParams);
-            const id = jobId(params.id);
+            const id = jobId(rawParams.id);
             const { job, isolation } = clonedJob(id);
             requireIdleClone(isolation);
             closeClone(isolation);
@@ -773,24 +782,8 @@ export default function (pi: ExtensionAPI) {
                 details: { id: job.id, agent: job.agent, discarded: true },
             };
         },
-
-        renderCall(args, theme, context) {
-            return toolLayout(
-                "delegate_discard",
-                jobTarget(args?.id, theme),
-                "",
-                theme,
-                context.expanded,
-                context.keyHint,
-            );
-        },
-
-        renderResult(result, _options, theme, context) {
-            const details = result.details as { id: string; agent: string; discarded?: boolean } | undefined;
-            const body = resultText(result);
-            if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-            return new Text(`\n${resultHeader(theme, details, "clone discarded")}`, 0, 0);
-        },
+        renderCall: idCall("delegate_discard"),
+        renderResult: headerResult("clone discarded"),
     });
 
     pi.registerTool({
@@ -816,7 +809,8 @@ export default function (pi: ExtensionAPI) {
                 content: [
                     { type: "text", text: `${jobs.length} delegates (${running} running):\n${lines.join("\n")}` },
                 ],
-                details: { jobs: jobs.map(store.snapshot) },
+                // Rows render from the fields; the activity history stays in the store, not in every list result.
+                details: { jobs: jobs.map(store.summary) },
             };
         },
         renderResult(result, _options, theme, context) {

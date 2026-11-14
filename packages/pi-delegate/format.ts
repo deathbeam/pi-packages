@@ -65,7 +65,6 @@ export const STATUS_COLORS = {
 const WIDGET_MAX_JOBS = 5;
 export const COLLAPSED_OUTPUT_LINES = 10;
 const MAX_OUTPUT_BYTES = 50 * 1024;
-const EXPANDED_PAD = "  ";
 
 /** Terminal statuses have static icons; running jobs use statusIcon's clock-driven frame. */
 function statusIcon(status: JobStatus, now = Date.now()): string {
@@ -130,13 +129,9 @@ export function elapsedMs(job: { startedAt: number; endedAt?: number }, now = Da
     return (job.endedAt ?? now) - job.startedAt;
 }
 
-/** Summed wall-clock across jobs; running jobs tick from `now`. Parallel jobs each count their full span. */
-export function totalElapsedMs(jobs: { startedAt: number; endedAt?: number }[], now = Date.now()): number {
-    return jobs.reduce((sum, job) => sum + elapsedMs(job, now), 0);
-}
-
 export function tally(running: number, all: { startedAt: number; endedAt?: number }[], now = Date.now()): string {
-    return `${running} running · ${all.length} total · ${formatDuration(totalElapsedMs(all, now))}`;
+    const total = all.reduce((sum, job) => sum + elapsedMs(job, now), 0);
+    return `${running} running · ${all.length} total · ${formatDuration(total)}`;
 }
 
 export function toolCallDetail(toolName: string, args: unknown): string {
@@ -161,12 +156,6 @@ export function toolCallDetail(toolName: string, args: unknown): string {
             return "";
     }
 }
-
-/** Expanded launch metadata; the call renderer shows the task. */
-export function launchDetails(info: { model?: string; tools: string[] }): string[] {
-    return [`${EXPANDED_PAD}Model: ${info.model ?? "default"}`, `${EXPANDED_PAD}Tools: ${formatTools(info.tools)}`];
-}
-
 /** Caps a preview at `maxLines`; callers report the hidden count their own way. */
 export function capLines<T>(lines: T[], maxLines: number): { shown: T[]; hidden: number } {
     if (lines.length <= maxLines) return { shown: lines, hidden: 0 };
@@ -190,14 +179,26 @@ export function limitOutput(text: string, maxBytes = MAX_OUTPUT_BYTES): string {
     return `${buffer.subarray(0, end).toString("utf8")}\n\n[Output truncated: ${buffer.length - end} bytes omitted.]`;
 }
 
-export function resultPreview(result: unknown, maxChars = 120): string | undefined {
-    const content = (result as { content?: unknown })?.content;
-    if (!Array.isArray(content)) return undefined;
-    const text = content
-        .map((part) => (part as { type?: string; text?: string }) ?? {})
+/** Caps a diff for storage, keeping the truncation note out of the patch so diff renderers never parse it. */
+export function capDiff(text: string): { diff: string; note?: string } {
+    const capped = limitOutput(text);
+    if (capped === text) return { diff: text };
+    const at = capped.lastIndexOf("\n\n[Output truncated: ");
+    return { diff: capped.slice(0, at), note: capped.slice(at + 2) };
+}
+
+/** The text parts of a message or tool result's content, in order. */
+export function textParts(content: unknown): string[] {
+    if (typeof content === "string") return [content];
+    if (!Array.isArray(content)) return [];
+    return content
+        .map((part) => (part && typeof part === "object" ? (part as { type?: string; text?: string }) : {}))
         .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text as string)
-        .join("\n");
+        .map((part) => part.text!);
+}
+
+export function resultPreview(result: unknown, maxChars = 120): string | undefined {
+    const text = textParts((result as { content?: unknown })?.content).join("\n");
     const line = text
         .split("\n")
         .find((candidate) => candidate.trim())
@@ -224,7 +225,14 @@ export function piDiff(unified: string): string {
     let hunkSeen = false;
     let oldNum = 0;
     let newNum = 0;
-    let width = 1;
+    const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+    // One width for the whole diff, so hunks and files line up.
+    const width = Math.max(
+        1,
+        ...[...unified.matchAll(new RegExp(HUNK, "gm"))].map(
+            ([, os, oc, ns, nc]) => String(Math.max(+os! + (+oc! || 1), +ns! + (+nc! || 1)) - 1).length,
+        ),
+    );
     const header = () => {
         if (!pathShown) {
             out.push(path);
@@ -239,16 +247,9 @@ export function piDiff(unified: string): string {
             hunkSeen = false;
             continue;
         }
-        const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+        const hunk = HUNK.exec(line);
         if (hunk) {
-            const [, oldStart, oldCount, newStart, newCount] = hunk;
-            // The width comes free from the hunk header's last line number on each side.
-            width = String(
-                Math.max(
-                    Number(oldStart) + (Number(oldCount) || 1) - 1,
-                    Number(newStart) + (Number(newCount) || 1) - 1,
-                ),
-            ).length;
+            const [, oldStart, , newStart] = hunk;
             header();
             if (hunkSeen) out.push(` ${"".padStart(width, " ")} ...`);
             hunkSeen = true;
@@ -383,7 +384,11 @@ export function launchResult(
     // The call body already carries the task; only the launch metadata is new here.
     if (expanded)
         container.addChild(
-            new Text(theme.fg("muted", launchDetails({ model: details.model, tools: details.tools }).join("\n")), 0, 0),
+            new Text(
+                theme.fg("muted", `  Model: ${details.model ?? "default"}\n  Tools: ${formatTools(details.tools)}`),
+                0,
+                0,
+            ),
         );
     // Background results arrive as their own message; headless runs still show the output here.
     if (!details.background && body) appendOutput(container, body, expanded, theme, keyHint);

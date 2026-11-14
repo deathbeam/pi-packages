@@ -44,7 +44,7 @@ Explore the codebase and report relevant paths.
 ```
 
 - `name` is required and must be unique
-- `descripion` is required
+- `description` is required
 - `tools` is optional, a comma-separated list of tool names. Defaults to the session tools.
 - `model` is optional, a tier name or `provider/model[:thinking]`. Defaults to the session model.
 - `isolated` is optional, defaults to `false`. See [Isolation](#isolation).

@@ -80,7 +80,7 @@ function loadAgents(dir: string): AgentFile[] {
     return agents;
 }
 
-export function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[] {
+function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[] {
     const dirs = [BUNDLED_AGENT_DIR, DEFAULT_AGENT_DIR, ...stringList(configuredDirs)].map((dir) =>
         expandPath(dir, cwd),
     );
