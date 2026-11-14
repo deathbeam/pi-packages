@@ -20,16 +20,13 @@ export type DelegateReport = {
     id: string;
     agent: string;
     description: string;
-    model?: string;
     toolCalls: number;
     contextTokens?: number;
     contextWindow?: number;
     elapsedMs: number;
     output?: string;
     error?: string;
-    status: JobStatus;
     isolation?: IsolationState;
-    cloneClosed?: boolean;
 };
 
 /** The isolation state to show for a job: pending means its clone still holds unapplied work. */
@@ -37,14 +34,12 @@ export type IsolationMark = "isolated" | "pending";
 
 type IsolationStateFields = {
     isolation?: unknown;
-    cloneClosed?: boolean;
     status?: string;
 };
 
-export type DelegateDetails = Pick<
-    DelegateJob,
-    "id" | "agent" | "description" | "task" | "model" | "tools" | "status" | "isolation" | "cloneClosed"
-> & { background: boolean };
+export type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "model" | "tools" | "isolation"> & {
+    background: boolean;
+};
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const SPINNER_INTERVAL_MS = 100;
@@ -80,7 +75,7 @@ export function statusText(theme: Theme, status: JobStatus, now = Date.now()): s
 /** Derives the mark from a job: an isolation with no clone left, or a still-running one, is not pending. */
 export function isolationMarkOf(job: IsolationStateFields): IsolationMark | undefined {
     if (!job.isolation) return undefined;
-    return job.cloneClosed || job.status === "running" ? "isolated" : "pending";
+    return job.status === "running" ? "isolated" : "pending";
 }
 
 /** `⎇`, warning-colored while the clone's work is still unapplied. */
@@ -132,6 +127,12 @@ export function elapsedMs(job: { startedAt: number; endedAt?: number }, now = Da
 export function tally(running: number, all: { startedAt: number; endedAt?: number }[], now = Date.now()): string {
     const total = all.reduce((sum, job) => sum + elapsedMs(job, now), 0);
     return `${running} running · ${all.length} total · ${formatDuration(total)}`;
+}
+
+/** A tool call's call row and, once it arrives, its result preview row; shared by the widget and the inspector. */
+export function toolLines(theme: Theme, name: string, detail: string, result?: string, isError?: boolean): string[] {
+    const call = `${theme.fg("toolTitle", theme.bold(name))}${detail ? ` ${theme.fg("accent", detail)}` : ""}`;
+    return result ? [call, `${theme.fg("muted", "↳")} ${theme.fg(isError ? "error" : "toolOutput", result)}`] : [call];
 }
 
 export function toolCallDetail(toolName: string, args: unknown): string {
@@ -187,7 +188,6 @@ export function capDiff(text: string): { diff: string; note?: string } {
     return { diff: capped.slice(0, at), note: capped.slice(at + 2) };
 }
 
-/** The text parts of a message or tool result's content, in order. */
 export function textParts(content: unknown): string[] {
     if (typeof content === "string") return [content];
     if (!Array.isArray(content)) return [];
@@ -212,12 +212,7 @@ export function reviveHint(id: string): string {
     return `To continue this job, call delegate_steer with id ${id} and a message.`;
 }
 
-/**
- * Converts a git unified diff into pi's own diff format (`+12 content` / `-12 content` / ` 12 content`,
- * prefix, padded line number, space, content), which is what pi's renderDiff colors; a raw unified
- * diff renders as flat context. Line numbers come from the @@ headers (- uses the old side, + and
- * context the new side); the file path heads each file and `...` separates its hunks.
- */
+/** Converts a git unified diff into pi's `+12 content` format, which renderDiff colors; a raw unified diff renders flat. */
 export function piDiff(unified: string): string {
     const out: string[] = [];
     let path = "";
@@ -280,10 +275,9 @@ export function reportText(report: DelegateReport): string {
     if (report.error) return `${head} failed: ${report.error}\n${reviveHint(report.id)}`;
     const output = (report.output ?? "").trim();
     // The apply hint is for the model only: the transcript renders `output`, so users never see it.
-    const hint =
-        report.isolation && !report.cloneClosed
-            ? `\n\nCall delegate_apply with job ${report.id} to land its changes, or delegate_discard to drop them. Call one, not both: a successful apply removes the clone.`
-            : "";
+    const hint = report.isolation
+        ? `\n\nCall delegate_apply with job ${report.id} to land its changes, or delegate_discard to drop them. Call one, not both: a successful apply removes the clone.`
+        : "";
     return `${head} finished.${output ? `\n\n${output}` : ""}${hint}`;
 }
 

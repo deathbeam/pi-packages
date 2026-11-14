@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { join } from "node:path";
-import { initTheme, renderDiff } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, initTheme, renderDiff } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
     capDiff,
@@ -25,9 +25,10 @@ import {
     usageStats,
     widgetJobs,
 } from "./format.ts";
-import { priorActivity, runChild } from "./child.ts";
+import { runChild, sessionMessages } from "./child.ts";
+import { History, Transcript } from "./inspector.ts";
 import { resolveModel } from "./agents.ts";
-import { createJobStore } from "./store.ts";
+import { createJobStore, lastToolCall } from "./store.ts";
 import { applyClone, createIsolation, isolationSummary, removeClone } from "./isolation.ts";
 // Hermetic: configFor and the pinned session dir must not read the host's real agent settings.
 const agentDir = mkdtempSync(join(tmpdir(), "pi-delegate-check-agent-"));
@@ -145,7 +146,7 @@ const jobEntry = (id, status, extra = {}) => ({
     toolCalls: 0,
     startedAt: 1,
     status,
-    activity: [],
+    messages: [],
     ...extra,
 });
 const branch = (jobs) => jobs.map((job) => ({ type: "custom", customType: "delegate-job", data: job }));
@@ -167,6 +168,23 @@ assert.deepEqual(
     restoredIds([{ type: "custom", customType: "other", data: jobEntry("a", "running") }, { type: "message" }]),
     [],
 );
+
+// The widget's last tool row comes straight from the transcript.
+const toolMessages = [
+    { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "src/a.ts" } }] },
+    {
+        role: "toolResult",
+        toolCallId: "t1",
+        toolName: "read",
+        content: [{ type: "text", text: "file loaded\nmore" }],
+        isError: false,
+    },
+];
+assert.deepEqual(lastToolCall({ messages: toolMessages }), {
+    tool: { name: "read", detail: "src/a.ts" },
+    result: { text: "file loaded", isError: false },
+});
+assert.deepEqual(lastToolCall({ messages: [] }), {});
 
 assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "failed", "interrupted", "running"]);
 // One vocabulary: every status renders through statusText; only running spins with the clock.
@@ -314,13 +332,15 @@ fake.stdin.on("data", (chunk) => {
         }
     }
 });
-const activity = [];
+const messages = [];
+const toolCalls = [];
 const run = runChild(fake, "task", undefined, (update) => {
-    if (update.activity) activity.push(update.activity);
+    if (update.message) messages.push(update.message);
+    if (update.toolCalls !== undefined) toolCalls.push(update.toolCalls);
 });
 assert.equal(fake.stdout.readableEncoding, "utf8");
 await assert.rejects(run.steer("steer"), /steer rejected/);
-assert.deepEqual(activity, [], "rejected steering should not appear in activity");
+assert.deepEqual(messages, [], "rejected steering should not add a message");
 fake.stdout.write(
     `${JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "src/a.ts" } })}\n`,
 );
@@ -348,13 +368,20 @@ fake.stdout.write(
 );
 fake.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
 assert.equal(await run.done, "é");
-assert.deepEqual(activity, [
-    { kind: "tool", text: "read", detail: "src/a.ts" },
-    { kind: "result", text: "file loaded" },
-    { kind: "assistant", text: "é" },
-    { kind: "user", text: guidance },
-    { kind: "user", text: "block one\nblock two" },
-]);
+assert.deepEqual(toolCalls, [1]);
+assert.deepEqual(
+    messages.map((message) => message.role),
+    ["assistant", "user", "user"],
+);
+assert.equal(messages[0].content[0].text, "é");
+assert.equal(messages[1].content, guidance);
+assert.equal(
+    messages[2].content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+    "block one\nblock two",
+);
 
 // Inspectable assistant text must not be cut at the old 8 KiB ceiling.
 const longText = "é" + "x".repeat(9000);
@@ -372,7 +399,7 @@ longMessage.stdin.on("data", (chunk) => {
     longMessage.stdout.write(`${JSON.stringify({ type: "agent_settled" })}\n`);
 });
 const longRun = runChild(longMessage, "task", undefined, (update) => {
-    if (update.activity?.kind === "assistant") captured = update.activity.text;
+    if (update.message?.role === "assistant") captured = update.message.content[0].text;
 });
 assert.equal(await longRun.done, longText);
 assert.equal(captured, longText);
@@ -498,43 +525,274 @@ selfAborted.stdin.on("data", (chunk) => {
 await assert.rejects(runChild(selfAborted, "task", undefined).done, /aborted before it finished/);
 assert.equal(selfAborted.stdin.writableEnded, true);
 
-// A revived job's inspector history replays the child's persisted transcript, malformed lines and all.
+// A job without in-memory messages reads its transcript from the child's persisted session.
 const seedDir = mkdtempSync(join(tmpdir(), "pi-delegate-seed-"));
 writeFileSync(
     join(seedDir, "2026-01-01T00-00-00-000Z_delegate-seed1.jsonl"),
     [
-        JSON.stringify({ type: "session", id: "delegate-seed1" }),
-        JSON.stringify({ type: "message", message: { role: "user", content: "trace it" } }),
+        JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "delegate-seed1",
+            timestamp: "2026-01-01T00:00:00.000Z",
+            cwd: "/tmp",
+        }),
         JSON.stringify({
             type: "message",
+            id: "m1",
+            parentId: null,
+            timestamp: "2026-01-01T00:00:01.000Z",
+            message: { role: "user", content: "trace it", timestamp: 1 },
+        }),
+        JSON.stringify({
+            type: "message",
+            id: "m2",
+            parentId: "m1",
+            timestamp: "2026-01-01T00:00:02.000Z",
             message: {
                 role: "assistant",
                 content: [
                     { type: "text", text: "Reading files." },
                     { type: "toolCall", id: "t1", name: "read", arguments: { path: "src/a.ts" } },
                 ],
+                timestamp: 2,
             },
         }),
         JSON.stringify({
             type: "message",
+            id: "m3",
+            parentId: "m2",
+            timestamp: "2026-01-01T00:00:03.000Z",
             message: {
                 role: "toolResult",
                 toolCallId: "t1",
                 toolName: "read",
                 content: [{ type: "text", text: "const a = 1;" }],
+                isError: false,
+                timestamp: 3,
             },
         }),
         "{not json",
     ].join("\n") + "\n",
 );
-assert.deepEqual(priorActivity(seedDir, "seed1"), [
-    { kind: "user", text: "trace it" },
-    { kind: "assistant", text: "Reading files." },
-    { kind: "tool", text: "read", detail: "src/a.ts" },
-    { kind: "result", text: "const a = 1;" },
+const seeded = sessionMessages(seedDir, "seed1");
+assert.deepEqual(
+    seeded.map((message) => message.role),
+    ["user", "assistant", "toolResult"],
+);
+assert.equal(seeded[0].content, "trace it");
+assert.equal(seeded[1].content[1].name, "read");
+assert.equal(seeded[2].content[0].text, "const a = 1;");
+assert.deepEqual(sessionMessages(seedDir, "nope"), [], "unknown session id must seed nothing");
+assert.deepEqual(sessionMessages(join(seedDir, "missing"), "seed1"), [], "missing session dir must seed nothing");
+
+// A theme stub for the renderers: colors are recorded, never emitted.
+const colors = [];
+const colored = [];
+const backgrounds = [];
+const theme = {
+    fg: (color, text) => {
+        colors.push(color);
+        colored.push([color, text]);
+        return text;
+    },
+    bg: (color, text) => {
+        backgrounds.push(color);
+        return text;
+    },
+    bold: (text) => text,
+};
+
+// The inspector windows the transcript: a warm cache never renders an offscreen row again.
+const history = new History();
+const rendered = [];
+const row = (index) => ({
+    render: () => {
+        rendered.push(index);
+        return [`row ${index}`];
+    },
+    invalidate() {},
+});
+for (let i = 0; i < 100; i++) history.add(row(i));
+const firstFrame = history.window(80, undefined, 10);
+assert.equal(firstFrame.total, 100);
+assert.deepEqual(
+    firstFrame.lines,
+    Array.from({ length: 10 }, (_, i) => `row ${90 + i}`),
+);
+assert.equal(rendered.length, 100, "the first frame must measure every row once");
+rendered.length = 0;
+const scrolled = history.window(80, 40, 10);
+assert.deepEqual(
+    scrolled.lines,
+    Array.from({ length: 10 }, (_, i) => `row ${40 + i}`),
+);
+assert.deepEqual(rendered, [], "a warm cache must not render offscreen rows");
+// A new row only renders itself.
+history.add(row(100));
+assert.deepEqual(history.window(80, undefined, 10).lines, [
+    ...Array.from({ length: 9 }, (_, i) => `row ${91 + i}`),
+    "row 100",
 ]);
-assert.deepEqual(priorActivity(seedDir, "nope"), [], "unknown session id must seed nothing");
-assert.deepEqual(priorActivity(join(seedDir, "missing"), "seed1"), [], "missing session dir must seed nothing");
+assert.deepEqual(rendered, [100]);
+// A width change re-renders rows once, lazily.
+rendered.length = 0;
+history.window(40, undefined, 10);
+assert.equal(rendered.length, 101);
+
+// A restored compacted transcript explains itself instead of starting mid-conversation.
+const transcript = new Transcript(theme);
+const restoredJob = jobEntry("compacted1", "done");
+restoredJob.messages.push({
+    role: "compactionSummary",
+    summary: "Earlier work summarized.",
+    tokensBefore: 1,
+    timestamp: 1,
+});
+restoredJob.messages.push({
+    role: "custom",
+    customType: "archive-memory",
+    content: "Recent sessions in this project",
+    display: false,
+    timestamp: 2,
+});
+transcript.sync(restoredJob.messages);
+const restoredText = transcript.window(80, undefined, 20).lines.join("\n");
+assert.match(restoredText, /Earlier work summarized\./);
+assert.doesNotMatch(restoredText, /Recent sessions/, "display: false messages stay hidden like in pi's chat");
+
+// pi's chat components prefix their first and last lines with OSC 133 prompt markers. After the sidebar the
+// terminal would read one as a new shell prompt, so the history cache strips them.
+const marked = new Transcript(theme);
+marked.sync([
+    { role: "user", content: "hello there", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "hi back" }], timestamp: 2 },
+]);
+const markedLines = marked.window(80, undefined, 20).lines;
+assert.ok(
+    markedLines.some((line) => line.includes("hello there")),
+    "user message missing from the transcript",
+);
+assert.ok(
+    markedLines.some((line) => line.includes("hi back")),
+    "assistant message missing from the transcript",
+);
+assert.doesNotMatch(markedLines.join("\n"), /\x1b\]133;/, "OSC 133 prompt markers reached the overlay");
+
+// A finished job swaps its live message array for the session file's. The transcript rebuilds from the new
+// array instead of appending to the old count, so the reloaded transcript replaces the live one.
+const swapDir = join(agentDir, "sessions", "delegates");
+mkdirSync(swapDir, { recursive: true });
+writeFileSync(
+    join(swapDir, "2026-01-01T00-00-00-000Z_delegate-swap1.jsonl"),
+    `${JSON.stringify({ type: "session", id: "delegate-swap1" })}\n${JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "live task" },
+    })}\n${JSON.stringify({
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "live answer" }] },
+    })}\n${JSON.stringify({
+        type: "message",
+        message: { role: "user", content: "steer after" },
+    })}\n`,
+);
+const liveMessages = [
+    { role: "user", content: "live task", timestamp: 1 },
+    { role: "assistant", content: [{ type: "text", text: "live answer" }], timestamp: 2 },
+    { role: "assistant", content: [{ type: "text", text: "live tail" }], timestamp: 3 },
+];
+const swapped = new Transcript(theme);
+swapped.sync(liveMessages);
+assert.match(swapped.window(80, undefined, 20).lines.join("\n"), /live tail/);
+const reloaded = sessionMessages(swapDir, "swap1");
+assert.equal(reloaded.length, 3, "the seeded session file did not reload its messages");
+swapped.sync(reloaded);
+const swappedText = swapped.window(80, undefined, 20).lines.join("\n");
+assert.match(swappedText, /steer after/, "the reloaded transcript kept the stale live messages");
+assert.doesNotMatch(swappedText, /live tail/, "the reloaded transcript kept the stale live messages");
+assert.equal(swappedText.match(/live answer/g)?.length, 1, "the reloaded transcript duplicated its messages");
+assert.equal(swappedText.match(/live task/g)?.length, 1, "the reloaded transcript duplicated its messages");
+
+// A warm scroll step renders no component, however long the transcript is.
+const assistantRenders = [];
+const renderAssistant = AssistantMessageComponent.prototype.render;
+AssistantMessageComponent.prototype.render = function (width) {
+    assistantRenders.push(width);
+    return renderAssistant.call(this, width);
+};
+try {
+    for (const count of [4, 400]) {
+        const long = new Transcript(theme);
+        long.sync(
+            Array.from({ length: count }, (_, i) => ({
+                role: "assistant",
+                content: [{ type: "text", text: `message ${i}` }],
+                timestamp: i,
+            })),
+        );
+        long.window(80, undefined, 10);
+        assistantRenders.length = 0;
+        for (let i = 0; i < 5; i++) long.window(80, count + i, 10);
+        assert.deepEqual(
+            assistantRenders,
+            [],
+            `a warm scroll step rendered ${assistantRenders.length} of ${count} messages`,
+        );
+    }
+} finally {
+    AssistantMessageComponent.prototype.render = renderAssistant;
+}
+
+// Tool calls render as compact pi-style boxes: a call row and a result row, never JSON args.
+const toolCall = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "src/foo.ts" } }],
+    timestamp: 1,
+};
+const toolResult = (text, isError = false) => ({
+    role: "toolResult",
+    toolCallId: "t1",
+    toolName: "read",
+    content: [{ type: "text", text }],
+    isError,
+    timestamp: 2,
+});
+const toolTranscript = new Transcript(theme);
+toolTranscript.sync([toolCall, toolResult("const a = 1;\nsecond line")]);
+backgrounds.length = 0;
+const [spacer, ...toolRows] = toolTranscript.window(60, undefined, 20).lines;
+assert.equal(spacer, "", "a tool box is spaced from the previous row like pi's");
+assert.equal(toolRows.length, 4, "a tool box pads a call row and a result row like pi's");
+assert.match(toolRows[1], /^ read src\/foo\.ts\s*$/);
+assert.match(toolRows[2], /↳ const a = 1;\s*$/);
+assert.doesNotMatch(toolRows.join("\n"), /second line|"path"/, "tool rows must not dump args or output");
+assert.ok(
+    toolRows.every((line) => visibleWidth(line) === 60),
+    "tool rows must fill the pane width",
+);
+assert.deepEqual([...new Set(backgrounds)], ["toolSuccessBg"], "a finished tool call uses pi's success background");
+// A finished tool with empty output still counts as finished: the result arrived, its preview is empty.
+const silent = new Transcript(theme);
+silent.sync([toolCall, toolResult("")]);
+backgrounds.length = 0;
+silent.window(60, undefined, 20);
+assert.deepEqual([...new Set(backgrounds)], ["toolSuccessBg"], "a finished tool with no output stayed pending");
+// A result still pending keeps pi's pending background, and a failure turns the box red.
+const pending = new Transcript(theme);
+pending.sync([toolCall]);
+backgrounds.length = 0;
+pending.window(60, undefined, 20);
+assert.deepEqual([...new Set(backgrounds)], ["toolPendingBg"], "a running tool call uses pi's pending background");
+const failed = new Transcript(theme);
+failed.sync([toolCall, toolResult("boom", true)]);
+backgrounds.length = 0;
+colored.length = 0;
+failed.window(60, undefined, 20);
+assert.deepEqual([...new Set(backgrounds)], ["toolErrorBg"], "a failed tool call uses pi's error background");
+assert.ok(
+    colored.some(([color, text]) => color === "error" && text === "boom"),
+    "a failed result must render in the error color",
+);
 
 // The command is TUI-only; an empty session should explain why there is no view.
 const { default: extension } = await import(new URL("index.ts", root).href);
@@ -762,11 +1020,29 @@ const fakeCli = join(fakeCliDir, "pi.mjs");
 writeFileSync(
     fakeCli,
     `
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 const COMMANDS_LOG = '${join(fakeCliDir, "commands.log")}';
+const argv = process.argv.slice(2);
+const sessionId = argv[argv.indexOf("--session-id") + 1];
+const sessionDir = argv[argv.indexOf("--session-dir") + 1];
+const sessionFile = sessionDir + "/" + new Date().toISOString().replace(/[:.]/g, "-") + "_" + sessionId + ".jsonl";
+let parentId = null;
+let entryId = 0;
+// Persist the transcript like pi does, so finished jobs can be reloaded from their session file.
+const record = (message) => {
+    if (!sessionId || !sessionDir) return;
+    mkdirSync(sessionDir, { recursive: true });
+    if (entryId === 0) appendFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + "\\n");
+    const id = "e" + ++entryId;
+    appendFileSync(sessionFile, JSON.stringify({ type: "message", id, parentId, timestamp: new Date().toISOString(), message }) + "\\n");
+    parentId = id;
+};
 let stage = 0;
 let promptMessage = "";
-const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+const send = (event) => {
+    if (event.type === "message_end") record(event.message);
+    process.stdout.write(JSON.stringify(event) + "\\n");
+};
 process.stdin.on("data", (data) => {
     for (const line of data.toString().trim().split("\\n")) {
         const command = JSON.parse(line);
@@ -784,15 +1060,24 @@ process.stdin.on("data", (data) => {
             appendFileSync(COMMANDS_LOG, command.type + " " + (command.provider || "") + " " + (command.modelId || command.level || "") + "\\n");
             send({ type: "response", command: command.type, id: command.id, success: command.provider !== "nope", error: command.provider === "nope" ? "Model not found: nope/x" : undefined });
         } else if (command.type === "steer") {
+            // Real children stream tool calls inside assistant messages and their results as toolResult messages.
+            const toolCall = (id, path) => {
+                send({ type: "tool_execution_start", toolName: "read", args: { path } });
+                send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
+                return { type: "toolCall", id, name: "read", arguments: { path } };
+            };
             if (++stage === 1) {
+                const calls = [];
+                for (let i = 0; i < 105; i++) calls.push(toolCall("call" + i, "src/" + i + ".ts"));
+                send({ type: "message_end", message: { role: "assistant", content: calls, timestamp: Date.now() } });
                 for (let i = 0; i < 105; i++) {
-                    send({ type: "tool_execution_start", toolName: "read", args: { path: "src/" + i + ".ts" } });
-                    send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
+                    send({ type: "message_end", message: { role: "toolResult", toolCallId: "call" + i, toolName: "read", content: [{ type: "text", text: "ok" }], isError: false, timestamp: Date.now() } });
                 }
                 send({ type: "message_update", usage: { totalTokens: 37000 } });
             } else {
-                send({ type: "tool_execution_start", toolName: "read", args: { path: "src/end.ts" } });
-                send({ type: "tool_execution_end", toolName: "read", result: { content: [{ type: "text", text: "ok" }] } });
+                const call = toolCall("callEnd", "src/end.ts");
+                send({ type: "message_end", message: { role: "assistant", content: [call], timestamp: Date.now() } });
+                send({ type: "message_end", message: { role: "toolResult", toolCallId: "callEnd", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false, timestamp: Date.now() } });
             }
             const message = { role: "user", content: stage === 1 ? command.message : [{ type: "text", text: command.message }], timestamp: Date.now() };
             send({ type: "message_start", message });
@@ -812,16 +1097,6 @@ process.stdin.on("data", (data) => {
 setTimeout(() => process.exit(1), 5000).unref();
 `,
 );
-const colors = [];
-const colored = [];
-const theme = {
-    fg: (color, text) => {
-        colors.push(color);
-        colored.push([color, text]);
-        return text;
-    },
-    bold: (text) => text,
-};
 const fakeKeyHint = (_keybinding, description) => `«key»${description}`;
 // delegate_list intentionally keeps Pi's default rendering; the rest use compact call headers and keep failures visible.
 for (const tool of registered.filter((entry) => entry.name !== "delegate_list")) {
@@ -924,6 +1199,8 @@ const ui = {
     theme,
     setWidget(_key, lines) {
         widgetLines = typeof lines === "function" ? lines(undefined, theme).render(500) : lines;
+        // Pi repaints the widgets on every setWidget, so the ticker also redraws an open overlay.
+        tui.requestRender();
     },
     async custom(factory, options) {
         assert.equal(options?.overlay, true);
@@ -940,6 +1217,27 @@ const ui = {
             done,
         );
         assert.equal(view.render(80).length, tui.terminal.rows);
+        // One history render per frame, always at the same width. HStack measured its children at the
+        // full width first, so every transcript row re-rendered at two widths per frame.
+        const widths = [];
+        const renderWindow = History.prototype.window;
+        History.prototype.window = function (width, top, height) {
+            widths.push(width);
+            return renderWindow.call(this, width, top, height);
+        };
+        try {
+            view.render(80);
+            const firstFrameWidths = widths.splice(0);
+            view.render(80);
+            assert.deepEqual(widths.splice(0), firstFrameWidths, "the history width changed between frames");
+            assert.equal(firstFrameWidths.length, 1, "the history rendered more than once per frame");
+        } finally {
+            History.prototype.window = renderWindow;
+        }
+        assert.ok(
+            view.render(80).every((line) => visibleWidth(line) === 80),
+            "inspector rows must fill the width",
+        );
         screens++;
         showViewer(view);
         return result;
@@ -1059,7 +1357,7 @@ try {
     const rows = view.render(80);
     const opened = rows.join("\n");
     assert.ok(
-        rows.some((row) => stripVTControlCharacters(row).split("│")[1]?.trim() === "user"),
+        rows.some((row) => row.split("│")[1]?.includes("Trace delegates")),
         "initial user message missing from inspector",
     );
     assert.match(rows[0], /\[Jobs\]  Activity · 1 running · 2 total/);
@@ -1092,7 +1390,10 @@ try {
     assert.match(rows[4].split("│")[0], /\d+s/);
     // The task reaches the pane only as the child's first user message.
     assert.match(opened, /Trace delegates/);
-    assert.doesNotMatch(opened, /│\s*Trace/);
+    assert.ok(
+        rows.every((row) => !row.split("│")[0]?.includes("Trace")),
+        "task leaked into the sidebar",
+    );
     assert.doesNotMatch(opened, /Model:|Task:/);
     const originalNow = Date.now;
     try {
@@ -1139,11 +1440,11 @@ try {
     view.handleInput("\x1b[C");
     assert.match(view.render(80)[0], /\[Activity\]/);
     assert.doesNotMatch(view.render(80)[0], /\[Jobs/);
-    assert.match(view.render(80).join("\n"), /read src\/104.ts/);
+    assert.match(view.render(80).join("\n"), /src\/104\.ts/);
     const liveRows = view.render(80).map(stripVTControlCharacters);
     assert.ok(
-        liveRows.some((row) => row.split("│")[1]?.trim() === "user"),
-        "steer role label missing",
+        liveRows.some((row) => row.split("│")[1]?.includes("Parent guidance")),
+        "steer message missing from the history pane",
     );
     const guidanceRow = liveRows.findIndex((row) => row.includes("Parent guidance"));
     assert.ok(guidanceRow >= 0, "steer text missing from live inspector");
@@ -1166,8 +1467,8 @@ try {
         "running job missing from list details",
     );
     assert.ok(
-        listed.details.jobs.every((job) => job.activity.length === 0),
-        "delegate_list copied activity history into its result",
+        listed.details.jobs.every((job) => job.messages.length === 0),
+        "delegate_list copied the transcript into its result",
     );
     // The list shows finished jobs too, each with its terminal status.
     assert.ok(
@@ -1243,6 +1544,13 @@ try {
         appendEntry() {},
         getActiveTools: () => [],
     });
+    // A restored job has no messages in memory: the inspector reads the session file the child wrote.
+    assert.ok(
+        readdirSync(join(agentDir, "sessions", "delegates")).some((name) =>
+            name.endsWith(`_delegate-${second.details.id}.jsonl`),
+        ),
+        "the fake child did not persist its session",
+    );
     restoreSession({}, { sessionManager: { getBranch: () => savedEntries } });
     tui.terminal.rows = 40;
     const restoredReady = new Promise((resolve) => (showViewer = resolve));
@@ -1251,6 +1559,7 @@ try {
     const restoredText = restored.render(80).join("\n");
     assert.match(restoredText, /second run/);
     assert.match(restoredText, /Final parent guidance/);
+    assert.match(restoredText, /Count/);
     // Launch plus completion entries restore as one job per id, not two rows.
     assert.match(restoredText, /0 running · 2 total/, "restored jobs listed more than once");
     restored.handleInput("\x1b");
@@ -1328,10 +1637,9 @@ try {
         "foreground revive missing its mark and child output",
     );
     const orphanLaunch = savedEntries.find((entry) => entry.data?.id === "orphan1" && entry.data.status === "running");
-    assert.ok(
-        orphanLaunch?.data.activity.some((item) => item.kind === "user" && item.text === "orphan task"),
-        "revived job did not replay the prior transcript",
-    );
+    assert.ok(orphanLaunch, "revived launch entry missing");
+    assert.deepEqual(orphanLaunch.data.messages, [], "revived job persisted its transcript");
+    assert.equal("activity" in orphanLaunch.data, false, "store entries still carry the old activity field");
     const orphanEntries = savedEntries.filter((entry) => entry.data?.id === "orphan1");
     assert.deepEqual(
         orphanEntries.map((entry) => entry.data.status),

@@ -29,9 +29,10 @@ import {
     tally,
     textParts,
     toolLayout,
+    toolLines,
     widgetJobs,
 } from "./format.ts";
-import { priorActivity, runChild } from "./child.ts";
+import { runChild, sessionMessages } from "./child.ts";
 import { createJobStore, type DelegateJob, lastToolCall, type InspectJob } from "./store.ts";
 import {
     applyClone,
@@ -156,7 +157,6 @@ export default function (pi: ExtensionAPI) {
     /** The clone is the unit: every job id that ran in it is only a handle, so state changes reach all of them. */
     const jobsInClone = (clone: string) => store.all().filter((job) => job.isolation?.clone === clone);
 
-    /** A job that still has a clone; throws explaining why it has none. */
     const clonedJob = (id: string) => {
         const job = store.findOrThrow(id);
         const isolation = job.isolation;
@@ -188,7 +188,6 @@ export default function (pi: ExtensionAPI) {
 
     const refreshWidget = (ctx: ExtensionContext) => {
         if (!ctx.hasUI) return;
-        store.notify();
         const jobs = store.live();
         if (jobs.length === 0) {
             ctx.ui.setWidget(WIDGET_KEY, undefined);
@@ -204,11 +203,9 @@ export default function (pi: ExtensionAPI) {
             const { tool, result } = lastToolCall(job);
             if (tool)
                 lines.push(
-                    `   ${theme.fg("toolTitle", theme.bold(tool.text))}${tool.detail ? ` ${theme.fg("accent", tool.detail)}` : ""}`,
-                );
-            if (result?.text)
-                lines.push(
-                    `   ${theme.fg("muted", "↳")} ${theme.fg(result.isError ? "error" : "toolOutput", result.text)}`,
+                    ...toolLines(theme, tool.name, tool.detail, result?.text, result?.isError).map(
+                        (line) => `   ${line}`,
+                    ),
                 );
         }
         if (hidden) lines.push(`   ${theme.fg("muted", `… ${hidden} more running · /delegate to view all`)}`);
@@ -237,16 +234,13 @@ export default function (pi: ExtensionAPI) {
             id: job.id,
             agent: job.agent,
             description: job.description,
-            model: job.model,
             toolCalls: job.toolCalls,
             contextTokens: job.contextTokens,
             contextWindow: job.contextWindow,
             elapsedMs: elapsedMs(job),
             output: withIsolation(output ?? "", job.isolation),
             error,
-            status: job.status,
             isolation: job.isolation,
-            cloneClosed: job.cloneClosed,
         };
         // Idle: this starts a new turn. Streaming: steer the report in at the next turn boundary;
         // a follow-up waits for a run end that a parent stuck polling may never reach.
@@ -286,7 +280,7 @@ export default function (pi: ExtensionAPI) {
             task,
             model: displayModel,
             status: "running",
-            activity: prior ? priorActivity(DELEGATE_SESSION_DIR, prior.id) : [],
+            messages: prior ? sessionMessages(DELEGATE_SESSION_DIR, prior.id) : [],
             tools,
             toolCalls: 0,
             startedAt: Date.now(),
@@ -297,14 +291,10 @@ export default function (pi: ExtensionAPI) {
         const details: DelegateDetails = {
             id: job.id,
             agent: job.agent,
-            description: job.description,
-            task: job.task,
             model: displayModel,
             tools,
             background: ctx.hasUI,
-            status: job.status,
             isolation: job.isolation,
-            cloneClosed: job.cloneClosed,
         };
         const args = [
             "--session-id",
@@ -404,7 +394,7 @@ export default function (pi: ExtensionAPI) {
         store.clear();
     });
 
-    // Rebuilt from the active branch, like pi's todo example; abandoned branches are alternative histories.
+    // Rebuilt from the active branch: abandoned branches are alternative histories.
     const restoreSession = (ctx: ExtensionContext) => {
         const interrupted = store.restore(ctx.sessionManager.getBranch());
         // Custom entries never reach the model, so announce the interrupted jobs as a steered message.
@@ -470,7 +460,7 @@ export default function (pi: ExtensionAPI) {
         return container;
     });
 
-    registerInspector(pi, store);
+    registerInspector(pi, store, DELEGATE_SESSION_DIR);
 
     const agentList = agentsFor(process.cwd()).map((agent) => {
         const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
@@ -799,7 +789,7 @@ export default function (pi: ExtensionAPI) {
             const running = jobs.filter((job) => job.status === "running").length;
             const lastActivity = (job: InspectJob) => {
                 const { tool } = lastToolCall(job);
-                return job.status === "running" && tool ? ` · ${tool.text}${tool.detail ? ` ${tool.detail}` : ""}` : "";
+                return job.status === "running" && tool ? ` · ${tool.name}${tool.detail ? ` ${tool.detail}` : ""}` : "";
             };
             const lines = jobs.map((job) => {
                 const tag = isolationWords(job);
@@ -809,8 +799,7 @@ export default function (pi: ExtensionAPI) {
                 content: [
                     { type: "text", text: `${jobs.length} delegates (${running} running):\n${lines.join("\n")}` },
                 ],
-                // Rows render from the fields; the activity history stays in the store, not in every list result.
-                details: { jobs: jobs.map(store.summary) },
+                details: { jobs: jobs.map(store.snapshot) },
             };
         },
         renderResult(result, _options, theme, context) {

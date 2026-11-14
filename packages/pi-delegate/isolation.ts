@@ -46,11 +46,7 @@ function rootOf(iso: IsolationState): string {
     return resolve(iso.clone, "..", "..", "..");
 }
 
-/**
- * Commits the main tree's current content (committed, uncommitted, and untracked files, honoring
- * .gitignore) with the recorded base as parent, through a scratch index so the clone's own checkout
- * and index stay untouched. Updates and returns the `main-snapshot` branch.
- */
+/** Commits the main tree's current content through a scratch index, so the clone's own checkout and index stay untouched. */
 function snapshotMainTree(iso: IsolationState, root: string): string {
     const gitDir = join(iso.clone, ".git");
     const indexFile = join(gitDir, "pi-delegate-snapshot-index");
@@ -136,9 +132,8 @@ export function removeClone(iso: IsolationState): void {
 }
 
 /**
- * Merges the delegate's clone into the main working tree. Base rule: `base` always tracks the newest
- * `main-snapshot`, so a repeat apply is correct whether or not the delegate rebased onto it yet.
- * The main repository's .git is never written to; only its working tree receives the final patch.
+ * Merges the clone into the main working tree. Base rule: `base` tracks the newest `main-snapshot`, so a
+ * repeat apply is correct whether or not the delegate rebased onto it yet. Only the main tree is written.
  */
 export function applyClone(iso: IsolationState): ApplyResult {
     const root = rootOf(iso);

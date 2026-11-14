@@ -1,4 +1,5 @@
-import type { ChildActivity, ChildUpdate } from "./child.ts";
+import type { ChildMessage, ChildUpdate } from "./child.ts";
+import { resultPreview, toolCallDetail } from "./format.ts";
 import type { IsolationState } from "./isolation.ts";
 
 export type JobStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
@@ -15,7 +16,10 @@ export type InspectJob = {
     startedAt: number;
     endedAt?: number;
     status: JobStatus;
-    activity: ChildActivity[];
+    /** The child's transcript, kept in memory only: its session file is the source of truth. */
+    messages: ChildMessage[];
+    /** The failure detail shown under a finished job's transcript. */
+    detail?: string;
     isolation?: IsolationState;
     /** Set once an isolated job's clone was applied or discarded, so a steer revive refuses instead of rerunning in the main tree. */
     cloneClosed?: boolean;
@@ -68,25 +72,11 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         const { controller, steer, swapModel, ...rest } = job as InspectJob & Partial<DelegateJob>;
         return rest;
     };
-    /** The serializable form of a job: runtime handles stay out. */
-    const snapshot = (job: InspectJob): InspectJob => {
-        const rest = plain(job);
-        // Copy activity: the live job keeps appending to its own array after the launch snapshot.
-        return { ...rest, activity: [...rest.activity] };
-    };
-    const addActivity = (job: DelegateJob, activity: ChildActivity) => {
-        const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
-        job.activity.push(
-            activity.kind === "assistant" || activity.kind === "user"
-                ? activity
-                : {
-                      ...activity,
-                      text: normalize(activity.text),
-                      detail: activity.detail && normalize(activity.detail),
-                  },
-        );
-        notify();
-    };
+    /** The serializable form of a job: runtime handles and the transcript stay out. */
+    const snapshot = (job: InspectJob): InspectJob => ({
+        ...plain(job),
+        messages: [],
+    });
 
     return {
         /** Every job a view can show: live first, then history. */
@@ -94,8 +84,6 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         live: (): DelegateJob[] => [...running.values()],
         find,
         snapshot,
-        /** A row for delegate_list: the snapshot without the activity history a list result never renders. */
-        summary: (job: InspectJob): InspectJob => ({ ...plain(job), activity: [] }),
         /** A job by id; the common "unknown delegate job" failure lives here so every tool phrases it alike. */
         findOrThrow: (id: string): InspectJob => {
             const job = find(id);
@@ -111,9 +99,20 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         },
         record: (job: DelegateJob, update: ChildUpdate) => {
             if (job.status !== "running") return;
-            if (update.toolCalls !== undefined) job.toolCalls = update.toolCalls;
-            if (update.contextTokens !== undefined) job.contextTokens = update.contextTokens;
-            if (update.activity) addActivity(job, update.activity);
+            let changed = false;
+            if (update.toolCalls !== undefined && update.toolCalls !== job.toolCalls) {
+                job.toolCalls = update.toolCalls;
+                changed = true;
+            }
+            if (update.contextTokens !== undefined && update.contextTokens !== job.contextTokens) {
+                job.contextTokens = update.contextTokens;
+                changed = true;
+            }
+            if (update.message) {
+                job.messages.push(update.message);
+                changed = true;
+            }
+            if (changed) notify();
         },
         /** Leaves the live set and writes the completion entry; false when the job was cancelled. */
         finish: (job: DelegateJob, status: JobStatus, detail?: string): boolean => {
@@ -121,8 +120,8 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             if (job.controller.signal.aborted) return false;
             running.delete(job.id);
             job.status = status;
-            if (detail) addActivity(job, { kind: "status", text: detail });
-            commit({ ...snapshot(job), endedAt: Date.now() });
+            if (detail) job.detail = detail;
+            commit({ ...plain(job), messages: [], endedAt: Date.now() });
             return true;
         },
         /** Appends a corrected entry for a finished job changed after completion (isolation applied, discarded, or re-based). */
@@ -133,7 +132,11 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             // Skip live jobs' launch entries (the live set renders them); copy so session entries stay append-only.
             const restored = restoredJobs(branch)
                 .filter((job) => !running.has(job.id))
-                .map((job) => ({ ...job }));
+                .map((job) => {
+                    // Drop the legacy activity field: the child's session file owns the transcript.
+                    const { activity: _legacy, ...rest } = job as InspectJob & { activity?: unknown };
+                    return { ...rest, messages: [] };
+                });
             // A restored running job no live job owns means the parent crashed; the child exits on its own when
             // the parent's stdin pipe closes, so only the job state needs fixing.
             const interrupted = restored.filter((job) => job.status === "running");
@@ -145,7 +148,6 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             history.push(...restored);
             return interrupted;
         },
-        /** Drops all jobs and view subscriptions; called on session shutdown. */
         clear: () => {
             running.clear();
             history.length = 0;
@@ -162,8 +164,25 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
 export type JobStore = ReturnType<typeof createJobStore>;
 
 /** The job's latest tool call and its result, once the result arrives. */
-export function lastToolCall(job: InspectJob): { tool?: ChildActivity; result?: ChildActivity } {
-    const at = job.activity.findLastIndex((entry) => entry.kind === "tool");
-    if (at < 0) return {};
-    return { tool: job.activity[at], result: job.activity.slice(at + 1).find((entry) => entry.kind === "result") };
+export function lastToolCall(job: InspectJob): {
+    tool?: { name: string; detail: string };
+    result?: { text?: string; isError?: boolean };
+} {
+    for (let i = job.messages.length - 1; i >= 0; i--) {
+        const message = job.messages[i]!;
+        if (message.role !== "assistant") continue;
+        for (let j = message.content.length - 1; j >= 0; j--) {
+            const part = message.content[j]!;
+            if (part.type !== "toolCall") continue;
+            const result = job.messages.find(
+                (m): m is Extract<ChildMessage, { role: "toolResult" }> =>
+                    m.role === "toolResult" && m.toolCallId === part.id,
+            );
+            return {
+                tool: { name: part.name, detail: toolCallDetail(part.name, part.arguments) },
+                result: result ? { text: resultPreview(result), isError: result.isError } : undefined,
+            };
+        }
+    }
+    return {};
 }

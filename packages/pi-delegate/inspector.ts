@@ -1,18 +1,181 @@
-import { type ExtensionAPI, getMarkdownTheme, rawKeyHint } from "@earendil-works/pi-coding-agent";
 import {
-    HStack,
+    AssistantMessageComponent,
+    type ExtensionAPI,
+    rawKeyHint,
+    type Theme,
+    UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
+import {
+    Box,
+    type Component,
     type Keybinding,
-    Markdown,
     matchesKey,
+    Spacer,
+    Text,
     truncateToWidth,
     wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { ChildActivity } from "./child.ts";
-import { elapsedMs, formatTools, jobIdentity, STATUS_COLORS, statusText, tally, usageStats } from "./format.ts";
+import { type ChildMessage, sessionMessages } from "./child.ts";
+import {
+    elapsedMs,
+    formatTools,
+    jobIdentity,
+    resultPreview,
+    STATUS_COLORS,
+    statusText,
+    tally,
+    textParts,
+    toolCallDetail,
+    toolLines,
+    usageStats,
+} from "./format.ts";
 import type { InspectJob, JobStore } from "./store.ts";
 
+type Entry = { component: Component; lines?: string[] };
+
+// pi's chat components prefix lines with OSC 133 prompt markers; past the sidebar the terminal would read one as a new prompt.
+const OSC133 = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
+
+/** Rendered transcript rows, cached per width so a frame only renders rows it has never seen. */
+export class History {
+    private readonly entries: Entry[] = [];
+    private width = 0;
+
+    add(component: Component): Entry {
+        const entry: Entry = { component };
+        this.entries.push(entry);
+        return entry;
+    }
+
+    invalidate() {
+        for (const entry of this.entries) {
+            entry.component.invalidate?.();
+            entry.lines = undefined;
+        }
+    }
+
+    window(width: number, top: number | undefined, height: number) {
+        if (this.width !== width) {
+            this.width = width;
+            for (const entry of this.entries) entry.lines = undefined;
+        }
+        const all = this.entries.flatMap(
+            (entry) => (entry.lines ??= entry.component.render(width).map((line) => line.replace(OSC133, ""))),
+        );
+        const start = Math.min(top ?? Infinity, Math.max(0, all.length - height));
+        return { lines: all.slice(start, start + height), start, total: all.length };
+    }
+}
+
+/** One tool call as a compact pi-style box: the call row plus the result's first line. */
+class ToolRow implements Component {
+    private readonly theme: Theme;
+    private readonly name: string;
+    private readonly detail: string;
+    private result?: string;
+    private done = false;
+    private error = false;
+
+    constructor(theme: Theme, name: string, detail: string) {
+        this.theme = theme;
+        this.name = name;
+        this.detail = detail;
+    }
+
+    invalidate() {}
+
+    setResult(message: Extract<ChildMessage, { role: "toolResult" }>) {
+        this.result = resultPreview(message);
+        this.done = true;
+        this.error = message.isError === true;
+    }
+
+    render(width: number) {
+        const theme = this.theme;
+        // The box's own horizontal padding leaves width - 2 for each truncated row.
+        const inner = Math.max(1, width - 2);
+        const text = toolLines(theme, this.name, this.detail, this.result, this.error)
+            .map((line) => truncateToWidth(line, inner))
+            .join("\n");
+        const bg = this.error ? "toolErrorBg" : this.done ? "toolSuccessBg" : "toolPendingBg";
+        // pi's own tool box and spacing; only the content is compact.
+        const box = new Box(1, 1, (line) => theme.bg(bg, line));
+        box.addChild(new Text(text, 0, 0));
+        return ["", ...box.render(width)];
+    }
+}
+
+/** One job's transcript, built from pi's chat components and kept in sync as messages arrive. */
+export class Transcript {
+    private history = new History();
+    private messages?: ChildMessage[];
+    private count = 0;
+    private readonly pending = new Map<string, Entry>();
+    private readonly theme: Theme;
+
+    constructor(theme: Theme) {
+        this.theme = theme;
+    }
+
+    sync(messages: ChildMessage[]) {
+        // The store swaps a finished job's live array for the session file's, so a different array is a new transcript.
+        if (messages !== this.messages) {
+            this.messages = messages;
+            this.history = new History();
+            this.count = 0;
+            this.pending.clear();
+        }
+        while (this.count < messages.length) this.add(messages[this.count++]!);
+    }
+
+    window(width: number, top: number | undefined, height: number) {
+        return this.history.window(width, top, height);
+    }
+
+    invalidate() {
+        this.history.invalidate();
+    }
+
+    private add(message: ChildMessage) {
+        if (message.role === "user") {
+            const text = textParts(message.content).join("");
+            if (!text) return;
+            // pi's chat spaces user messages itself; the component carries no margin.
+            this.history.add(new Spacer(1));
+            this.history.add(new UserMessageComponent(text));
+            return;
+        }
+        if (message.role === "assistant") {
+            // Thinking blocks are the child's scratchpad; the inspector shows what it said and did.
+            this.history.add(new AssistantMessageComponent(message, true, undefined, ""));
+            for (const part of message.content) {
+                if (part.type !== "toolCall") continue;
+                const row = new ToolRow(this.theme, part.name, toolCallDetail(part.name, part.arguments));
+                this.pending.set(part.id, this.history.add(row));
+            }
+            return;
+        }
+        if (message.role === "toolResult") {
+            const entry = this.pending.get(message.toolCallId);
+            if (!entry) return;
+            (entry.component as ToolRow).setResult(message);
+            entry.lines = undefined;
+            return;
+        }
+        // display: false marks model-only context (e.g. pi-archive's recent sessions); pi's chat hides it too.
+        if ((message as { display?: boolean }).display === false) return;
+        const text =
+            message.role === "compactionSummary"
+                ? message.summary
+                : textParts((message as { content?: unknown }).content).join("");
+        if (!text) return;
+        this.history.add(new Spacer(1));
+        this.history.add(new Text(text, 1, 0));
+    }
+}
+
 /** The /delegate command: a full-screen inspector over the job store. */
-export function registerInspector(pi: ExtensionAPI, store: JobStore) {
+export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir: string) {
     pi.registerCommand("delegate", {
         description: "Inspect live and recent delegate activity",
         handler: async (_args, ctx) => {
@@ -31,8 +194,9 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                     let selectedId = store.all()[0]!.id;
                     let focus: "list" | "history" = "list";
                     let top: number | undefined;
-                    let historyWidth = 1;
-                    let markdown = new WeakMap<ChildActivity, Markdown>();
+                    let lastWindow = { height: 0, total: 0 };
+                    const transcripts = new Map<string, Transcript>();
+                    const loaded = new Set<string>();
                     const jobs = () => store.all();
                     // Format hints from the injected manager; an imported copy would not see the user's keybindings.
                     const hint = (id: Keybinding, description: string) =>
@@ -43,10 +207,22 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                         wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
                             theme.fg("dim", line),
                         );
-                    // Fixed rows: header, model, description, rule, counter.
-                    const historyHeight = (job: InspectJob, width: number) =>
-                        Math.max(0, bodyHeight() - 5 - toolsLines(job, width).length);
-                    // ScrollView needs fullscreen layout; window the history in regular TUI too.
+                    const transcript = (job: InspectJob) => {
+                        let value = transcripts.get(job.id);
+                        if (!value) {
+                            value = new Transcript(theme);
+                            transcripts.set(job.id, value);
+                        }
+                        return value;
+                    };
+                    // Restored jobs carry no messages: the child's session file is their history.
+                    const messagesOf = (job: InspectJob) => {
+                        if (!job.messages.length && job.status !== "running" && !loaded.has(job.id)) {
+                            loaded.add(job.id);
+                            job.messages = sessionMessages(sessionDir, job.id);
+                        }
+                        return job.messages;
+                    };
                     const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
                         const row = (text: string) =>
                             truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│");
@@ -70,44 +246,16 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                             row(theme.fg("dim", `${selectedIndex + 1}/${items.length}`)),
                         ].slice(0, bodyHeight());
                     };
-                    const renderEntry = (entry: ChildActivity, width: number): string[] => {
-                        if (entry.kind === "assistant" || entry.kind === "user") {
-                            let md = markdown.get(entry);
-                            if (!md) {
-                                md = new Markdown(entry.text, 0, 0, getMarkdownTheme());
-                                markdown.set(entry, md);
-                            }
-                            return [theme.fg("accent", entry.kind), ...md.render(width), ""];
-                        }
-                        if (entry.kind === "tool")
-                            return [
-                                truncateToWidth(
-                                    theme.fg("toolTitle", theme.bold(entry.text)) +
-                                        (entry.detail ? ` ${theme.fg("accent", entry.detail)}` : ""),
-                                    width,
-                                ),
-                            ];
-                        if (entry.kind === "result")
-                            return [
-                                truncateToWidth(
-                                    `  ${theme.fg("muted", "↳")} ${theme.fg(entry.isError ? "error" : "toolOutput", entry.text || "(no text output)")}`,
-                                    width,
-                                ),
-                            ];
-                        // Only failure detail still says anything; the header icon carries the status.
-                        if (!entry.text) return [];
-                        return [truncateToWidth(theme.fg(STATUS_COLORS.failed, entry.text), width)];
-                    };
                     const renderHistory = (width: number, job: InspectJob): string[] => {
-                        historyWidth = width;
                         const tools = toolsLines(job, width);
-                        const height = historyHeight(job, width);
-                        const history = job.activity.flatMap((entry) => renderEntry(entry, width));
-                        const maxTop = Math.max(0, history.length - height);
-                        const start = Math.min(top ?? maxTop, maxTop);
-                        const visible = history.slice(start, start + height);
-                        const shown = visible.length
-                            ? visible
+                        // Fixed rows: header, model, description, rule, counter, plus the failure detail.
+                        const height = Math.max(0, bodyHeight() - 5 - tools.length - (job.detail ? 1 : 0));
+                        const view = transcript(job);
+                        view.sync(messagesOf(job));
+                        const window = view.window(width, top, height);
+                        lastWindow = { height, total: window.total };
+                        const shown = window.lines.length
+                            ? window.lines
                             : height
                               ? [
                                     theme.fg(
@@ -118,25 +266,30 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                     ),
                                 ]
                               : [];
-                        return [
-                            truncateToWidth(
-                                `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", usageStats(job, elapsedMs(job)))}`,
-                                width,
-                            ),
-                            truncateToWidth(theme.fg("dim", job.model), width),
-                            ...tools,
-                            truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
-                            theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
-                            ...shown,
-                            ...Array(Math.max(0, height - shown.length)).fill(""),
-                            truncateToWidth(
-                                theme.fg(
-                                    "dim",
-                                    `${visible.length ? `${start + 1}–${start + visible.length}` : "0"}/${history.length}`,
+                        const counter = window.lines.length
+                            ? `${window.start + 1}–${window.start + window.lines.length}`
+                            : "0";
+                        return (
+                            [
+                                truncateToWidth(
+                                    `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", usageStats(job, elapsedMs(job)))}`,
+                                    width,
                                 ),
-                                width,
-                            ),
-                        ].slice(0, bodyHeight());
+                                truncateToWidth(theme.fg("dim", job.model), width),
+                                ...tools,
+                                truncateToWidth(theme.fg("text", theme.bold(job.description)), width),
+                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
+                                ...shown,
+                                ...Array(Math.max(0, height - shown.length)).fill(""),
+                                ...(job.detail
+                                    ? [truncateToWidth(theme.fg(STATUS_COLORS.failed, job.detail), width)]
+                                    : []),
+                                truncateToWidth(theme.fg("dim", `${counter}/${window.total}`), width),
+                            ]
+                                .slice(0, bodyHeight())
+                                // Pad every row so the pane's right edge holds still while the transcript scrolls.
+                                .map((line) => truncateToWidth(line, width, "…", true))
+                        );
                     };
                     stopRedraw = store.subscribe(() => tui.requestRender());
                     return {
@@ -152,6 +305,8 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                     `${theme.fg(focus === "history" ? "accent" : "muted", focus === "history" ? "[Activity]" : "Activity")}` +
                                     theme.fg("dim", ` · ${tally(store.live().length, items)}`),
                                 width,
+                                "…",
+                                true,
                             );
                             const footer = truncateToWidth(
                                 theme.fg(
@@ -159,12 +314,15 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                     `${hint("tui.select.up", "up")} · ${hint("tui.select.down", "down")} · ${rawKeyHint("←/→", "switch pane")} · ${hint("tui.select.cancel", "close")}`,
                                 ),
                                 width,
+                                "…",
+                                true,
                             );
+                            const rule = theme.fg("borderMuted", "─".repeat(Math.max(0, width)));
                             if (!selected)
                                 return [
                                     title,
                                     theme.fg("muted", "No delegates in this session."),
-                                    ...Array(Math.max(0, tui.terminal.rows - 4)).fill(""),
+                                    ...Array(Math.max(0, tui.terminal.rows - 4)).fill(" ".repeat(Math.max(0, width))),
                                     footer,
                                 ].slice(0, tui.terminal.rows);
                             const sidebarWidth = Math.min(
@@ -172,34 +330,15 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                 Math.max(16, Math.floor(width * 0.35)),
                                 Math.max(1, width - 2),
                             );
-                            const body = new HStack(
-                                [
-                                    {
-                                        component: {
-                                            render: (w) => renderJobs(w, items, selectedIndex),
-                                            invalidate() {},
-                                        },
-                                        basis: sidebarWidth,
-                                        shrink: 0,
-                                    },
-                                    {
-                                        component: { render: (w) => renderHistory(w, selected), invalidate() {} },
-                                        basis: 0,
-                                        grow: 1,
-                                    },
-                                ],
-                                { gap: 1 },
-                            ).render(width);
-                            return [
-                                title,
-                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
-                                ...body,
-                                theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
-                                footer,
-                            ].slice(0, tui.terminal.rows);
+                            const historyWidth = Math.max(1, width - sidebarWidth - 1);
+                            // HStack measures a child at the full width first, so composing the panes here keeps one render per frame.
+                            const left = renderJobs(sidebarWidth, items, selectedIndex);
+                            const right = renderHistory(historyWidth, selected);
+                            const body = left.map((line, index) => `${line} ${right[index] ?? ""}`);
+                            return [title, rule, ...body, rule, footer].slice(0, tui.terminal.rows);
                         },
                         invalidate() {
-                            markdown = new WeakMap();
+                            for (const value of transcripts.values()) value.invalidate();
                         },
                         handleInput(data: string) {
                             if (keys.matches(data, "tui.select.cancel")) done(undefined);
@@ -222,16 +361,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore) {
                                         selectedId;
                                     top = undefined;
                                 } else {
-                                    const selected = items.find((item) => item.id === selectedId) ?? items[0];
-                                    const length =
-                                        selected?.activity.reduce(
-                                            (sum, entry) => sum + renderEntry(entry, historyWidth).length,
-                                            0,
-                                        ) ?? 0;
-                                    const maxTop = Math.max(
-                                        0,
-                                        length - (selected ? historyHeight(selected, historyWidth) : 0),
-                                    );
+                                    const maxTop = Math.max(0, lastWindow.total - lastWindow.height);
                                     const position = Math.max(0, Math.min(maxTop, top ?? maxTop) + (up ? -1 : 1));
                                     top = position >= maxTop ? undefined : position;
                                 }

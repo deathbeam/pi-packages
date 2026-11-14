@@ -1,20 +1,18 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { limitOutput, resultPreview, textParts, toolCallDetail } from "./format.ts";
+import { SessionManager, type MessageEndEvent } from "@earendil-works/pi-coding-agent";
+import { limitOutput, textParts } from "./format.ts";
 
 type Child = ChildProcessWithoutNullStreams;
 
-export type ChildActivity = {
-    kind: "tool" | "result" | "assistant" | "user" | "status";
-    text: string;
-    detail?: string;
-    isError?: boolean;
-};
+/** A child message in the shape pi's chat components render. */
+export type ChildMessage = MessageEndEvent["message"];
 export type ChildUpdate = {
     toolCalls?: number;
     contextTokens?: number;
-    activity?: ChildActivity;
+    /** A message the child finished; the store appends it to the job's transcript. */
+    message?: ChildMessage;
 };
 type ChildUpdateHandler = (update: ChildUpdate) => void;
 
@@ -127,46 +125,23 @@ export function runChild(
                 switch (event.type) {
                     case "tool_execution_start": {
                         toolCalls += 1;
-                        const detail = toolCallDetail(event.toolName, event.args);
-                        onUpdate?.({
-                            toolCalls,
-                            activity: { kind: "tool", text: event.toolName, detail },
-                        });
-                        return;
-                    }
-                    case "tool_execution_end": {
-                        const preview = resultPreview(event.result);
-                        onUpdate?.({
-                            activity: {
-                                kind: "result",
-                                text: preview ?? "",
-                                ...(event.isError ? { isError: true } : {}),
-                            },
-                        });
+                        onUpdate?.({ toolCalls });
                         return;
                     }
                     case "message_update": {
-                        const delta =
-                            event.assistantMessageEvent?.type === "text_delta"
-                                ? (event.assistantMessageEvent.delta ?? "")
-                                : "";
-                        if (delta) liveText += delta;
                         onUpdate?.({ contextTokens: usageTokens(event.usage) });
                         return;
                     }
                     case "message_end": {
-                        const role = event.message?.role;
-                        if (role !== "assistant" && role !== "user") return;
-                        const text = textParts(event.message.content).join("");
-                        if (role === "assistant") {
-                            childError = event.message.errorMessage;
+                        const message = event.message as ChildMessage;
+                        let contextTokens: number | undefined;
+                        if (message.role === "assistant") {
+                            childError = message.errorMessage;
+                            const text = textParts(message.content).join("");
                             if (text) liveText = text;
+                            contextTokens = usageTokens(message.usage);
                         }
-                        if (text)
-                            onUpdate?.({
-                                contextTokens: usageTokens(event.message.usage),
-                                activity: { kind: role, text },
-                            });
+                        onUpdate?.({ contextTokens, message });
                         return;
                     }
                     case "agent_settled":
@@ -263,7 +238,7 @@ export function runChild(
                 });
             };
             if (revive) {
-                // An empty transcript means the pinned session was recreated (e.g. a different cwd) and the task is gone; fail rather than prompt into a blank session.
+                // An empty transcript means the pinned session was recreated (e.g. a different cwd); prompting would lose the task.
                 void send({ type: "get_state" })
                     .then((data) => {
                         if (!settled && !aborted && !data?.messageCount) {
@@ -299,11 +274,10 @@ export function runChild(
 }
 
 /**
- * Replays the child's persisted transcript as the activity a revived job continues from, so the
- * inspector keeps the old history. A missing or unreadable transcript seeds nothing: the revive
- * itself still works.
+ * The child's persisted transcript, for a job whose messages are not in memory. A missing or
+ * unreadable session seeds nothing: the job still renders, just without history.
  */
-export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
+export function sessionMessages(sessionDir: string, id: string): ChildMessage[] {
     let sessionFile: string | undefined;
     try {
         // Sessions are <timestamp>_<sessionId>.jsonl; a recreated pinned session is the newest one.
@@ -315,54 +289,9 @@ export function priorActivity(sessionDir: string, id: string): ChildActivity[] {
         return [];
     }
     if (!sessionFile) return [];
-    let lines: string[];
     try {
-        lines = readFileSync(join(sessionDir, sessionFile), "utf8").split("\n");
+        return SessionManager.open(join(sessionDir, sessionFile)).buildSessionContext().messages;
     } catch {
         return [];
     }
-    const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
-    const activity: ChildActivity[] = [];
-    for (const line of lines) {
-        if (!line.trim()) continue;
-        let entry: { type?: string; message?: unknown };
-        try {
-            entry = JSON.parse(line);
-        } catch {
-            continue; // Same tolerance pi's session reader has for malformed lines.
-        }
-        const message =
-            entry?.type === "message"
-                ? (entry.message as {
-                      role?: "assistant" | "user" | "toolResult";
-                      content?: unknown;
-                      isError?: boolean;
-                  })
-                : undefined;
-        if (!message?.role) continue;
-        if (message.role === "toolResult") {
-            const preview = resultPreview({ content: message.content });
-            activity.push({
-                kind: "result",
-                text: normalize(preview ?? ""),
-                ...(message.isError ? { isError: true } : {}),
-            });
-            continue;
-        }
-        // Assistant text lands before its tool calls, matching the live event order.
-        const text = textParts(message.content).join("");
-        if (text) activity.push({ kind: message.role, text });
-        if (message.role !== "assistant") continue;
-        for (const part of Array.isArray(message.content) ? message.content : []) {
-            const call =
-                part && typeof part === "object" ? (part as { type?: string; name?: string; arguments?: unknown }) : {};
-            if (call.type !== "toolCall" || !call.name) continue;
-            activity.push({
-                kind: "tool",
-                text: normalize(call.name),
-                detail: normalize(toolCallDetail(call.name, call.arguments)) || undefined,
-            });
-        }
-    }
-    return activity;
 }
