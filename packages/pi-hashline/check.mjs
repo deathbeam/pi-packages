@@ -1090,6 +1090,224 @@ const agentLoopRun = async (tool, args) =>
     }
     console.log("--- atomic write race guard + temp cleanup OK ---");
 
+    // 13. file-shape round-trips: CRLF, BOM, no trailing newline, empty file
+    const crlfFile = join(dir, "crlf.txt");
+    writeFileSync(crlfFile, "alpha\r\nbeta\r\ngamma\r\n");
+    const crlfRead = await run(byName.read, { path: crlfFile });
+    const crlfAnchor = crlfRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    await run(byName.edit, { path: crlfFile, edits: [{ op: "replace", pos: `2#${crlfAnchor[1]}`, lines: ["BETA"] }] });
+    if (readFileSync(crlfFile, "utf8") !== "alpha\r\nBETA\r\ngamma\r\n") {
+        throw new Error("CRLF round-trip failed: " + JSON.stringify(readFileSync(crlfFile, "utf8")));
+    }
+    const bomFile = join(dir, "bom.ts");
+    writeFileSync(bomFile, "\uFEFFconst a = 1;\nconst b = 2;\n");
+    const bomRead = await run(byName.read, { path: bomFile });
+    const bomAnchor = bomRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    await run(byName.edit, {
+        path: bomFile,
+        edits: [{ op: "replace", pos: `2#${bomAnchor[1]}`, lines: ["const b = 22;"] }],
+    });
+    if (readFileSync(bomFile, "utf8") !== "\uFEFFconst a = 1;\nconst b = 22;\n") {
+        throw new Error("BOM round-trip failed: " + JSON.stringify(readFileSync(bomFile, "utf8")));
+    }
+    const noEolFile = join(dir, "no-eol.txt");
+    writeFileSync(noEolFile, "one\ntwo");
+    const noEolRead = await run(byName.read, { path: noEolFile });
+    const noEolAnchor = noEolRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    await run(byName.edit, { path: noEolFile, edits: [{ op: "replace", pos: `2#${noEolAnchor[1]}`, lines: ["TWO"] }] });
+    if (readFileSync(noEolFile, "utf8") !== "one\nTWO") {
+        throw new Error("no-trailing-newline edit failed: " + JSON.stringify(readFileSync(noEolFile, "utf8")));
+    }
+    const emptyEditFile = join(dir, "empty-edit.txt");
+    writeFileSync(emptyEditFile, "");
+    await run(byName.edit, { path: emptyEditFile, edits: [{ op: "append", lines: ["first"] }] });
+    if (readFileSync(emptyEditFile, "utf8") !== "first") {
+        throw new Error("empty-file append failed: " + JSON.stringify(readFileSync(emptyEditFile, "utf8")));
+    }
+    const emptyRead = await run(byName.read, { path: emptyEditFile });
+    const emptyAnchor = emptyRead.content[0].text.match(/^\s*1#([A-Z]{3}):/m);
+    await run(byName.edit, {
+        path: emptyEditFile,
+        edits: [{ op: "prepend", pos: `1#${emptyAnchor[1]}`, lines: ["zero"] }],
+    });
+    if (readFileSync(emptyEditFile, "utf8") !== "zero\nfirst") {
+        throw new Error("single-line prepend failed: " + JSON.stringify(readFileSync(emptyEditFile, "utf8")));
+    }
+    console.log("--- CRLF / BOM / no-trailing-newline / empty-file round-trips OK ---");
+
+    // 14. pure deletion returns anchors around the deletion point, not the whole tail
+    const pureDelFile = join(dir, "pure-del.txt");
+    writeFileSync(pureDelFile, Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
+    const pureDelRead = await run(byName.read, { path: pureDelFile });
+    const pureDelAnchors = [...pureDelRead.content[0].text.matchAll(/^\s*(\d+)#([A-Z]{3}):/gm)].map((m) => ({
+        line: Number(m[1]),
+        hash: m[2],
+    }));
+    const pureDel = await run(byName.edit, {
+        path: pureDelFile,
+        edits: [
+            {
+                op: "replace",
+                pos: `${pureDelAnchors[0].line}#${pureDelAnchors[0].hash}`,
+                end: `${pureDelAnchors[9].line}#${pureDelAnchors[9].hash}`,
+                lines: [],
+            },
+        ],
+    });
+    const pureDelText = pureDel.content[0].text;
+    if (!/^--- Anchors 1-3 ---$/m.test(pureDelText) || !/^1#[A-Z]{3}:line 11$/m.test(pureDelText)) {
+        throw new Error("pure deletion did not return anchors around the deletion: " + pureDelText);
+    }
+    console.log("--- anchors after pure deletion OK ---");
+
+    // 15. grep pattern "null" is a real pattern; only optional params lose the literal
+    const nullPatternFile = join(dir, "null-pattern.txt");
+    writeFileSync(nullPatternFile, "null here\nother\n");
+    const nullPattern = await run(byName.grep, { pattern: "null", path: nullPatternFile });
+    if (!/#[A-Z]{3}:null here/.test(nullPattern.content[0].text)) {
+        throw new Error('grep pattern "null" was dropped: ' + nullPattern.content[0].text);
+    }
+    console.log('--- grep pattern "null" OK ---');
+
+    // 16. payload \\r must not survive as a stray CR
+    const crPayloadFile = join(dir, "cr-payload.txt");
+    writeFileSync(crPayloadFile, "one\ntwo\n");
+    const crPayloadRead = await run(byName.read, { path: crPayloadFile });
+    const crPayloadAnchor = crPayloadRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    await run(byName.edit, {
+        path: crPayloadFile,
+        edits: [{ op: "replace", pos: `2#${crPayloadAnchor[1]}`, lines: ["TWO\r"] }],
+    });
+    if (readFileSync(crPayloadFile, "utf8") !== "one\nTWO\n") {
+        throw new Error("\\r in lines was written verbatim: " + JSON.stringify(readFileSync(crPayloadFile, "utf8")));
+    }
+    writeFileSync(crPayloadFile, "one\r\ntwo\r\n");
+    const crlfPayloadRead = await run(byName.read, { path: crPayloadFile });
+    const crlfPayloadAnchor = crlfPayloadRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m);
+    await run(byName.edit, {
+        path: crPayloadFile,
+        edits: [{ op: "replace", pos: `2#${crlfPayloadAnchor[1]}`, lines: ["TWO\r"] }],
+    });
+    if (readFileSync(crPayloadFile, "utf8") !== "one\r\nTWO\r\n") {
+        throw new Error("\\r in lines produced \\r\\r\\n: " + JSON.stringify(readFileSync(crPayloadFile, "utf8")));
+    }
+    console.log("--- payload \\r stripped before the file ending is applied OK ---");
+
+    // 17. prepend at the start of a replaced range keeps its order; append there still conflicts
+    const prependFile = join(dir, "prepend-range.txt");
+    writeFileSync(prependFile, "a\nb\nc\n");
+    const prependRead = await run(byName.read, { path: prependFile });
+    const prependAnchors = [...prependRead.content[0].text.matchAll(/^\s*(\d+)#([A-Z]{3}):/gm)].map((m) => ({
+        line: Number(m[1]),
+        hash: m[2],
+    }));
+    await run(byName.edit, {
+        path: prependFile,
+        edits: [
+            {
+                op: "replace",
+                pos: `${prependAnchors[0].line}#${prependAnchors[0].hash}`,
+                end: `${prependAnchors[1].line}#${prependAnchors[1].hash}`,
+                lines: ["X", "Y"],
+            },
+            { op: "prepend", pos: `${prependAnchors[0].line}#${prependAnchors[0].hash}`, lines: ["P"] },
+        ],
+    });
+    if (readFileSync(prependFile, "utf8") !== "P\nX\nY\nc\n") {
+        throw new Error("prepend at range start misordered: " + JSON.stringify(readFileSync(prependFile, "utf8")));
+    }
+    writeFileSync(prependFile, "a\nb\nc\n");
+    const insideRead = await run(byName.read, { path: prependFile });
+    const insideAnchors = [...insideRead.content[0].text.matchAll(/^\s*(\d+)#([A-Z]{3}):/gm)].map((m) => ({
+        line: Number(m[1]),
+        hash: m[2],
+    }));
+    let insideConflict = "";
+    try {
+        await run(byName.edit, {
+            path: prependFile,
+            edits: [
+                {
+                    op: "replace",
+                    pos: `${insideAnchors[0].line}#${insideAnchors[0].hash}`,
+                    end: `${insideAnchors[1].line}#${insideAnchors[1].hash}`,
+                    lines: ["X"],
+                },
+                { op: "prepend", pos: `${insideAnchors[1].line}#${insideAnchors[1].hash}`, lines: ["Z"] },
+            ],
+        });
+    } catch (e) {
+        insideConflict = e.message;
+    }
+    if (!/E_EDIT_CONFLICT/.test(insideConflict) || readFileSync(prependFile, "utf8") !== "a\nb\nc\n") {
+        throw new Error("prepend inside a replaced range should stay a conflict: " + insideConflict);
+    }
+    console.log("--- prepend at range start allowed, prepend inside the range still conflicts OK ---");
+
+    // 19. a broad grep must not evict the read snapshot stale recovery needs
+    const evictFile = join(dir, "evict-target.ts");
+    writeFileSync(evictFile, "const one = 1;\nconst two = 2;\nconst three = 3;\n");
+    const evictRead = await run(byName.read, { path: evictFile });
+    const evictAnchor = evictRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m)[1];
+    const manyDir = join(dir, "many");
+    mkdirSync(manyDir);
+    for (let i = 0; i < 10; i++) writeFileSync(join(manyDir, `f${i}.ts`), `needle ${i}\n`);
+    await run(byName.grep, { pattern: "needle", path: manyDir });
+    writeFileSync(evictFile, "const zero = 0;\nconst one = 1;\nconst two = 2;\nconst three = 3;\n");
+    const evictEdit = await run(byName.edit, {
+        path: evictFile,
+        edits: [{ op: "replace", pos: `2#${evictAnchor}`, lines: ["const two = 22;"] }],
+    });
+    if (!/Recovered stale anchors/.test(evictEdit.content[0].text)) {
+        throw new Error("broad grep evicted the read snapshot: " + evictEdit.content[0].text);
+    }
+    console.log("--- broad grep keeps read snapshots recoverable OK ---");
+
+    // 20. stale-anchor recovery merges onto the live file, keeping its frame.
+    // The change sits far from EOF so the anchor window does not reach it.
+    const recFile = join(dir, "recovery-note.ts");
+    writeFileSync(recFile, Array.from({ length: 12 }, (_, i) => `r${i + 1}`).join("\n") + "\n");
+    const recRead = await run(byName.read, { path: recFile });
+    const recAnchor = recRead.content[0].text.match(/^\s*3#([A-Z]{3}):/m)[1];
+    writeFileSync(recFile, "zero\n" + Array.from({ length: 12 }, (_, i) => `r${i + 1}`).join("\n") + "\n");
+    const recEdit = await run(byName.edit, {
+        path: recFile,
+        edits: [{ op: "replace", pos: `3#${recAnchor}`, lines: ["R3a", "R3b"] }],
+    });
+    const recText = recEdit.content[0].text;
+    if (!/Recovered stale anchors/.test(recText)) {
+        throw new Error("recovery path did not report the merge: " + JSON.stringify(recText));
+    }
+    const recLines = readFileSync(recFile, "utf8").split("\n");
+    if (recLines[0] !== "zero" || recLines[3] !== "R3a" || recLines[4] !== "R3b" || recLines.length !== 15) {
+        throw new Error("recovery merge result wrong: " + JSON.stringify(readFileSync(recFile, "utf8")));
+    }
+    console.log("--- stale-anchor recovery merges onto the live file OK ---");
+
+    // 21. grepping an already-read path must not downgrade it to evictable
+    const keepFile = join(dir, "keep-read.ts");
+    writeFileSync(keepFile, "const keep = 1;\nconst two = 2;\n");
+    const fillerFile = join(dir, "filler.ts");
+    writeFileSync(fillerFile, "filler\n");
+    await run(byName.read, { path: fillerFile });
+    const keepRead = await run(byName.read, { path: keepFile });
+    const keepAnchor = keepRead.content[0].text.match(/^\s*2#([A-Z]{3}):/m)[1];
+    await run(byName.grep, { pattern: "keep", path: keepFile });
+    for (let i = 0; i < 7; i++) {
+        const other = join(dir, `other-${i}.ts`);
+        writeFileSync(other, `other ${i}\n`);
+        await run(byName.read, { path: other });
+    }
+    writeFileSync(keepFile, "const zero = 0;\nconst keep = 1;\nconst two = 2;\n");
+    const keepEdit = await run(byName.edit, {
+        path: keepFile,
+        edits: [{ op: "replace", pos: `2#${keepAnchor}`, lines: ["const two = 22;"] }],
+    });
+    if (!/Recovered stale anchors/.test(keepEdit.content[0].text)) {
+        throw new Error("grep downgraded an already-read path: " + keepEdit.content[0].text);
+    }
+    console.log("--- grep does not downgrade an already-read path OK ---");
+
     rmSync(dir, { recursive: true, force: true });
     console.log("\npi-hashline check passed");
 })().catch((e) => {

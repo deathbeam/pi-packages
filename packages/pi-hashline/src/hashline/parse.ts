@@ -143,7 +143,8 @@ function assertNoDisplayPrefixes(lines: string[]): void {
 }
 
 function hashlineParseText(edit: string[] | undefined): string[] {
-    const lines = edit ?? [];
+    // Strip a trailing \r; the file's own ending is applied later.
+    const lines = (edit ?? []).map((line) => line.replace(/\r$/, ""));
     assertNoDisplayPrefixes(lines);
     return lines;
 }

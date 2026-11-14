@@ -71,6 +71,7 @@ export function computeLineHash(fileLines: readonly string[], index: number): st
     const prev = normalizeHashInput(index > 0 ? fileLines[index - 1]! : "");
     const curr = normalizeHashInput(fileLines[index]!);
     const next = normalizeHashInput(index < fileLines.length - 1 ? fileLines[index + 1]! : "");
+    // shortcut: lines in a run of 3+ identical lines share a hash; upgrade only by hashing global position.
     return computeHashFromContext(prev, curr, next);
 }
 
@@ -87,10 +88,6 @@ function normalizeFuzzyLine(text: string): string {
         .replace(FUZZY_DOUBLE_QUOTES_RE, '"')
         .replace(FUZZY_HYPHENS_RE, "-")
         .replace(FUZZY_UNICODE_SPACES_RE, " ");
-}
-
-export function isFuzzyEquivalentLine(expected: string, actual: string): boolean {
-    return normalizeFuzzyLine(expected) === normalizeFuzzyLine(actual);
 }
 
 /** Fuzzy-normalized hint text before its first ellipsis, and whether it was truncated there. */

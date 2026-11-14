@@ -10,7 +10,6 @@ import {
     computeLineHash,
     normalizeHashInput,
     computeHashFromContext,
-    isFuzzyEquivalentLine,
     hintMatchesLine,
     hintHasSignal,
 } from "./hash";
@@ -38,6 +37,7 @@ type ResolvedEditSpan = {
     end: number;
     replacement: string;
     boundary?: number;
+    insertOp?: "append" | "prepend";
     insertMode?: "append-empty-origin" | "prepend-empty-origin";
 };
 
@@ -321,6 +321,7 @@ function resolveEditToSpan(
             if (content.length === 0) {
                 return {
                     kind: "insert",
+                    insertOp: "append",
                     index,
                     label: describeEdit(edit),
                     start: 0,
@@ -334,6 +335,7 @@ function resolveEditToSpan(
             if (!edit.pos) {
                 return {
                     kind: "insert",
+                    insertOp: "append",
                     index,
                     label: describeEdit(edit),
                     start: content.length,
@@ -349,6 +351,7 @@ function resolveEditToSpan(
                 : lineStarts[edit.pos.line - 1]! + fileLines[edit.pos.line - 1]!.length;
             return {
                 kind: "insert",
+                insertOp: "append",
                 index,
                 label: describeEdit(edit),
                 start: insertAt,
@@ -362,6 +365,7 @@ function resolveEditToSpan(
             const start = edit.pos ? lineStarts[edit.pos.line - 1]! : 0;
             return {
                 kind: "insert",
+                insertOp: "prepend",
                 index,
                 label: describeEdit(edit),
                 start,
@@ -396,7 +400,9 @@ function assertNoConflictingSpans(spans: ResolvedEditSpan[]): void {
 
             const replaceSpan = left.kind === "replace" ? left : right;
             const insertSpan = left.kind === "insert" ? left : right;
-            if (insertSpan.start >= replaceSpan.start && insertSpan.start < replaceSpan.end) {
+            // A prepend at the range start is unambiguous; an append there needs a leading newline, so it stays a conflict.
+            const atRangeStart = insertSpan.insertOp === "prepend" && insertSpan.start === replaceSpan.start;
+            if (!atRangeStart && insertSpan.start >= replaceSpan.start && insertSpan.start < replaceSpan.end) {
                 throwEditConflict(
                     left,
                     right,
@@ -506,14 +512,13 @@ function validateAnchorEdits(
             return true;
         }
         if (ref.textHint !== undefined) {
-            // Hash mismatched: recompute with the hint in the current neighbor context;
-            // accept when that matches ref.hash and the hint fuzzy-matches the actual line.
+            // Accept when the hint recomputes to ref.hash and matches the line, ellipsis included (same rule as the collision veto).
             const prevLine = normalizeHashInput(ref.line > 1 ? lineIndex.fileLines[ref.line - 2]! : "");
             const nextLine = normalizeHashInput(
                 ref.line < lineIndex.fileLines.length ? lineIndex.fileLines[ref.line]! : "",
             );
             const hintedHash = computeHashFromContext(prevLine, normalizeHashInput(ref.textHint), nextLine);
-            if (hintedHash === ref.hash && isFuzzyEquivalentLine(ref.textHint, line)) {
+            if (hintedHash === ref.hash && hintMatchesLine(ref.textHint, line)) {
                 const key = `${ref.line}:${ref.hash}:${ref.textHint}`;
                 if (!acceptedFuzzyRefs.has(key)) {
                     acceptedFuzzyRefs.add(key);

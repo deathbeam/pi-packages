@@ -107,9 +107,16 @@ function formatHashlineReadPreview(
         const oversized = options.raw
             ? line
             : `${String(startLine).padStart(lineNumberWidth, " ")}#${"Z".repeat(HASH_LENGTH)}:${line}`;
+        // Keep the continuation offset so one huge line does not block paging.
+        const nextOffset = startLine < totalLines ? startLine + 1 : undefined;
+        const hint =
+            nextOffset === undefined
+                ? "Use bash to inspect it."
+                : `Use bash to inspect it, or offset=${nextOffset} to continue.`;
         return {
-            text: `[Line ${startLine} cannot fit as a complete ${options.raw ? "raw" : "hashline"} line within ${formatSize(DEFAULT_MAX_BYTES)} of output. Use bash to inspect it.]`,
+            text: `[Line ${startLine} cannot fit as a complete ${options.raw ? "raw" : "hashline"} line within ${formatSize(DEFAULT_MAX_BYTES)} of output. ${hint}]`,
             truncation: truncateHead(oversized),
+            ...(nextOffset !== undefined ? { nextOffset } : {}),
         };
     }
 
@@ -220,7 +227,7 @@ export function registerReadTool(pi: ExtensionAPI): void {
             raw: Type.Optional(
                 Type.Boolean({
                     description:
-                        "Return plain text without LINE#HASH anchors. Saves tokens when you do not plan to edit this file.",
+                        "Return plain text without LINE#HASH anchors; offset, limit, and truncation notices still apply. Saves tokens when you do not plan to edit this file.",
                 }),
             ),
         }),

@@ -1,3 +1,2 @@
 - Use read before edit whenever you do not hold current LINE#HASH anchors for the file.
-- `offset` is the 1-based start line: compute it yourself to jump to a known region (lines 440-569 → offset 440, limit 130); to continue truncated output, use the offset the notice names.
 - Use raw: true when reading for context only; anchors are required for edit.

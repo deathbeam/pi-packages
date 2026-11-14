@@ -63,14 +63,6 @@ export function computeAffectedLineRange(
     const start = Math.max(1, firstChangedLine - ANCHOR_CONTEXT_LINES);
     const end = Math.min(resultLineCount, lastChangedLine + ANCHOR_CONTEXT_LINES);
 
-    // Degenerate range: an empty result document (resultLineCount 0) clamps
-    // end below start. Unreachable from the edit tool (E_WOULD_EMPTY rejects
-    // emptying writes upstream), but this is a pure exported helper, so it
-    // keeps a sane null contract for that input rather than {start:1, end:0}.
-    if (end < start) {
-        return null;
-    }
-
     if (end - start + 1 > ANCHOR_MAX_OUTPUT_LINES) {
         return null;
     }
@@ -142,7 +134,8 @@ export function computeChangedLineRange(
     const firstChangedLine = indexToLine(firstDiff + 1, result);
     let lastChangedLine: number;
     if (lastRes < firstDiff) {
-        lastChangedLine = result.length === 0 ? 1 : splitVisibleLines(result).length;
+        // Pure deletion: the change is one point in the result, not the whole tail.
+        lastChangedLine = firstChangedLine;
     } else if (firstDiff === 0 && original.length > 0 && result.endsWith(original)) {
         lastChangedLine = firstChangedLine;
     } else {

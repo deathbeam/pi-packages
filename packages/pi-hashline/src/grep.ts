@@ -404,9 +404,11 @@ export function registerGrepTool(pi: ExtensionAPI): void {
         },
 
         async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
+            // Drop "null" optionals only, so pattern "null" still searches for the text.
             const params = Object.fromEntries(
-                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
+                Object.entries(rawParams).filter(
+                    ([key, value]) => key === "pattern" || (value !== null && value !== "null"),
+                ),
             ) as typeof rawParams;
             throwIfAborted(signal);
 
@@ -479,11 +481,10 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                     const normalized = normalizeToLF(stripBom(loaded.text).text);
                     fileLines = splitVisibleLines(normalized);
 
-                    // Anchored grep output needs the same snapshot recovery
-                    // as read anchors; raw grep mints none, so skip it.
+                    // Anchored grep mints snapshots like read, but marks them evictable.
                     if (!raw) {
                         const canonicalWritePath = await resolveMutationTargetPath(filePath);
-                        rememberReadSnapshot(canonicalWritePath, normalized);
+                        rememberReadSnapshot(canonicalWritePath, normalized, true);
                     }
                 } catch {
                     continue;

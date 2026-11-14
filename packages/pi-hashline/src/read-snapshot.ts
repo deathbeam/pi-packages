@@ -7,6 +7,8 @@ const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 // Paths and their versions are both newest-first.
 const pathOrder: string[] = [];
 const pathMap = new Map<string, string[]>();
+// Paths first seen through grep; evicted before read snapshots.
+const grepPaths = new Set<string>();
 
 function totalSize(): number {
     let n = 0;
@@ -19,17 +21,16 @@ function totalSize(): number {
 }
 
 function evictOldestVersion(): void {
-    for (let i = pathOrder.length - 1; i >= 0; i--) {
-        const p = pathOrder[i]!;
-        const versions = pathMap.get(p);
-        if (versions && versions.length > 0) {
-            versions.pop();
-            if (versions.length === 0) {
-                pathMap.delete(p);
-                pathOrder.splice(i, 1);
-            }
-            return;
-        }
+    // Grep-only paths go first, so a broad search cannot squeeze out read snapshots.
+    const target = pathOrder.findLast((path) => grepPaths.has(path)) ?? pathOrder.at(-1);
+    if (target === undefined) return;
+    const versions = pathMap.get(target);
+    if (!versions?.length) return;
+    versions.pop();
+    if (versions.length === 0) {
+        pathMap.delete(target);
+        grepPaths.delete(target);
+        pathOrder.splice(pathOrder.indexOf(target), 1);
     }
 }
 
@@ -41,7 +42,14 @@ function moveToFront(canonicalPath: string): void {
     }
 }
 
-export function rememberReadSnapshot(canonicalPath: string, content: string): void {
+export function rememberReadSnapshot(canonicalPath: string, content: string, fromGrep = false): void {
+    // Only a path first seen through grep is evictable.
+    if (!fromGrep) {
+        grepPaths.delete(canonicalPath);
+    } else if (!pathMap.has(canonicalPath)) {
+        grepPaths.add(canonicalPath);
+    }
+
     const existing = pathMap.get(canonicalPath);
 
     if (existing && existing.length > 0 && existing[0] === content) {
@@ -57,9 +65,10 @@ export function rememberReadSnapshot(canonicalPath: string, content: string): vo
         moveToFront(canonicalPath);
     } else {
         if (pathOrder.length >= MAX_PATHS) {
-            const lruPath = pathOrder[pathOrder.length - 1]!;
+            const lruPath = pathOrder.findLast((path) => grepPaths.has(path)) ?? pathOrder[pathOrder.length - 1]!;
             pathMap.delete(lruPath);
-            pathOrder.pop();
+            grepPaths.delete(lruPath);
+            pathOrder.splice(pathOrder.indexOf(lruPath), 1);
         }
         pathMap.set(canonicalPath, [content]);
         pathOrder.unshift(canonicalPath);
