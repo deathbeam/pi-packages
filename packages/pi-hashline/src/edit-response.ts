@@ -18,6 +18,7 @@ export type HashlineEditToolDetails = {
     diff: string;
     firstChangedLine?: number;
     warnings: string[];
+    noop?: boolean;
 };
 
 export type EditMeta = {
@@ -82,6 +83,7 @@ export function buildNoopResponse(input: NoopResponseInput): ToolResult {
             diff: "",
             firstChangedLine: undefined,
             warnings: [`No changes made to ${path}`, ...(warnings ?? [])],
+            noop: true,
         },
     };
 }

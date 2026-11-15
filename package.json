@@ -18,7 +18,8 @@
       "./packages/pi-inferhub/index.ts",
       "./packages/pi-surplus/index.ts",
       "./packages/pi-keenable/index.ts",
-      "./packages/pi-usage/index.ts"
+      "./packages/pi-usage/index.ts",
+      "./packages/pi-rtk/index.ts"
     ]
   },
   "scripts": {
