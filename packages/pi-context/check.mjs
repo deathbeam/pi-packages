@@ -22,8 +22,6 @@ const host = (exec) => {
         pi: {
             exec,
             on: (event, handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
-            registerCommand: () => {},
-            registerEntryRenderer: () => {},
         },
     };
 };

@@ -33,21 +33,4 @@ export async function registerRtk(pi: ExtensionAPI): Promise<void> {
             if (rewritten) event.input.command = rewritten;
         } catch {}
     });
-
-    pi.registerCommand("rtk", {
-        description: "Show RTK token savings (rtk gain)",
-        handler: async (_args, ctx) => {
-            const result = await pi.exec("rtk", ["gain"], { timeout: 10_000 });
-            if (result.code !== 0) {
-                ctx.ui.notify(`rtk gain failed: ${result.stderr.trim() || `exit ${result.code}`}`, "error");
-                return;
-            }
-            pi.appendEntry("rtk-gain", result.stdout.trim());
-        },
-    });
-
-    pi.registerEntryRenderer("rtk-gain", (entry) => ({
-        render: () => String(entry.data ?? "").split("\n"),
-        invalidate: () => {},
-    }));
 }

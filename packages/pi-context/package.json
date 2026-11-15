@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-context",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Minimal extension for context-window token economy: RTK command rewriting, stale tool-result pruning, and a compaction model override.",
   "type": "module",
   "license": "MIT",
