@@ -1,6 +1,4 @@
-import type { BashToolCallEvent, ExecResult, ExtensionAPI, ToolCallEvent } from "@earendil-works/pi-coding-agent";
-
-const isBash = (event: ToolCallEvent): event is BashToolCallEvent => event.toolName === "bash";
+import { type ExecResult, type ExtensionAPI, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 // Text `rtk init` writes to CLAUDE.md (rtk-instructions v2), minus its "# Command output" heading.
 export const RTK_PROMPT = `Command output here is condensed to save tokens, keeping every signal and
@@ -16,19 +14,26 @@ export function rewrittenCommand(result: ExecResult): string | null {
 }
 
 export async function registerRtk(pi: ExtensionAPI): Promise<void> {
-    if ((await pi.exec("rtk", ["gain", "--help"]).catch(() => null))?.code !== 0) return;
+    // A hung rtk must not stall extension load, so the probe has a deadline; a killed probe counts as absent.
+    const probe = await pi.exec("rtk", ["rewrite", "--help"], { timeout: 2_000 });
+    if (probe.killed || probe.code !== 0) return;
 
     pi.on("before_agent_start", (event) => {
         event.systemPromptOptions.sections.command_output = RTK_PROMPT;
     });
 
     pi.on("tool_call", async (event, ctx) => {
-        if (!isBash(event)) return;
+        // Already in RTK form: nothing to rewrite, so skip the subprocess.
+        if (!isToolCallEventType("bash", event) || event.input.command.startsWith("rtk ")) return;
         try {
             const result = await pi.exec("rtk", ["rewrite", event.input.command], {
                 timeout: 2_000,
                 signal: ctx.signal,
             });
+            // Exit 2 with a message is an rtk rule denying the command: block it with that message.
+            if (!result.killed && result.code === 2 && result.stdout.trim()) {
+                return { block: true, reason: result.stdout.trim() };
+            }
             const rewritten = rewrittenCommand(result);
             if (rewritten) event.input.command = rewritten;
         } catch {}

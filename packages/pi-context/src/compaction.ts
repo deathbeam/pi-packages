@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME, compact, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, SettingsManager, compact, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 function compactionSetting(file: string): string | undefined {
     try {
@@ -51,6 +51,8 @@ export function registerCompaction(pi: ExtensionAPI): void {
                 (ref.thinking ?? pi.getThinkingLevel()) as Parameters<typeof compact>[6],
                 undefined,
                 auth.env,
+                // pi's own resolved retry policy: same defaults and settings as its compaction path.
+                SettingsManager.inMemory(pi.getSettings()).getRetrySettings(),
             );
             return { compaction };
         } catch (error) {

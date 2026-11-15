@@ -9,7 +9,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const FALLBACK_TTL_SECONDS = { short: 300, long: 24 * 60 * 60 };
+// Used when the model declares no prompt-cache lifetime for the tier.
+const FALLBACK_TTL_SECONDS = 5 * 60;
 
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
 
@@ -18,7 +19,14 @@ const BASH_PLACEHOLDER = "[superseded: this exact command was run again later]";
 
 function resolveToCwd(filePath: string, cwd: string): string {
     const normalized = filePath.replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, " ").replace(/^@/, "");
-    const path = normalized.startsWith("file://") ? fileURLToPath(normalized) : normalized;
+    let path = normalized;
+    if (normalized.startsWith("file://")) {
+        try {
+            path = fileURLToPath(normalized);
+        } catch {
+            // Not a valid file URL: treat it as a plain path.
+        }
+    }
     const expanded = path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
     return resolve(cwd, expanded);
 }
@@ -118,7 +126,7 @@ export function superseded(messages: readonly unknown[], cwd: string): Array<{ t
 /** The cache lifetime pi uses for warming, from the model's retention tier. */
 function cacheTtlMs(model: ExtensionContext["model"]): number {
     const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-    return (model?.promptCache?.[retention] ?? FALLBACK_TTL_SECONDS[retention]) * 1000;
+    return (model?.promptCache?.[retention] ?? FALLBACK_TTL_SECONDS) * 1000;
 }
 
 function modelKey(model: ExtensionContext["model"]): string {

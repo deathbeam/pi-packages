@@ -13,7 +13,14 @@ const { placeholder, superseded } = await import("./src/prune.ts");
 const { readCompactionModel } = await import("./src/compaction.ts");
 
 const result = (code, stdout = "") => ({ code, stdout, stderr: "", killed: false });
-const replies = { ls: result(0, "rtk ls\n"), grep: result(3, "rtk grep\n"), cat: result(1), rm: result(2, "deny") };
+const replies = {
+    ls: result(0, "rtk ls\n"),
+    grep: result(3, "rtk grep\n"),
+    cat: result(1),
+    noop: result(2),
+    deny: result(2, "  rtk pipeline denied rm -rf  \n"),
+    killed: { ...result(0, "rtk ls\n"), killed: true },
+};
 
 const host = (exec) => {
     const handlers = new Map();
@@ -26,7 +33,7 @@ const host = (exec) => {
     };
 };
 const rtkExec = (version) => async (_command, args) => {
-    if (args[0] === "gain") return version;
+    if (args[1] === "--help") return version;
     if (args[1] === "boom") throw new Error("spawn failed");
     return replies[args[1]];
 };
@@ -56,18 +63,40 @@ assert.deepEqual(
 const { handlers, pi } = host(rtkExec(result(0, "rtk 0.40.0")));
 await extension(pi);
 
-// Exit 0/3 rewrite; 1, 2 and a throwing rtk pass the command through.
+// Exit 0/3 rewrite; 1, a 2 without a message, a killed run and a throwing rtk pass the command through.
 for (const [command, expected] of [
     ["ls", "rtk ls"],
     ["grep", "rtk grep"],
     ["cat", "cat"],
-    ["rm", "rm"],
+    ["noop", "noop"],
+    ["killed", "killed"],
     ["boom", "boom"],
 ]) {
     const event = { toolName: "bash", input: { command } };
-    await handlers.get("tool_call")[0](event, {});
+    assert.equal(await fire(handlers, "tool_call", event, {}), undefined, `${command} must not block`);
     assert.equal(event.input.command, expected);
 }
+
+// Exit 2 with a message is an rtk deny: block the call and hand the message to the model.
+const denied = { toolName: "bash", input: { command: "deny" } };
+assert.deepEqual(await fire(handlers, "tool_call", denied, {}), {
+    block: true,
+    reason: "rtk pipeline denied rm -rf",
+});
+assert.equal(denied.input.command, "deny", "a denied command is not rewritten");
+
+// A command already in RTK form skips the subprocess entirely.
+let execCalls = 0;
+const counting = host(async (command, args) => {
+    execCalls++;
+    return rtkExec(result(0, "rtk 0.40.0"))(command, args);
+});
+await extension(counting.pi);
+execCalls = 0;
+const already = { toolName: "bash", input: { command: "rtk ls" } };
+assert.equal(await fire(counting.handlers, "tool_call", already, {}), undefined);
+assert.equal(already.input.command, "rtk ls");
+assert.equal(execCalls, 0, "an rtk command must not spawn rtk again");
 
 // RTK usage instructions go into their own system prompt section.
 const prompt = { systemPromptOptions: { sections: {} } };
@@ -164,6 +193,8 @@ const cases = [
         {},
         [],
     ],
+    // An invalid file:// URL falls back to a plain path instead of throwing.
+    ["invalid file url", [["r1", "read", { path: "file:///%" }]], ["e1", "edit", { path: "file:///%" }], {}, ["r1"]],
     // No trailing turn: these results belong to the latest turn and stay.
     [
         "latest turn skipped",
@@ -224,6 +255,9 @@ same(prunedIds(context(transcript())), ["g1"], "cold prune");
 fire(handlers, "before_provider_request", { type: "before_provider_request", payload: {} }, ctx);
 // Warm: a new stale pair is left alone, g1 stays pruned.
 same(prunedIds(context(transcript(...pair("g3")))), ["g1"], "warm cache");
+// An extension "warm" decision keeps the gate closed, like a request does.
+fire(handlers, "cache_warming_decision", { type: "cache_warming_decision", action: "warm" }, ctx);
+same(prunedIds(context(transcript(...pair("g4")))), ["g1"], "cache warming decision");
 // Sticky: g1 stays pruned even though its superseding edit is no longer listed.
 const sticky = [turn([["g1", "read", readA]]), toolResult("g1"), turn([])];
 same(stale(sticky), [], "sticky precondition");
@@ -265,6 +299,17 @@ assert.equal(settingsAt("no-provider").id, "no-provider");
 // The old archive.compaction key is gone, with no fallback.
 assert.equal(settingsAt("openrouter/google/gemini-flash:low", "archive"), undefined);
 console.log("--- context.compaction parsing OK ---");
+
+// With no project setting, the global agentDir settings.json supplies the value.
+const bare = mkdtempSync(join(tmpdir(), "pi-context-bare-"));
+writeFileSync(
+    join(agentDir, "settings.json"),
+    JSON.stringify({ context: { compaction: "openrouter/global/model:high" } }),
+);
+assert.equal(readCompactionModel(bare)?.value, "openrouter/global/model:high");
+rmSync(join(agentDir, "settings.json"));
+rmSync(bare, { recursive: true, force: true });
+console.log("--- global settings fallback OK ---");
 
 // An unresolvable compaction model warns and leaves the session model in charge.
 const notices = [];
