@@ -123,11 +123,11 @@ const cases = [
         "noop edit supersedes nothing",
         [["r1", "read", readA]],
         ["e1", "edit", editA],
-        { e1: { details: { noop: true } } },
+        { e1: { details: { diff: "" } } },
         [],
     ],
     [
-        "errored result and grep skipped",
+        "errored read superseded, grep skipped",
         [
             ["r1", "read", readA],
             ["g1", "grep", { pattern: "x", path: fileA }],
@@ -135,7 +135,36 @@ const cases = [
         ],
         ["e1", "edit", editA],
         { x1: { isError: true } },
-        ["r1"],
+        ["r1", "x1"],
+    ],
+    [
+        "errored edit kept after failed retry",
+        [["x1", "edit", editA]],
+        ["x2", "edit", editA],
+        { x1: { isError: true }, x2: { isError: true } },
+        [],
+    ],
+    [
+        "failed edit superseded by read",
+        [["x1", "edit", editA]],
+        ["r1", "read", readA],
+        { x1: { isError: true } },
+        ["x1"],
+    ],
+    ["failed edit leaves earlier read", [["r1", "read", readA]], ["x1", "edit", editA], { x1: { isError: true } }, []],
+    [
+        "same bash command supersedes",
+        [["b1", "bash", { command: "npm test" }]],
+        ["b2", "bash", { command: "npm test" }],
+        { b1: { isError: true }, b2: { isError: true } },
+        ["b1"],
+    ],
+    [
+        "different bash command keeps",
+        [["b1", "bash", { command: "npm test" }]],
+        ["b2", "bash", { command: "npm run check" }],
+        {},
+        [],
     ],
     // No trailing turn: these results belong to the latest turn and stay.
     [

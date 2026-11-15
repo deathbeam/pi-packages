@@ -1,6 +1,6 @@
 # [@deathbeam/pi-context](https://www.npmjs.com/package/@deathbeam/pi-context)
 
-Keep context small: rewrite bash commands through [RTK](https://github.com/rtk-ai/rtk) when `rtk` is in `PATH`, prune stale read/edit results, and set the compaction model.
+Keep context small: rewrite bash commands through [RTK](https://github.com/rtk-ai/rtk) when `rtk` is in `PATH`, prune stale tool results (superseded reads/edits, failed file calls, re-run bash commands), and set the compaction model.
 
 ## Installation
 
