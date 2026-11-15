@@ -8,7 +8,7 @@ export function rewrittenCommand(result: ExecResult): string | null {
 }
 
 export default async function (pi: ExtensionAPI) {
-    if ((await pi.exec("rtk", ["--version"]).catch(() => null))?.code !== 0) return;
+    if ((await pi.exec("rtk", ["gain", "--help"]).catch(() => null))?.code !== 0) return;
 
     pi.on("tool_call", async (event, ctx) => {
         if (!isBash(event)) return;

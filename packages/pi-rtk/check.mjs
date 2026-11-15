@@ -7,7 +7,7 @@ const replies = { ls: result(0, "rtk ls\n"), grep: result(3, "rtk grep\n"), cat:
 
 const host = (handlers, version) => ({
     exec: async (_command, args) => {
-        if (args[0] === "--version") return version;
+        if (args[0] === "gain") return version;
         if (args[1] === "boom") throw new Error("spawn failed");
         return replies[args[1]];
     },
