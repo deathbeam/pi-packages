@@ -1,9 +1,10 @@
 /** Usage aggregation over Pi's persisted session JSONL files. */
 
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export type UsageRecord = {
     provider: string;
@@ -50,6 +51,80 @@ async function sessionFiles(dir: string, out: string[]): Promise<void> {
     }
 }
 
+type CacheEntry = { size: number; mtimeMs: number; records: UsageRecord[] };
+type Cache = { version: number; files: Record<string, CacheEntry> };
+
+const CACHE_VERSION = 1;
+
+async function readCache(file: string): Promise<Record<string, CacheEntry>> {
+    try {
+        const cache = JSON.parse(await readFile(file, "utf8")) as Cache;
+        if (cache?.version !== CACHE_VERSION || typeof cache.files !== "object" || cache.files === null) return {};
+        return cache.files;
+    } catch {
+        return {};
+    }
+}
+
+async function writeCache(file: string, files: Record<string, CacheEntry>): Promise<void> {
+    const temp = join(dirname(file), `.tmp-${randomUUID()}`);
+    try {
+        await writeFile(temp, JSON.stringify({ version: CACHE_VERSION, files } satisfies Cache));
+        await rename(temp, file);
+    } catch {
+        await unlink(temp).catch(() => undefined);
+    }
+}
+
+/** Throws only on read errors, so a partial parse is never cached. */
+async function parseFile(file: string): Promise<UsageRecord[]> {
+    const records: UsageRecord[] = [];
+    let cwd = "";
+    let sessionId = "";
+    const lines = createInterface({ input: createReadStream(file, "utf8"), crlfDelay: Infinity });
+    for await (const line of lines) {
+        // Cheap prefilter: escaped JSON inside tool results never matches this literal.
+        if (!line.includes('"role":"assistant"')) {
+            // The session header (type:"session", cwd, id) is normally the first line.
+            if (sessionId === "" && line.includes('"type":"session"')) {
+                try {
+                    const header = JSON.parse(line);
+                    if (header?.type === "session") {
+                        cwd = String(header.cwd ?? "");
+                        sessionId = String(header.id ?? "");
+                    }
+                } catch {
+                    // malformed header line: keep scanning for a later one
+                }
+            }
+            continue;
+        }
+        let entry: any;
+        try {
+            entry = JSON.parse(line);
+        } catch {
+            continue;
+        }
+        const msg = entry?.message;
+        const usage = msg?.usage;
+        if (!usage || !msg.provider || !msg.model) continue;
+        const cost = typeof usage.cost === "number" ? usage.cost : num(usage.cost?.total);
+        records.push({
+            provider: String(msg.provider),
+            model: String(msg.model),
+            ts: num(msg.timestamp),
+            cost,
+            input: num(usage.input),
+            output: num(usage.output),
+            cacheRead: num(usage.cacheRead),
+            cacheWrite: num(usage.cacheWrite),
+            cwd,
+            sessionId,
+        });
+    }
+    return records;
+}
+
 /**
  * One record per assistant message that carries usage, from every session file under `dir`.
  *
@@ -59,65 +134,47 @@ async function sessionFiles(dir: string, out: string[]): Promise<void> {
  * its own cwd. Parent sessions never embed the delegate child's usage (the delegate tool result
  * carries only text), so there is nothing to double-count. toolResult usage from other tools is
  * ignored for the same reason: those children also persist their own session files inside the scan.
+ *
+ * shortcut: a file rewritten with the same size and mtime is not re-parsed.
  * shortcut: usage reported by tools whose child sessions live outside this dir is not counted.
  */
 export async function collectUsage(
     dir: string,
     onProgress?: (done: number, total: number) => void,
+    cacheFile?: string,
 ): Promise<UsageRecord[]> {
     const files: string[] = [];
     await sessionFiles(dir, files);
+    const cached = cacheFile ? await readCache(cacheFile) : {};
+    const next: Record<string, CacheEntry> = {};
     const records: UsageRecord[] = [];
+    let dirty = false;
     for (const [done, file] of files.entries()) {
         onProgress?.(done, files.length);
-        let cwd = "";
-        let sessionId = "";
+        let info;
         try {
-            const lines = createInterface({ input: createReadStream(file, "utf8"), crlfDelay: Infinity });
-            for await (const line of lines) {
-                // Cheap prefilter: escaped JSON inside tool results never matches this literal.
-                if (!line.includes('"role":"assistant"')) {
-                    // The session header (type:"session", cwd, id) is normally the first line.
-                    if (sessionId === "" && line.includes('"type":"session"')) {
-                        try {
-                            const header = JSON.parse(line);
-                            if (header?.type === "session") {
-                                cwd = String(header.cwd ?? "");
-                                sessionId = String(header.id ?? "");
-                            }
-                        } catch {
-                            // malformed header line: keep scanning for a later one
-                        }
-                    }
-                    continue;
-                }
-                let entry: any;
-                try {
-                    entry = JSON.parse(line);
-                } catch {
-                    continue;
-                }
-                const msg = entry?.message;
-                const usage = msg?.usage;
-                if (!usage || !msg.provider || !msg.model) continue;
-                const cost = typeof usage.cost === "number" ? usage.cost : num(usage.cost?.total);
-                records.push({
-                    provider: String(msg.provider),
-                    model: String(msg.model),
-                    ts: num(msg.timestamp),
-                    cost,
-                    input: num(usage.input),
-                    output: num(usage.output),
-                    cacheRead: num(usage.cacheRead),
-                    cacheWrite: num(usage.cacheWrite),
-                    cwd,
-                    sessionId,
-                });
-            }
+            info = await stat(file);
+        } catch {
+            dirty = true;
+            continue;
+        }
+        const hit = cached[file];
+        if (hit?.size === info.size && hit.mtimeMs === info.mtimeMs && Array.isArray(hit.records)) {
+            next[file] = hit;
+            for (const record of hit.records) records.push(record);
+            continue;
+        }
+        dirty = true;
+        try {
+            const parsed = await parseFile(file);
+            next[file] = { size: info.size, mtimeMs: info.mtimeMs, records: parsed };
+            for (const record of parsed) records.push(record);
         } catch {
             continue; // unreadable or truncated file: skip it, keep what other files gave
         }
     }
+    if (!cacheFile) return records;
+    if (dirty || Object.keys(next).length !== Object.keys(cached).length) await writeCache(cacheFile, next);
     return records;
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -294,6 +294,33 @@ try {
     assert.ok(Math.abs(totals.reduce((sum, d) => sum + d.cost, 0) - 0.85) < 1e-12);
     assert.deepEqual(dailyTotals([], now), []);
 
+    // Cache
+    const cacheDir = mkdtempSync(join(tmpdir(), "pi-usage-cache-"));
+    const cacheFile = join(cacheDir, "cache.json");
+    const sessions = join(cacheDir, "sessions");
+    mkdirSync(sessions);
+    const sessionFile = join(sessions, "s.jsonl");
+    const header = JSON.stringify({ type: "session", version: 3, id: "c1", cwd: "/tmp" });
+    const firstLine = assistant("anthropic", "claude-x", day(0), usage({}));
+    const secondLine = assistant("openrouter", "glm-5.3", day(1), usage({ cost: { total: 0.25 } }));
+    writeFileSync(sessionFile, [header, firstLine].join("\n"));
+    const cold = await collectUsage(sessions, undefined, cacheFile);
+    assert.equal(cold.length, 1);
+    assert.deepEqual(await collectUsage(sessions, undefined, cacheFile), cold);
+    assert.deepEqual(await collectUsage(sessions), cold); // cached result equals a fresh scan
+    writeFileSync(sessionFile, [header, firstLine, secondLine].join("\n"));
+    const warm = await collectUsage(sessions, undefined, cacheFile);
+    assert.equal(warm.length, 2); // the grown file was re-parsed, not served from cache
+    assert.equal(warm[1].provider, "openrouter");
+    assert.deepEqual(JSON.parse(readFileSync(cacheFile, "utf8")).files[sessionFile].records, warm);
+    rmSync(sessions, { recursive: true });
+    assert.deepEqual(await collectUsage(sessions, undefined, cacheFile), []);
+    assert.deepEqual(JSON.parse(readFileSync(cacheFile, "utf8")).files, {}); // deleted files are dropped
+    writeFileSync(cacheFile, "{not json");
+    mkdirSync(sessions);
+    writeFileSync(sessionFile, [header, firstLine].join("\n"));
+    assert.deepEqual(await collectUsage(sessions, undefined, cacheFile), cold); // corrupt cache is rebuilt
+    rmSync(cacheDir, { recursive: true, force: true });
     console.log("pi-usage check passed");
 } finally {
     rmSync(dir, { recursive: true, force: true });

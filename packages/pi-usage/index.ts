@@ -158,12 +158,16 @@ export default function (pi: ExtensionAPI) {
                 total: 0,
             };
             let render = () => {};
-            // Scanning on open is fast enough for a dashboard; no cache file.
-            const loaded = collectUsage(join(getAgentDir(), "sessions"), (done, total) => {
-                state.done = done;
-                state.total = total;
-                render();
-            }).then((records) => {
+            const agentDir = getAgentDir();
+            const loaded = collectUsage(
+                join(agentDir, "sessions"),
+                (done, total) => {
+                    state.done = done;
+                    state.total = total;
+                    render();
+                },
+                join(agentDir, "usage-cache.json"),
+            ).then((records) => {
                 state.records = records;
             });
             const screen = {
