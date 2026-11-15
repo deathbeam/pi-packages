@@ -12,14 +12,14 @@
   "pi": {
     "extensions": [
       "./packages/pi-archive/index.ts",
+      "./packages/pi-context/index.ts",
       "./packages/pi-delegate/index.ts",
       "./packages/pi-hashline/index.ts",
       "./packages/pi-images/index.ts",
       "./packages/pi-inferhub/index.ts",
       "./packages/pi-surplus/index.ts",
       "./packages/pi-keenable/index.ts",
-      "./packages/pi-usage/index.ts",
-      "./packages/pi-rtk/index.ts"
+      "./packages/pi-usage/index.ts"
     ]
   },
   "scripts": {

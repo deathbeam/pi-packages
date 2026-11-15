@@ -1,13 +1,13 @@
 {
-  "name": "@deathbeam/pi-rtk",
-  "version": "0.0.4",
-  "description": "Minimal extension for rewriting bash commands to RTK (Rust Token Killer) for token savings.",
+  "name": "@deathbeam/pi-context",
+  "version": "0.0.1",
+  "description": "Minimal extension for context-window token economy: RTK command rewriting, stale tool-result pruning, and a compaction model override.",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/deathbeam/pi-packages.git",
-    "directory": "packages/pi-rtk"
+    "directory": "packages/pi-context"
   },
   "keywords": [
     "pi-package",
@@ -18,6 +18,7 @@
   },
   "files": [
     "index.ts",
+    "src",
     "README.md",
     "LICENSE"
   ],

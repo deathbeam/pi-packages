@@ -15,7 +15,7 @@ export function rewrittenCommand(result: ExecResult): string | null {
     return result.stdout.trim() || null;
 }
 
-export default async function (pi: ExtensionAPI) {
+export async function registerRtk(pi: ExtensionAPI): Promise<void> {
     if ((await pi.exec("rtk", ["gain", "--help"]).catch(() => null))?.code !== 0) return;
 
     pi.on("before_agent_start", (event) => {

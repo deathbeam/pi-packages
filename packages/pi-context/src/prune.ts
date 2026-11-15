@@ -4,12 +4,21 @@
  * is cold, so a live cached prefix never changes under the provider.
  */
 
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resolveToCwd } from "./path-utils";
 
 const FALLBACK_TTL_SECONDS = { short: 300, long: 24 * 60 * 60 };
 
 const TOOL_NAMES = new Set(["read", "edit", "write"]);
+
+function resolveToCwd(filePath: string, cwd: string): string {
+    const normalized = filePath.replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, " ").replace(/^@/, "");
+    const path = normalized.startsWith("file://") ? fileURLToPath(normalized) : normalized;
+    const expanded = path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+    return resolve(cwd, expanded);
+}
 
 type Candidate = {
     index: number;
