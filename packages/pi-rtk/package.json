@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-rtk",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Minimal extension for rewriting bash commands to RTK (Rust Token Killer) for token savings.",
   "type": "module",
   "license": "MIT",

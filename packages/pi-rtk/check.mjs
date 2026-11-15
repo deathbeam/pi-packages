@@ -37,4 +37,9 @@ for (const [command, expected] of [
     assert.equal(event.input.command, expected);
 }
 
+// RTK usage instructions go into their own system prompt section.
+const prompt = { systemPromptOptions: { sections: {} } };
+handlers.before_agent_start(prompt);
+assert.match(prompt.systemPromptOptions.sections.command_output, /rtk bypass/);
+
 console.log("pi-rtk: all checks passed");
