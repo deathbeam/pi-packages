@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Text, TruncatedText } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { generateImages, imageKey, readInputImage, saveImages, splitModel } from "./generate.ts";
+import { generateImages, imageKey, readInputImage, saveImages, splitModel } from "./src/generate.ts";
 
 export type ImagesSettings = {
     vision?: string;

@@ -31,9 +31,9 @@ import {
     toolLayout,
     toolLines,
     widgetJobs,
-} from "./format.ts";
-import { runChild, sessionMessages } from "./child.ts";
-import { createJobStore, type DelegateJob, lastToolCall, type InspectJob } from "./store.ts";
+} from "./src/format.ts";
+import { runChild, sessionMessages } from "./src/child.ts";
+import { createJobStore, type DelegateJob, lastToolCall, type InspectJob } from "./src/store.ts";
 import {
     applyClone,
     cloneCwd,
@@ -41,9 +41,9 @@ import {
     isolationSummary,
     removeClone,
     type IsolationState,
-} from "./isolation.ts";
-import { registerInspector } from "./inspector.ts";
-import { agentByName, agentsFor, configFor, contextWindowFor, resolveModel, type AgentFile } from "./agents.ts";
+} from "./src/isolation.ts";
+import { registerInspector } from "./src/inspector.ts";
+import { agentByName, agentsFor, configFor, contextWindowFor, resolveModel, type AgentFile } from "./src/agents.ts";
 
 type SteerDetails = Pick<
     DelegateJob,

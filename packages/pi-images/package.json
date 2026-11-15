@@ -18,7 +18,7 @@
   },
   "files": [
     "index.ts",
-    "generate.ts",
+    "src",
     "README.md",
     "LICENSE"
   ],

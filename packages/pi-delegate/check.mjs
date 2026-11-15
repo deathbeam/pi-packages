@@ -24,12 +24,12 @@ import {
     toolCallDetail,
     usageStats,
     widgetJobs,
-} from "./format.ts";
-import { runChild, sessionMessages } from "./child.ts";
-import { History, Transcript } from "./inspector.ts";
-import { resolveModel } from "./agents.ts";
-import { createJobStore, lastToolCall } from "./store.ts";
-import { applyClone, createIsolation, isolationSummary, removeClone } from "./isolation.ts";
+} from "./src/format.ts";
+import { runChild, sessionMessages } from "./src/child.ts";
+import { History, Transcript } from "./src/inspector.ts";
+import { resolveModel } from "./src/agents.ts";
+import { createJobStore, lastToolCall } from "./src/store.ts";
+import { applyClone, createIsolation, isolationSummary, removeClone } from "./src/isolation.ts";
 // Hermetic: configFor and the pinned session dir must not read the host's real agent settings.
 const agentDir = mkdtempSync(join(tmpdir(), "pi-delegate-check-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -38,11 +38,11 @@ initTheme("dark");
 
 const root = new URL("./", import.meta.url);
 const index = readFileSync(new URL("index.ts", root), "utf8");
-const child = readFileSync(new URL("child.ts", root), "utf8");
-const store = readFileSync(new URL("store.ts", root), "utf8");
-const inspector = readFileSync(new URL("inspector.ts", root), "utf8");
-const agents = readFileSync(new URL("agents.ts", root), "utf8");
-const isolation = readFileSync(new URL("isolation.ts", root), "utf8");
+const child = readFileSync(new URL("src/child.ts", root), "utf8");
+const store = readFileSync(new URL("src/store.ts", root), "utf8");
+const inspector = readFileSync(new URL("src/inspector.ts", root), "utf8");
+const agents = readFileSync(new URL("src/agents.ts", root), "utf8");
+const isolation = readFileSync(new URL("src/isolation.ts", root), "utf8");
 // Tripwires match source text across every module, so code that moved stays covered.
 const sources = `${index}\n${store}\n${inspector}\n${agents}\n${isolation}`;
 

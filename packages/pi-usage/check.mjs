@@ -18,7 +18,7 @@ import {
     summarize,
     usageWindow,
     windowDays,
-} from "./usage.ts";
+} from "./src/usage.ts";
 
 const now = Date.now();
 const day = (offset) => {

@@ -18,12 +18,7 @@
   },
   "files": [
     "index.ts",
-    "store.ts",
-    "inspector.ts",
-    "agents.ts",
-    "child.ts",
-    "format.ts",
-    "isolation.ts",
+    "src",
     "agents",
     "README.md",
     "LICENSE"

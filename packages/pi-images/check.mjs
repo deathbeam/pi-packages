@@ -11,7 +11,7 @@ const home = mkdtempSync(join(tmpdir(), "pi-images-home-"));
 process.env.HOME = home;
 
 const { default: extension, mergeImagesSettings, readImagesSettings } = await import("./index.ts");
-const { splitModel, readInputImage, saveImages } = await import("./generate.ts");
+const { splitModel, readInputImage, saveImages } = await import("./src/generate.ts");
 
 // Model strings split at the FIRST "/", so ids may themselves contain slashes.
 assert.deepEqual(splitModel("inferhub/cb/gemini-3.0-pro-image"), {

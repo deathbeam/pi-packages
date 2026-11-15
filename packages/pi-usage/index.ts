@@ -23,7 +23,7 @@ import {
     type Stats,
     type UsageFilter,
     type UsageRecord,
-} from "./usage.ts";
+} from "./src/usage.ts";
 
 type Column = {
     label: string;

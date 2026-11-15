@@ -20,7 +20,7 @@ type DelegateConfig = {
 };
 
 const DEFAULT_AGENT_DIR = "~/.agents/agents";
-const BUNDLED_AGENT_DIR = fileURLToPath(new URL("./agents", import.meta.url));
+const BUNDLED_AGENT_DIR = fileURLToPath(new URL("../agents", import.meta.url));
 const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 
 function expandPath(value: string, cwd: string): string {
