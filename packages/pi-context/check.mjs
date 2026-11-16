@@ -296,12 +296,7 @@ console.log("--- cache-aware pruning gate OK ---");
 // Pruning gain estimates 4 chars per token and counts the replaced results.
 const gainExec = async (_command, args) => {
     if (args[1] === "--help") return result(0, "rtk 0.40.0");
-    if (args[0] === "gain") {
-        const summary = args.includes("-p")
-            ? { total_commands: 4, total_saved: 500, avg_savings_pct: 10 }
-            : { total_commands: 20, total_saved: 2000, avg_savings_pct: 25 };
-        return result(0, JSON.stringify({ summary }));
-    }
+    if (args[0] === "gain") return result(0, JSON.stringify({ summary: { total_saved: 2000 } }));
     return replies[args[1]];
 };
 const gainHost = host(gainExec);
@@ -328,11 +323,11 @@ fire(
 );
 const sessionTokens = Math.round((gainText.length - placeholder(fileA).length) / 4);
 
-// /gain adds the flushed jsonl totals per source, the in-process counters and rtk's own summary.
+// /gain adds the flushed jsonl total of a source to its in-process count; rtk reports its own total.
 const gainNotices = [];
 const gainCtx = { cwd: dir, ui: { notify: (message, level) => gainNotices.push({ message, level }) } };
 const gainFile = join(agentDir, "pi-context-gain.jsonl");
-// A line cut short by a crash mid-write is skipped, not fatal for the rest.
+// A line cut short by a crash is skipped; the cwd of older lines is ignored.
 writeFileSync(
     gainFile,
     [
@@ -342,42 +337,38 @@ writeFileSync(
         '{"time":4,"cwd',
     ].join("\n") + "\n",
 );
-const fmt = (count) =>
-    count < 1000
-        ? String(Math.round(count))
-        : count < 1e6
-          ? `${(count / 1000).toFixed(1)}K`
-          : `${(count / 1e6).toFixed(1)}M`;
+const fmt = (n) =>
+    n < 1000 ? String(Math.round(n)) : n < 1e6 ? `${(n / 1000).toFixed(1)}K` : `${(n / 1e6).toFixed(1)}M`;
 await gain.handler("", gainCtx);
-const report = gainNotices.at(-1)?.message ?? "";
 assert.equal(gainNotices.at(-1)?.level, "info");
-assert.match(
-    report,
-    new RegExp(
-        `prune: session ${fmt(sessionTokens)}, project ${fmt(5000 + sessionTokens)}, all ${fmt(13000 + sessionTokens)} tokens`,
-    ),
-    "pruning gain is chars/4",
+assert.equal(
+    gainNotices.at(-1)?.message,
+    `Tokens saved
+  prune  ${fmt(13000 + sessionTokens)}
+  rtk    2.0K
+  total  ${fmt(15000 + sessionTokens)}`,
+    "pruning gain is chars/4 plus every flushed line",
 );
-assert.match(report, /global: 20 commands, 2\.0K tokens saved \(25\.0%\)/);
-assert.match(report, /project: 4 commands, 500 tokens saved \(10\.0%\)/);
 
-// Without rtk there is no rtk section, only the recorded sources.
+// Without rtk there is no rtk row, and old lines carrying a cwd still count.
 await missing.commands.get("gain").handler("", gainCtx);
-assert.equal(gainNotices.at(-1)?.message, `prune: session 0, project ${fmt(5000)}, all ${fmt(13000)} tokens`);
+assert.equal(
+    gainNotices.at(-1)?.message,
+    `Tokens saved
+  prune  13.0K
+  total  13.0K`,
+);
 
-// Shutdown appends one line per source and zeroes the counters.
+// Shutdown appends one line per source, without the cwd, and zeroes the counters.
 fire(gainHost.handlers, "session_shutdown", { type: "session_shutdown", reason: "quit" }, gainCtx);
 const lines = () =>
     readFileSync(gainFile, "utf8")
-        .trim()
         .split("\n")
         .filter((line) => line.endsWith("}"))
         .map((line) => JSON.parse(line));
 assert.equal(lines().length, 4);
-assert.deepEqual(
-    { cwd: lines().at(-1).cwd, source: lines().at(-1).source, tokens: lines().at(-1).tokens },
-    { cwd: dir, source: "prune", tokens: sessionTokens },
-);
+assert.deepEqual(Object.keys(lines().at(-1)), ["time", "source", "tokens"]);
+assert.deepEqual([lines().at(-1).source, lines().at(-1).tokens], ["prune", sessionTokens]);
 fire(gainHost.handlers, "session_shutdown", { type: "session_shutdown", reason: "quit" }, gainCtx);
 assert.equal(lines().length, 4, "zero counters flush nothing");
 
@@ -398,12 +389,20 @@ assert.deepEqual(
     ],
 );
 
-// A report that throws shows "not available" instead of failing /gain.
+// A report that throws shows n/a and stays out of the total.
 extraGain.report("broken", async () => {
     throw new Error("boom");
 });
 await extra.commands.get("gain").handler("", gainCtx);
-assert.match(gainNotices.at(-1)?.message ?? "", /broken\n {2}not available/);
+const pruneTotal = 13000 + sessionTokens + 100;
+assert.equal(
+    gainNotices.at(-1)?.message,
+    `Tokens saved
+  prune   ${fmt(pruneTotal)}
+  other   40
+  broken  n/a
+  total   ${fmt(pruneTotal + 40)}`,
+);
 console.log("--- /gain report and shutdown flush OK ---");
 
 // context.compaction parses "provider/model-id[:thinking]"; project settings override global ones.

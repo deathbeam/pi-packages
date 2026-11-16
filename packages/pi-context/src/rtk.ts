@@ -1,7 +1,5 @@
 import { type ExecResult, type ExtensionAPI, isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { type Gain, format } from "./gain.ts";
-
-type RtkSummary = { total_commands: number; total_saved: number; avg_savings_pct: number };
+import type { Gain } from "./gain.ts";
 
 // Text `rtk init` writes to CLAUDE.md (rtk-instructions v2), minus its "# Command output" heading.
 export const RTK_PROMPT = `Command output here is condensed to save tokens, keeping every signal and
@@ -16,30 +14,16 @@ export function rewrittenCommand(result: ExecResult): string | null {
     return result.stdout.trim() || null;
 }
 
-async function rtkSummary(pi: ExtensionAPI, args: string[]): Promise<RtkSummary | null> {
-    try {
-        const result = await pi.exec("rtk", ["gain", ...args, "-f", "json"], { timeout: 5_000 });
-        if (result.killed || result.code !== 0) return null;
-        return (JSON.parse(result.stdout) as { summary?: RtkSummary }).summary ?? null;
-    } catch {
-        return null;
-    }
-}
-
-function rtkLine(label: string, summary: RtkSummary | null): string {
-    if (!summary) return `  ${label}: not available`;
-    return `  ${label}: ${format(summary.total_commands)} commands, ${format(summary.total_saved)} tokens saved (${summary.avg_savings_pct.toFixed(1)}%)`;
-}
-
 export async function registerRtk(pi: ExtensionAPI, gain: Gain): Promise<void> {
     // A hung rtk must not stall extension load, so the probe has a deadline; a killed probe counts as absent.
     const probe = await pi.exec("rtk", ["rewrite", "--help"], { timeout: 2_000 });
     if (probe.killed || probe.code !== 0) return;
 
-    // Only registered when rtk is present, so a failure here is a broken rtk, not a missing one.
+    // rtk is present, so a failed gain is a broken rtk: /gain then shows it as n/a.
     gain.report("rtk", async () => {
-        const [global, project] = await Promise.all([rtkSummary(pi, []), rtkSummary(pi, ["-p"])]);
-        return [rtkLine("global", global), rtkLine("project", project)];
+        const result = await pi.exec("rtk", ["gain", "-f", "json"], { timeout: 5_000 });
+        if (result.killed || result.code !== 0) throw new Error(`rtk gain exited with ${result.code}`);
+        return (JSON.parse(result.stdout) as { summary: { total_saved: number } }).summary.total_saved;
     });
 
     pi.on("before_agent_start", (event) => {

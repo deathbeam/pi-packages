@@ -2,20 +2,20 @@
 
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const GAIN_FILE = "pi-context-gain.jsonl";
 
-type GainEntry = { cwd: string; source: string; tokens: number };
+type GainEntry = { source: string; tokens: number };
 
 export type Gain = {
     /** Tokens this process saved for a source. */
     record(source: string, tokens: number): void;
-    /** A source that keeps its own stats: lines shown under a title. */
-    report(title: string, lines: (ctx: ExtensionContext) => Promise<string[]>): void;
+    /** A source that keeps its own stats: its all-time token total. */
+    report(source: string, total: () => Promise<number>): void;
 };
 
-export function format(count: number): string {
+function format(count: number): string {
     if (count < 1000) return String(Math.round(count));
     if (count < 1_000_000) return `${(count / 1000).toFixed(1)}K`;
     return `${(count / 1_000_000).toFixed(1)}M`;
@@ -38,13 +38,13 @@ function readEntries(path: string): GainEntry[] {
 
 export function registerGain(pi: ExtensionAPI): Gain {
     const recorded = new Map<string, number>();
-    const reports = new Map<string, (ctx: ExtensionContext) => Promise<string[]>>();
+    const reports = new Map<string, () => Promise<number>>();
 
     // One line per source; O_APPEND keeps concurrent subagent writes from interleaving.
-    pi.on("session_shutdown", (_event, ctx) => {
+    pi.on("session_shutdown", () => {
         for (const [source, tokens] of recorded) {
             if (tokens <= 0) continue;
-            const entry = { time: Date.now(), cwd: ctx.cwd, source, tokens };
+            const entry = { time: Date.now(), source, tokens };
             appendFileSync(join(getAgentDir(), GAIN_FILE), `${JSON.stringify(entry)}\n`);
         }
         recorded.clear();
@@ -53,28 +53,24 @@ export function registerGain(pi: ExtensionAPI): Gain {
     pi.registerCommand("gain", {
         description: "Show tokens saved",
         handler: async (_args, ctx) => {
-            const entries = readEntries(join(getAgentDir(), GAIN_FILE));
-            const flushed = (source: string, cwd?: string) =>
-                entries
-                    .filter((entry) => entry.source === source && (!cwd || entry.cwd === cwd))
-                    .reduce((total, entry) => total + entry.tokens, 0);
-            const totals = [...new Set([...recorded.keys(), ...entries.map((entry) => entry.source)])].map((source) => {
-                const session = recorded.get(source) ?? 0;
-                const project = session + flushed(source, ctx.cwd);
-                return `${source}: session ${format(session)}, project ${format(project)}, all ${format(session + flushed(source))} tokens`;
-            });
-            const sections = await Promise.all(
-                [...reports].map(async ([title, report]) => [
-                    title,
-                    ...(await report(ctx).catch(() => ["  not available"])),
-                ]),
+            const totals = new Map<string, number | undefined>();
+            for (const entry of readEntries(join(getAgentDir(), GAIN_FILE))) {
+                totals.set(entry.source, (totals.get(entry.source) ?? 0) + entry.tokens);
+            }
+            for (const [source, tokens] of recorded) totals.set(source, (totals.get(source) ?? 0) + tokens);
+            for (const [source, total] of reports) totals.set(source, await total().catch(() => undefined));
+            const rows: Array<[string, number | undefined]> = [...totals];
+            rows.push(["total", rows.reduce((sum, [, tokens]) => sum + (tokens ?? 0), 0)]);
+            const width = Math.max(...rows.map(([name]) => name.length));
+            const lines = rows.map(
+                ([name, tokens]) => `  ${name.padEnd(width)}  ${tokens === undefined ? "n/a" : format(tokens)}`,
             );
-            ctx.ui.notify([...totals, ...sections.flat()].join("\n"), "info");
+            ctx.ui.notify(["Tokens saved", ...lines].join("\n"), "info");
         },
     });
 
     return {
         record: (source, tokens) => recorded.set(source, (recorded.get(source) ?? 0) + tokens),
-        report: (title, lines) => void reports.set(title, lines),
+        report: (source, total) => void reports.set(source, total),
     };
 }
