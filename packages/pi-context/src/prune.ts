@@ -8,9 +8,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-
-// Used when the model declares no prompt-cache lifetime for the tier.
-const FALLBACK_TTL_SECONDS = 5 * 60;
+import type { Gain } from "./gain.ts";
 
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
 
@@ -48,6 +46,14 @@ type Candidate = {
 
 export function placeholder(path: string): string {
     return `[superseded: ${path} changed or was re-read later; read again if needed]`;
+}
+
+function textLength(content: readonly unknown[]): number {
+    let total = 0;
+    for (const block of content as Array<{ type?: string; text?: string }>) {
+        if (block.type === "text") total += block.text?.length ?? 0;
+    }
+    return total;
 }
 
 /**
@@ -123,17 +129,20 @@ export function superseded(messages: readonly unknown[], cwd: string): Array<{ t
         .map(({ toolCallId, text }) => ({ toolCallId, text }));
 }
 
-/** The cache lifetime pi uses for warming, from the model's retention tier. */
+/**
+ * The cache lifetime pi uses for warming, from the model's retention tier. Unknown means
+ * never expire by time: pruning then waits for compaction, a model switch or a new session.
+ */
 function cacheTtlMs(model: ExtensionContext["model"]): number {
     const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-    return (model?.promptCache?.[retention] ?? FALLBACK_TTL_SECONDS) * 1000;
+    return (model?.promptCache?.[retention] ?? Number.POSITIVE_INFINITY) * 1000;
 }
 
 function modelKey(model: ExtensionContext["model"]): string {
     return model ? `${model.provider}/${model.id}` : "";
 }
 
-export function registerPrune(pi: ExtensionAPI): void {
+export function registerPrune(pi: ExtensionAPI, gain: Gain): void {
     // Sticky: an id pruned once stays pruned, so the prefix is stable across requests.
     const pruned = new Map<string, string>();
     let lastRequestAt = 0;
@@ -175,12 +184,17 @@ export function registerPrune(pi: ExtensionAPI): void {
         if (pruned.size === 0) return;
 
         let replaced = false;
+        let savedChars = 0;
         const messages = event.messages.map((message) => {
-            const text = message.role === "toolResult" ? pruned.get(message.toolCallId) : undefined;
+            if (message.role !== "toolResult") return message;
+            const text = pruned.get(message.toolCallId);
             if (text === undefined) return message;
             replaced = true;
+            savedChars += textLength(message.content) - text.length;
             return { ...message, content: [{ type: "text" as const, text }] };
         });
-        return replaced ? { messages } : undefined;
+        if (!replaced) return;
+        gain.record("prune", Math.round(savedChars / 4)); // Estimated at 4 chars per token.
+        return { messages };
     });
 }

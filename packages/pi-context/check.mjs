@@ -1,6 +1,6 @@
 // Run: node check.mjs (Node >=22.19 supports TypeScript type stripping).
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,7 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const extension = (await import("./index.ts")).default;
 const { placeholder, superseded } = await import("./src/prune.ts");
+const { registerGain } = await import("./src/gain.ts");
 const { readCompactionModel } = await import("./src/compaction.ts");
 
 const result = (code, stdout = "") => ({ code, stdout, stderr: "", killed: false });
@@ -24,11 +25,14 @@ const replies = {
 
 const host = (exec) => {
     const handlers = new Map();
+    const commands = new Map();
     return {
         handlers,
+        commands,
         pi: {
             exec,
             on: (event, handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+            registerCommand: (name, command) => commands.set(name, command),
         },
     };
 };
@@ -54,6 +58,7 @@ assert.deepEqual(
         "context",
         "session_before_compact",
         "session_compact",
+        "session_shutdown",
         "session_start",
         "session_tree",
     ],
@@ -274,7 +279,132 @@ same(
 // A new session starts with nothing pruned and a cold cache.
 fire(handlers, "session_start", { type: "session_start", reason: "reload" }, ctx);
 same(prunedIds(context(transcript())), ["g1"], "after session start");
+// Time alone opens the gate only when the model declares a cache lifetime.
+const realNow = Date.now;
+const later = () => realNow() + 2 * 60 * 60 * 1000;
+fire(handlers, "before_provider_request", { type: "before_provider_request", payload: {} }, ctx);
+Date.now = later;
+same(prunedIds(context(transcript(...pair("g3")))), ["g1", "g3"], "known ttl expired");
+Date.now = realNow;
+const noCache = { provider: "p", id: "nocache" };
+fire(handlers, "before_provider_request", { type: "before_provider_request", payload: {} }, { ...ctx, model: noCache });
+Date.now = later;
+same(prunedIds(context(transcript(...pair("g3"), ...pair("g6")), noCache)), ["g1", "g3"], "unknown ttl never expires");
+Date.now = realNow;
 console.log("--- cache-aware pruning gate OK ---");
+
+// Pruning gain estimates 4 chars per token and counts the replaced results.
+const gainExec = async (_command, args) => {
+    if (args[1] === "--help") return result(0, "rtk 0.40.0");
+    if (args[0] === "gain") {
+        const summary = args.includes("-p")
+            ? { total_commands: 4, total_saved: 500, avg_savings_pct: 10 }
+            : { total_commands: 20, total_saved: 2000, avg_savings_pct: 25 };
+        return result(0, JSON.stringify({ summary }));
+    }
+    return replies[args[1]];
+};
+const gainHost = host(gainExec);
+await extension(gainHost.pi);
+const gain = gainHost.commands.get("gain");
+assert.ok(gain, "/gain must be registered");
+
+const gainText = "z".repeat(4000);
+fire(gainHost.handlers, "session_start", { type: "session_start", reason: "reload" }, ctx);
+fire(
+    gainHost.handlers,
+    "context",
+    {
+        type: "context",
+        messages: [
+            turn([["p1", "read", { path: fileA }]]),
+            { ...toolResult("p1"), content: [{ type: "text", text: gainText }] },
+            turn([["p2", "edit", { path: fileA, edits: [] }]]),
+            toolResult("p2"),
+            turn([]),
+        ],
+    },
+    ctx,
+);
+const sessionTokens = Math.round((gainText.length - placeholder(fileA).length) / 4);
+
+// /gain adds the flushed jsonl totals per source, the in-process counters and rtk's own summary.
+const gainNotices = [];
+const gainCtx = { cwd: dir, ui: { notify: (message, level) => gainNotices.push({ message, level }) } };
+const gainFile = join(agentDir, "pi-context-gain.jsonl");
+// A line cut short by a crash mid-write is skipped, not fatal for the rest.
+writeFileSync(
+    gainFile,
+    [
+        JSON.stringify({ time: 1, cwd: dir, source: "prune", tokens: 4000 }),
+        JSON.stringify({ time: 2, cwd: "/elsewhere", source: "prune", tokens: 8000 }),
+        JSON.stringify({ time: 3, cwd: dir, source: "prune", tokens: 1000 }),
+        '{"time":4,"cwd',
+    ].join("\n") + "\n",
+);
+const fmt = (count) =>
+    count < 1000
+        ? String(Math.round(count))
+        : count < 1e6
+          ? `${(count / 1000).toFixed(1)}K`
+          : `${(count / 1e6).toFixed(1)}M`;
+await gain.handler("", gainCtx);
+const report = gainNotices.at(-1)?.message ?? "";
+assert.equal(gainNotices.at(-1)?.level, "info");
+assert.match(
+    report,
+    new RegExp(
+        `prune: session ${fmt(sessionTokens)}, project ${fmt(5000 + sessionTokens)}, all ${fmt(13000 + sessionTokens)} tokens`,
+    ),
+    "pruning gain is chars/4",
+);
+assert.match(report, /global: 20 commands, 2\.0K tokens saved \(25\.0%\)/);
+assert.match(report, /project: 4 commands, 500 tokens saved \(10\.0%\)/);
+
+// Without rtk there is no rtk section, only the recorded sources.
+await missing.commands.get("gain").handler("", gainCtx);
+assert.equal(gainNotices.at(-1)?.message, `prune: session 0, project ${fmt(5000)}, all ${fmt(13000)} tokens`);
+
+// Shutdown appends one line per source and zeroes the counters.
+fire(gainHost.handlers, "session_shutdown", { type: "session_shutdown", reason: "quit" }, gainCtx);
+const lines = () =>
+    readFileSync(gainFile, "utf8")
+        .trim()
+        .split("\n")
+        .filter((line) => line.endsWith("}"))
+        .map((line) => JSON.parse(line));
+assert.equal(lines().length, 4);
+assert.deepEqual(
+    { cwd: lines().at(-1).cwd, source: lines().at(-1).source, tokens: lines().at(-1).tokens },
+    { cwd: dir, source: "prune", tokens: sessionTokens },
+);
+fire(gainHost.handlers, "session_shutdown", { type: "session_shutdown", reason: "quit" }, gainCtx);
+assert.equal(lines().length, 4, "zero counters flush nothing");
+
+// A second source gets its own line; a source at zero tokens gets none.
+const extra = host(rtkExec(result(127)));
+const extraGain = registerGain(extra.pi);
+extraGain.record("prune", 100);
+extraGain.record("other", 40);
+extraGain.record("zero", 0);
+fire(extra.handlers, "session_shutdown", { type: "session_shutdown", reason: "quit" }, gainCtx);
+assert.deepEqual(
+    lines()
+        .slice(4)
+        .map((line) => [line.source, line.tokens]),
+    [
+        ["prune", 100],
+        ["other", 40],
+    ],
+);
+
+// A report that throws shows "not available" instead of failing /gain.
+extraGain.report("broken", async () => {
+    throw new Error("boom");
+});
+await extra.commands.get("gain").handler("", gainCtx);
+assert.match(gainNotices.at(-1)?.message ?? "", /broken\n {2}not available/);
+console.log("--- /gain report and shutdown flush OK ---");
 
 // context.compaction parses "provider/model-id[:thinking]"; project settings override global ones.
 const settingsAt = (value, key = "context") => {
