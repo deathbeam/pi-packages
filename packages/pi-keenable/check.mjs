@@ -1,5 +1,6 @@
 // Run: node check.mjs (Node >=22.19 supports TypeScript type stripping).
 import assert from "node:assert/strict";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import extension from "./index.ts";
 
 const calls = [];
@@ -13,7 +14,9 @@ function stub(body) {
         return new Response(JSON.stringify(body));
     };
 }
-const last = () => new URL(calls.at(-1).url);
+function last() {
+    return new URL(calls.at(-1).url);
+}
 
 try {
     // Keyless fetch: /public belongs on the pathname, the query must survive intact.
@@ -94,3 +97,108 @@ try {
 }
 
 console.log("pi-keenable: all checks passed");
+
+// Renderers: one line per search result and a fetch title plus markdown body; call lines mirror pi's grep.
+{
+    initTheme("dark", false);
+    const theme = { fg: (_c, s) => s, bold: (s) => s };
+    const ctx = { isError: false, keyHint: (_binding, description) => `ctrl+o ${description}` };
+    // Markdown pads and colors its lines, so compare the visible text only.
+    function lines(c) {
+        return c
+            .render(200)
+            .map((l) => l.replace(/\x1b\[[0-9;]*m/g, "").trimEnd())
+            .filter((l) => l.trim());
+    }
+    function numbers(count) {
+        return Array.from({ length: count }, (_, i) => `line ${i}`);
+    }
+    // The call lines mirror pi's grep: bold title, accent query/url, toolOutput options.
+    assert.deepEqual(lines(tools.web_search.renderCall({ query: "hi" }, theme, ctx)), ['web_search "hi"']);
+    assert.deepEqual(
+        lines(
+            tools.web_search.renderCall(
+                {
+                    query: "hi",
+                    site: "x.com",
+                    max_results: 5,
+                    published_after: "7d",
+                    published_before: "2026-01-01",
+                },
+                theme,
+                ctx,
+            ),
+        ),
+        ['web_search "hi" site x.com limit 5 after 7d before 2026-01-01'],
+    );
+    // Omitted optionals arrive as null or the literal "null"; both are absent.
+    assert.deepEqual(
+        lines(
+            tools.web_search.renderCall(
+                { query: "hi", site: "null", max_results: null, published_after: "null", published_before: null },
+                theme,
+                ctx,
+            ),
+        ),
+        ['web_search "hi"'],
+    );
+    assert.deepEqual(lines(tools.web_fetch.renderCall({ url: "https://x" }, theme, ctx)), ["web_fetch https://x"]);
+    // A long extraction prompt shows its first line on a muted second line.
+    assert.deepEqual(
+        lines(
+            tools.web_fetch.renderCall(
+                { url: "https://x", live: true, max_chars: 100, prompt: "list tiers\nand prices" },
+                theme,
+                ctx,
+            ),
+        ),
+        ["web_fetch https://x live max 100 chars", "list tiers"],
+    );
+    assert.deepEqual(
+        lines(
+            tools.web_fetch.renderCall(
+                { url: "https://x", live: "null", max_chars: "null", prompt: "null" },
+                theme,
+                ctx,
+            ),
+        ),
+        ["web_fetch https://x"],
+    );
+    const search = lines(
+        tools.web_search.renderResult(
+            { content: [], details: { results: [{ title: "T", url: "https://x" }] } },
+            { expanded: false, isPartial: false },
+            theme,
+            ctx,
+        ),
+    );
+    assert.deepEqual(search, ["1 result(s)", "T https://x"]);
+    // Expanded search shows the markdown the model sees, snippets included.
+    const expandedSearch = lines(
+        tools.web_search.renderResult(
+            {
+                content: [{ type: "text", text: "## T\nURL: https://x" }],
+                details: { results: [{ title: "T", url: "https://x" }] },
+            },
+            { expanded: true, isPartial: false },
+            theme,
+            ctx,
+        ),
+    );
+    assert.deepEqual(expandedSearch, ["1 result(s)", "T", "URL: https://x"]);
+    // The fetch body renders as markdown, collapsed to a preview with the built-in hint.
+    const body = numbers(15).join("\n");
+    const fetched = {
+        content: [{ type: "text", text: `# T\nhttps://x\n\n${body}` }],
+        details: { title: "T", chars: 99 },
+    };
+    assert.deepEqual(lines(tools.web_fetch.renderResult(fetched, { expanded: false, isPartial: false }, theme, ctx)), [
+        "T · 99 chars",
+        ...numbers(10),
+        "... (5 more lines, ctrl+o to expand)",
+    ]);
+    assert.deepEqual(lines(tools.web_fetch.renderResult(fetched, { expanded: true, isPartial: false }, theme, ctx)), [
+        "T · 99 chars",
+        ...numbers(15),
+    ]);
+}

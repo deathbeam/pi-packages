@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-usage",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Minimal extension for token usage and cost per provider, model and project.",
   "type": "module",
   "license": "MIT",

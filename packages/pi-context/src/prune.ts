@@ -10,6 +10,21 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Gain } from "./gain.ts";
 
+type Candidate = {
+    index: number;
+    toolCallId: string;
+    /** Replacement text for the result. */
+    text: string;
+    /** Absolute path for file tools, `bash:<command>` for bash. */
+    key: string;
+    kind: "read" | "edit" | "write" | "bash";
+    error: boolean;
+    /** An edit with an empty diff changed nothing, so it supersedes nothing. */
+    noop: boolean;
+    /** Reads with identical arguments return identical text. */
+    readKey?: string;
+};
+
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
 
 // The command stays visible in the tool call, so the placeholder need not repeat it.
@@ -29,21 +44,6 @@ function resolveToCwd(filePath: string, cwd: string): string {
     return resolve(cwd, expanded);
 }
 
-type Candidate = {
-    index: number;
-    toolCallId: string;
-    /** Replacement text for the result. */
-    text: string;
-    /** Absolute path for file tools, `bash:<command>` for bash. */
-    key: string;
-    kind: "read" | "edit" | "write" | "bash";
-    error: boolean;
-    /** An edit with an empty diff changed nothing, so it supersedes nothing. */
-    noop: boolean;
-    /** Reads with identical arguments return identical text. */
-    readKey?: string;
-};
-
 export function placeholder(path: string): string {
     return `[superseded: ${path} changed or was re-read later; read again if needed]`;
 }
@@ -54,6 +54,19 @@ function textLength(content: readonly unknown[]): number {
         if (block.type === "text") total += block.text?.length ?? 0;
     }
     return total;
+}
+
+/**
+ * The cache lifetime pi uses for warming, from the model's retention tier. Unknown means
+ * never expire by time: pruning then waits for compaction, a model switch or a new session.
+ */
+function cacheTtlMs(model: ExtensionContext["model"]): number {
+    const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
+    return (model?.promptCache?.[retention] ?? Number.POSITIVE_INFINITY) * 1000;
+}
+
+function modelKey(model: ExtensionContext["model"]): string {
+    return model ? `${model.provider}/${model.id}` : "";
 }
 
 /**
@@ -106,8 +119,8 @@ export function superseded(messages: readonly unknown[], cwd: string): Array<{ t
         });
     });
 
-    const stale = (candidate: Candidate): boolean =>
-        candidates.some((other) => {
+    function stale(candidate: Candidate): boolean {
+        return candidates.some((other) => {
             if (other.index <= candidate.index || other.key !== candidate.key) return false;
             if (candidate.kind === "bash") return true;
             if (other.error) return false;
@@ -117,6 +130,7 @@ export function superseded(messages: readonly unknown[], cwd: string): Array<{ t
                 (candidate.kind === "read" && other.kind === "read" && other.readKey === candidate.readKey)
             );
         });
+    }
 
     // A successful write result carries no anchors, so there is nothing to drop.
     return candidates
@@ -129,19 +143,6 @@ export function superseded(messages: readonly unknown[], cwd: string): Array<{ t
         .map(({ toolCallId, text }) => ({ toolCallId, text }));
 }
 
-/**
- * The cache lifetime pi uses for warming, from the model's retention tier. Unknown means
- * never expire by time: pruning then waits for compaction, a model switch or a new session.
- */
-function cacheTtlMs(model: ExtensionContext["model"]): number {
-    const retention = process.env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-    return (model?.promptCache?.[retention] ?? Number.POSITIVE_INFINITY) * 1000;
-}
-
-function modelKey(model: ExtensionContext["model"]): string {
-    return model ? `${model.provider}/${model.id}` : "";
-}
-
 export function registerPrune(pi: ExtensionAPI, gain: Gain): void {
     // Sticky: an id pruned once stays pruned, so the prefix is stable across requests.
     const pruned = new Map<string, string>();
@@ -150,12 +151,12 @@ export function registerPrune(pi: ExtensionAPI, gain: Gain): void {
     let cacheInvalidated = false;
 
     // A new or switched session has no cache to protect, so start cold.
-    const reset = () => {
+    function reset(): void {
         pruned.clear();
         lastRequestAt = 0;
         lastModelKey = "";
         cacheInvalidated = false;
-    };
+    }
 
     pi.on("session_start", reset);
     pi.on("session_tree", reset);

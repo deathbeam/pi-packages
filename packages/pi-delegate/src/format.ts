@@ -30,7 +30,7 @@ export type DelegateReport = {
 };
 
 /** The isolation state to show for a job: pending means its clone still holds unapplied work. */
-export type IsolationMark = "isolated" | "pending";
+type IsolationMark = "isolated" | "pending";
 
 type IsolationStateFields = {
     isolation?: unknown;
@@ -61,19 +61,17 @@ const WIDGET_MAX_JOBS = 5;
 export const COLLAPSED_OUTPUT_LINES = 10;
 const MAX_OUTPUT_BYTES = 50 * 1024;
 
-/** Terminal statuses have static icons; running jobs use statusIcon's clock-driven frame. */
-function statusIcon(status: JobStatus, now = Date.now()): string {
-    return status === "running"
-        ? SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]!
-        : STATUS_ICONS[status];
-}
-
 export function statusText(theme: Theme, status: JobStatus, now = Date.now()): string {
-    return theme.fg(STATUS_COLORS[status], statusIcon(status, now));
+    // Terminal statuses have static icons; running jobs use a clock-driven spinner frame.
+    const icon =
+        status === "running"
+            ? SPINNER_FRAMES[Math.floor(now / SPINNER_INTERVAL_MS) % SPINNER_FRAMES.length]!
+            : STATUS_ICONS[status];
+    return theme.fg(STATUS_COLORS[status], icon);
 }
 
 /** Derives the mark from a job: an isolation with no clone left, or a still-running one, is not pending. */
-export function isolationMarkOf(job: IsolationStateFields): IsolationMark | undefined {
+function isolationMarkOf(job: IsolationStateFields): IsolationMark | undefined {
     if (!job.isolation) return undefined;
     return job.status === "running" ? "isolated" : "pending";
 }
@@ -103,7 +101,7 @@ function formatTokens(count: number): string {
     return `${Math.round(count / 1000000)}M`;
 }
 
-export function formatDuration(ms: number): string {
+function formatDuration(ms: number): string {
     const seconds = Math.max(0, Math.floor(ms / 1000));
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
@@ -137,7 +135,9 @@ export function toolLines(theme: Theme, name: string, detail: string, result?: s
 
 export function toolCallDetail(toolName: string, args: unknown): string {
     const input = (args ?? {}) as Record<string, unknown>;
-    const value = (key: string) => (typeof input[key] === "string" ? (input[key] as string).trim() : "");
+    function value(key: string): string {
+        return typeof input[key] === "string" ? (input[key] as string).trim() : "";
+    }
     const path = value("path") || ".";
     switch (toolName) {
         case "bash":
@@ -157,6 +157,7 @@ export function toolCallDetail(toolName: string, args: unknown): string {
             return "";
     }
 }
+
 /** Caps a preview at `maxLines`; callers report the hidden count their own way. */
 export function capLines<T>(lines: T[], maxLines: number): { shown: T[]; hidden: number } {
     if (lines.length <= maxLines) return { shown: lines, hidden: 0 };
@@ -228,12 +229,15 @@ export function piDiff(unified: string): string {
             ([, os, oc, ns, nc]) => String(Math.max(+os! + (+oc! || 1), +ns! + (+nc! || 1)) - 1).length,
         ),
     );
-    const header = () => {
+    function header() {
         if (!pathShown) {
             out.push(path);
             pathShown = true;
         }
-    };
+    }
+    function num(prefix: string): string {
+        return String(prefix === "-" ? oldNum++ : newNum++).padStart(width, " ");
+    }
     for (const line of unified.split("\n")) {
         const file = /^diff --git a\/\S+ b\/(.+)$/.exec(line);
         if (file) {
@@ -258,7 +262,6 @@ export function piDiff(unified: string): string {
             continue;
         }
         const content = line.slice(1);
-        const num = (prefix: string) => String(prefix === "-" ? oldNum++ : newNum++).padStart(width, " ");
         if (line.startsWith("+")) out.push(`+${num("+")} ${content}`);
         else if (line.startsWith("-")) out.push(`-${num("-")} ${content}`);
         else {
@@ -296,8 +299,9 @@ export function resultFallback(body: string, theme: Theme, isError: boolean): Te
     return new Text(`\n${mark} ${theme.fg(isError ? "error" : "toolOutput", body || "(no output)")}`, 0, 0);
 }
 
+/** pi's built-in expand hint; callers place it on its own row, so it carries no leading newline. */
 export function moreLines(theme: Theme, hidden: number, keyHint: KeybindingHints["keyHint"]): string {
-    return theme.fg("muted", `… ${hidden} more lines, `) + keyHint("app.tools.expand", "to expand");
+    return `${theme.fg("muted", `... (${hidden} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 }
 
 export function appendOutput(

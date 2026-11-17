@@ -44,8 +44,6 @@ export function splitVisibleLines(text: string): string[] {
     return text.endsWith("\n") ? lines.slice(0, -1) : lines;
 }
 
-// --- Affected-line computation (for returning anchors after edit) ---
-
 /**
  * Compute the post-edit line range covering changed lines plus context.
  * Returns null if the range (with context) exceeds the output budget,
@@ -81,8 +79,6 @@ export function formatHashlineRegion(fileLines: readonly string[], startLine: nu
     }
     return out.join("\n");
 }
-
-// --- Changed line range computation ---
 
 /**
  * Compute first/last changed line numbers between two document versions.

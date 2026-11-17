@@ -31,11 +31,11 @@ assert.deepEqual(mergeImagesSettings({ vision: "a/b", outputDir: "g" }, { vision
 assert.deepEqual(mergeImagesSettings({ generate: "x/y" }, {}), { generate: "x/y" });
 
 const project = mkdtempSync(join(tmpdir(), "pi-images-project-"));
-const projectSettings = (images) => {
+function projectSettings(images) {
     mkdirSync(join(project, ".pi"), { recursive: true });
     writeFileSync(join(project, ".pi", "settings.json"), JSON.stringify({ images }));
     return readImagesSettings(project);
-};
+}
 assert.deepEqual(projectSettings({ vision: "anthropic/v", generate: "inferhub/g", outputDir: "out" }), {
     vision: "anthropic/v",
     generate: "inferhub/g",
@@ -57,36 +57,42 @@ assert.equal(typeof tools.image_generate.execute, "function");
 
 const notifications = [];
 const described = [];
-const visionCtx = (input) => ({
-    cwd: project,
-    model: { id: "m", input },
-    signal: undefined,
-    ui: { notify: (message, type) => notifications.push({ message, type }) },
-    modelRegistry: {
-        find: (provider, id) => (provider === "anthropic" ? { provider, id, input: ["text", "image"] } : undefined),
-        complete: async (model, context) => {
-            described.push({ model, context });
-            return { content: [{ type: "text", text: `desc-${context.messages[0].content[0].data}` }] };
-        },
-    },
-});
-
-const image = (data) => ({ type: "image", data, mimeType: "image/png" });
-const visionMessages = () => [
-    { role: "system", content: "sys" },
-    { role: "user", content: "plain text" },
-    { role: "user", content: [{ type: "text", text: "see" }, image("aGk=")] },
-    {
-        role: "toolResult",
-        content: [
-            {
-                type: "text",
-                text: `Read image file [image/png]\n[Current model does not support images. The image will be omitted from this request.]`,
+function visionCtx(input) {
+    return {
+        cwd: project,
+        model: { id: "m", input },
+        signal: undefined,
+        ui: { notify: (message, type) => notifications.push({ message, type }) },
+        modelRegistry: {
+            find: (provider, id) => (provider === "anthropic" ? { provider, id, input: ["text", "image"] } : undefined),
+            complete: async (model, context) => {
+                described.push({ model, context });
+                return { content: [{ type: "text", text: `desc-${context.messages[0].content[0].data}` }] };
             },
-            image("aGk="),
-        ],
-    },
-];
+        },
+    };
+}
+
+function image(data) {
+    return { type: "image", data, mimeType: "image/png" };
+}
+function visionMessages() {
+    return [
+        { role: "system", content: "sys" },
+        { role: "user", content: "plain text" },
+        { role: "user", content: [{ type: "text", text: "see" }, image("aGk=")] },
+        {
+            role: "toolResult",
+            content: [
+                {
+                    type: "text",
+                    text: `Read image file [image/png]\n[Current model does not support images. The image will be omitted from this request.]`,
+                },
+                image("aGk="),
+            ],
+        },
+    ];
+}
 
 // A vision-capable model needs no handoff.
 assert.equal(await handlers.context({ messages: visionMessages() }, visionCtx(["text", "image"])), undefined);
@@ -126,18 +132,20 @@ await handlers.context({ messages: [{ role: "user", content: "text only" }] }, v
 assert.equal(notifications.length, 0);
 
 // A vision model without image input warns once and passes images through.
-const blindCtx = (input) => ({
-    cwd: project,
-    model: { id: "m", input: ["text"] },
-    signal: undefined,
-    ui: { notify: (message, type) => notifications.push({ message, type }) },
-    modelRegistry: {
-        find: (provider, id) => (provider === "anthropic" ? { provider, id, input } : undefined),
-        complete: async () => {
-            throw new Error("unused");
+function blindCtx(input) {
+    return {
+        cwd: project,
+        model: { id: "m", input: ["text"] },
+        signal: undefined,
+        ui: { notify: (message, type) => notifications.push({ message, type }) },
+        modelRegistry: {
+            find: (provider, id) => (provider === "anthropic" ? { provider, id, input } : undefined),
+            complete: async () => {
+                throw new Error("unused");
+            },
         },
-    },
-});
+    };
+}
 projectSettings({ vision: "anthropic/blind" });
 assert.equal(await handlers.context({ messages: visionMessages() }, blindCtx(["text"])), undefined);
 assert.equal(notifications.length, 1);
@@ -172,30 +180,34 @@ assert.equal(notifications.length, 1);
 // Image generation: per-API requests and responses, with stubbed fetch.
 const realFetch = globalThis.fetch;
 const calls = [];
-const stubFetch = (...responses) => {
+function stubFetch(...responses) {
     globalThis.fetch = async (url, init) => {
         calls.push({ url: String(url), init });
         const response = responses.shift();
         if (typeof response === "function") return response(url, init);
         return new Response(JSON.stringify(response), { status: 200, headers: { "content-type": "application/json" } });
     };
-};
-const lastCall = () => calls.at(-1);
+}
+function lastCall() {
+    return calls.at(-1);
+}
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const pngB64 = png.toString("base64");
-const registry = (model) => ({
-    getAll: () => [model],
-    getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "secret", headers: { "x-extra": "yes" } }),
-    getRegisteredProviderConfig: () => undefined,
-});
-const runTool = async (cwd, params, model, ...responses) => {
+function registry(model) {
+    return {
+        getAll: () => [model],
+        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "secret", headers: { "x-extra": "yes" } }),
+        getRegisteredProviderConfig: () => undefined,
+    };
+}
+async function runTool(cwd, params, model, ...responses) {
     stubFetch(...responses);
     return tools.image_generate.execute("1", params, undefined, undefined, {
         cwd,
         ui: { notify: (message) => notifications.push({ message }) },
         modelRegistry: registry(model),
     });
-};
+}
 try {
     // Settings from the project file select the model and output dir.
     projectSettings({ generate: "inferhub/cb/gemini-3.0-pro-image", outputDir: "out" });
@@ -220,15 +232,8 @@ try {
     assert.equal(result.content[0].text, `![generated image](${saved})`);
     assert.deepEqual(result.content[1], { type: "image", data: pngB64, mimeType: "image/png" });
 
-    // Custom renderers: a compact call line, one line per saved image, errors in the error color.
-    const colors = [];
-    const theme = {
-        fg: (color, text) => {
-            colors.push([color, text]);
-            return text;
-        },
-        bold: (text) => text,
-    };
+    // Custom call line: the configured model plus a collapsed prompt preview. The result uses pi's built-in rendering.
+    const theme = { fg: (_color, text) => text, bold: (text) => text };
     const longPrompt = "START\n" + "a very detailed prompt\n".repeat(10) + "END";
     const callCtx = { expanded: false, cwd: project, keyHint: (_key, description) => `ctrl+o ${description}` };
     const collapsedRows = tools.image_generate
@@ -250,31 +255,6 @@ try {
             .join("\n")
             .includes("END"),
         "expanded call must show the full prompt",
-    );
-    colors.length = 0;
-    const rendered = tools.image_generate
-        .renderResult(result, { isPartial: false }, theme, { isError: false, cwd: project })
-        .render(80);
-    assert.ok(rendered.join("\n").includes(saved), "result must list the saved path");
-    assert.ok(colors.some(([color, text]) => color === "toolOutput" && text.includes(saved)));
-    colors.length = 0;
-    tools.image_generate.renderResult(
-        { content: [{ type: "text", text: "Specific failure" }], details: undefined },
-        { isPartial: false },
-        theme,
-        { isError: true, cwd: project },
-    );
-    assert.ok(colors.some(([color, text]) => color === "error" && text.includes("Specific failure")));
-    assert.ok(
-        tools.image_generate
-            .renderResult({ content: [], details: undefined }, { isPartial: true }, theme, {
-                isError: false,
-                cwd: project,
-            })
-            .render(80)
-            .join("\n")
-            .includes("generating…"),
-        "partial result must show the generating line",
     );
 
     // The provider's first model may carry a divergent baseUrl/api; the registered provider config wins.

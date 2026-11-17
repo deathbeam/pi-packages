@@ -59,14 +59,14 @@ export function runChild(
     let send!: (command: Record<string, unknown>) => Promise<any>;
 
     const done = new Promise<string>((resolveChild, reject) => {
-        const rejectPending = (error: Error) => {
+        function rejectPending(error: Error) {
             for (const request of pending.values()) {
                 clearTimeout(request.timer);
                 request.reject(error);
             }
             pending.clear();
-        };
-        const finish = (code: number | null, error?: Error) => {
+        }
+        function finish(code: number | null, error?: Error) {
             if (settled || finishing) return;
             finishing = true;
             if (buffer) {
@@ -94,14 +94,14 @@ export function runChild(
                 rejectPending(new Error("Delegate finished before acknowledging command"));
                 resolveChild(limitOutput(liveText.trim() || "(no output)"));
             }
-        };
-        const fail = (error: Error) => {
+        }
+        function fail(error: Error) {
             if (settled || finishing) return;
             childFailure = error;
             child.kill("SIGTERM");
             finish(null, error);
-        };
-        const parse = (line: string) => {
+        }
+        function parse(line: string) {
             if (!line.trim()) return;
             try {
                 const event = JSON.parse(line) as any;
@@ -161,8 +161,8 @@ export function runChild(
             } catch {
                 // Diagnostics on stdout that are not JSON events; ignore those lines.
             }
-        };
-        const enqueue = (command: Record<string, unknown>) => {
+        }
+        function enqueue(command: Record<string, unknown>) {
             const line = `${JSON.stringify(command)}\n`;
             const write = writeQueue.then(
                 () =>
@@ -176,7 +176,7 @@ export function runChild(
             );
             writeQueue = write.catch(() => {});
             return write;
-        };
+        }
         send = (command: Record<string, unknown>) => {
             const id = `delegate_${++requestId}`;
             const response = new Promise<any>((resolveResponse, rejectResponse) => {
@@ -202,14 +202,14 @@ export function runChild(
             });
             return response;
         };
-        const abort = () => {
+        function abort() {
             if (settled || aborted) return;
             aborted = true;
             void send({ type: "abort" }).catch(() => {});
             setTimeout(() => {
                 if (!settled) child.kill("SIGKILL");
             }, 5000).unref();
-        };
+        }
 
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (chunk: string) => {
@@ -232,11 +232,11 @@ export function runChild(
             finish(null);
         } else {
             signal?.addEventListener("abort", abort, { once: true });
-            const prompt = () => {
+            function prompt() {
                 void send({ type: "prompt", message: task }).catch((error) => {
                     if (!settled) fail(error);
                 });
-            };
+            }
             if (revive) {
                 // An empty transcript means the pinned session was recreated (e.g. a different cwd); prompting would lose the task.
                 void send({ type: "get_state" })

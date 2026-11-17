@@ -46,15 +46,6 @@ function readConfig(path: string): DelegateConfig {
     }
 }
 
-export function configFor(cwd: string): DelegateConfig {
-    const global = readConfig(join(getAgentDir(), "settings.json"));
-    const project = readConfig(join(cwd, CONFIG_DIR_NAME, "settings.json"));
-    return {
-        agentDirs: [...stringList(global.agentDirs), ...stringList(project.agentDirs)],
-        models: { ...(global.models ?? {}), ...(project.models ?? {}) },
-    };
-}
-
 function loadAgents(dir: string): AgentFile[] {
     if (!existsSync(dir)) return [];
     const agents: AgentFile[] = [];
@@ -103,6 +94,15 @@ export function agentByName(cwd: string, name: string): AgentFile {
         throw new Error(`Unknown agent "${name}". Available agents: ${names}.`);
     }
     return agent;
+}
+
+export function configFor(cwd: string): DelegateConfig {
+    const global = readConfig(join(getAgentDir(), "settings.json"));
+    const project = readConfig(join(cwd, CONFIG_DIR_NAME, "settings.json"));
+    return {
+        agentDirs: [...stringList(global.agentDirs), ...stringList(project.agentDirs)],
+        models: { ...(global.models ?? {}), ...(project.models ?? {}) },
+    };
 }
 
 // Same `:<thinking>` suffix pi's --model takes; only known levels split, so ids like `llama3:8b` stay whole.

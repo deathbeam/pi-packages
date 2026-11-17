@@ -4,16 +4,16 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-const GAIN_FILE = "pi-context-gain.jsonl";
-
-type GainEntry = { source: string; tokens: number };
-
 export type Gain = {
     /** Tokens this process saved for a source. */
     record(source: string, tokens: number): void;
     /** A source that keeps its own stats: its all-time token total. */
     report(source: string, total: () => Promise<number>): void;
 };
+
+type GainEntry = { source: string; tokens: number };
+
+const GAIN_FILE = "pi-context-gain.jsonl";
 
 function format(count: number): string {
     if (count < 1000) return String(Math.round(count));

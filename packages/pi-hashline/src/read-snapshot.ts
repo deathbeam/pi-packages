@@ -20,9 +20,13 @@ function totalSize(): number {
     return n;
 }
 
+/** Grep-only paths go first, so a broad search cannot squeeze out read snapshots. */
+function evictionTarget(): string | undefined {
+    return pathOrder.findLast((path) => grepPaths.has(path)) ?? pathOrder.at(-1);
+}
+
 function evictOldestVersion(): void {
-    // Grep-only paths go first, so a broad search cannot squeeze out read snapshots.
-    const target = pathOrder.findLast((path) => grepPaths.has(path)) ?? pathOrder.at(-1);
+    const target = evictionTarget();
     if (target === undefined) return;
     const versions = pathMap.get(target);
     if (!versions?.length) return;
@@ -65,7 +69,7 @@ export function rememberReadSnapshot(canonicalPath: string, content: string, fro
         moveToFront(canonicalPath);
     } else {
         if (pathOrder.length >= MAX_PATHS) {
-            const lruPath = pathOrder.findLast((path) => grepPaths.has(path)) ?? pathOrder[pathOrder.length - 1]!;
+            const lruPath = evictionTarget()!;
             pathMap.delete(lruPath);
             grepPaths.delete(lruPath);
             pathOrder.splice(pathOrder.indexOf(lruPath), 1);

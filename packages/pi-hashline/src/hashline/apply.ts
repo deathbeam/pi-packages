@@ -52,8 +52,6 @@ type LineIndex = {
     visibleLineCount: number;
 };
 
-// --- Mismatch formatting ---
-
 // Max total candidates across all anchors before we stop listing per-anchor candidates.
 const CANDIDATE_TOTAL_LIMIT = 8;
 // Max candidates per individual stale anchor.
@@ -100,7 +98,6 @@ function formatMismatchError(mismatches: HashMismatch[], fileLines: string[]): s
             });
         }
 
-        // Only emit the "Did you mean" section when at least one anchor has candidates.
         const hasAnyCandidates = perAnchor.some(
             ({ result }) => result.kind === "overflow" || (result.kind === "list" && result.lines.length > 0),
         );
@@ -127,8 +124,6 @@ function formatMismatchError(mismatches: HashMismatch[], fileLines: string[]): s
 
     return out.join("\n");
 }
-
-// --- Content preprocessing ---
 
 function maybeWarnSuspiciousUnicodeEscapePlaceholder(edits: HashlineEdit[], warnings: string[]): void {
     for (const edit of edits) {
@@ -236,7 +231,6 @@ function computeInsertionBoundary(
         return edit.pos ? edit.pos.line - 1 : 0;
     }
 
-    // append
     if (!edit.pos) {
         return lineIndex.visibleLineCount;
     }
@@ -429,7 +423,6 @@ function warnDuplicateInsert(
     const n = insertLines.length;
     if (n === 0) return;
 
-    // Determine the slice of existing file lines to compare against.
     let compareStart: number; // 0-based index into fileLines, inclusive
     let compareEnd: number; // 0-based index into fileLines, exclusive
 
@@ -444,7 +437,6 @@ function warnDuplicateInsert(
             compareEnd = visibleLineCount;
         }
     } else {
-        // prepend
         if (edit.pos) {
             // Before pos.line: compare fileLines[pos.line - 1 - n .. pos.line - 2].
             compareEnd = edit.pos.line - 1;
@@ -463,7 +455,6 @@ function warnDuplicateInsert(
     const adjacentLines = fileLines.slice(compareStart, compareEnd);
     if (adjacentLines.length !== n) return;
 
-    // All lines must match after trim; at least one must be significant.
     const allMatch = insertLines.every((line, i) => line.trim() === adjacentLines[i]!.trim());
     if (!allMatch) return;
 
@@ -692,7 +683,6 @@ export function applyHashlineEdits(
     const noopEdits: NoopEdit[] = [];
     const warnings: string[] = [];
 
-    // Phase 1: validate anchors
     const { mismatches } = validateAnchorEdits(edits, lineIndex, warnings, signal);
     if (mismatches.length) {
         throw new Error(formatMismatchError(mismatches, lineIndex.fileLines));
@@ -701,10 +691,8 @@ export function applyHashlineEdits(
     warnBareHashPrefixLines(edits, lineIndex.fileLines, warnings);
     maybeWarnSuspiciousUnicodeEscapePlaceholder(edits, warnings);
 
-    // Phase 2: resolve edits to ordered spans
     const orderedSpans = resolveEditSpans(edits, content, lineIndex, noopEdits, signal);
 
-    // Phase 3: assemble result
     const result = assembleEditResult(content, orderedSpans, signal);
     assertDoesNotEmptyFile(content, result);
     const changedRange = computeChangedLineRange(content, result);

@@ -32,6 +32,7 @@ type Column = {
 };
 type BodyRow = GroupRow & { parent?: string };
 type Frame = { filters: UsageFilter[]; group: number; cursor: number; top: number };
+type SparkBar = { label: string; char: string };
 
 const GROUPS = ["day", "provider", "model", "project"] as const satisfies readonly GroupMode[];
 const GROUP_LABELS: Record<GroupMode, string> = {
@@ -88,7 +89,9 @@ function hitPct(stats: Stats): string {
 }
 
 function layout(width: number, allColumns: Column[]): { nameWidth: number; columns: Column[] } {
-    const used = (cols: Column[]) => cols.reduce((sum, c) => sum + c.width + 1, 0);
+    function used(cols: Column[]): number {
+        return cols.reduce((sum, c) => sum + c.width + 1, 0);
+    }
     let columns = allColumns;
     for (const label of ["Share", "Hit%", "Cache", "Out", "In", "Reqs", "Δ"]) {
         if (width - used(columns) >= MIN_NAME_WIDTH) break;
@@ -97,7 +100,9 @@ function layout(width: number, allColumns: Column[]): { nameWidth: number; colum
     return { nameWidth: Math.max(4, width - used(columns)), columns };
 }
 
-const padWidth = (s: string, w: number): string => s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+function padWidth(s: string, w: number): string {
+    return s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+}
 
 function displayName(mode: GroupMode, name: string): string {
     if (mode === "day") return `${name} ${new Date(`${name}T00:00`).toLocaleDateString("en-US", { weekday: "short" })}`;
@@ -121,8 +126,6 @@ function tableLine(nameWidth: number, columns: Column[], row: GroupRow, totalCos
         .join(" ")
         .trimEnd();
 }
-
-type SparkBar = { label: string; char: string };
 
 function sparkline(daily: DailyCost[], width: number): { first: string; last: string; bars: SparkBar[] } | undefined {
     const recent = daily.slice(-Math.max(1, width - 12));
@@ -182,9 +185,13 @@ export default function (pi: ExtensionAPI) {
                 let viewHeight = 1; // set on first render; 1 keeps page keys sane before it
                 let body: BodyRow[] = [];
                 const stack: Frame[] = [];
-                const filters = () => stack.flatMap((frame) => frame.filters);
-                const dayFilter = () => filters().findLast((f) => f.mode === "day");
-                const derive = (source: UsageRecord[]) => {
+                function filters() {
+                    return stack.flatMap((frame) => frame.filters);
+                }
+                function dayFilter() {
+                    return filters().findLast((f) => f.mode === "day");
+                }
+                function derive(source: UsageRecord[]) {
                     const active = filters();
                     const records = source.filter((record) =>
                         active.every((f) => f.mode === "day" || matchesFilter(record, f)),
@@ -195,24 +202,27 @@ export default function (pi: ExtensionAPI) {
                     const summary = summarize(records, window.since, window.until);
                     const body = flatten(buildRows(records, window.since, mode, window.until), mode);
                     return { mode, summary, body, compare: day ? undefined : comparison(records) };
-                };
+                }
                 const getView = cacheView(() => derive(state.records!));
                 let allDays: DailyCost[] | undefined;
-                const allDaily = () => (allDays ??= dailyTotals(state.records!));
+                function allDaily() {
+                    return (allDays ??= dailyTotals(state.records!));
+                }
                 render = () => tui.requestRender();
                 void loaded.then(render);
-                const colorDelta = (delta: number | undefined): string => {
+                function colorDelta(delta: number | undefined): string {
                     if (delta === undefined) return "-";
                     if (delta === 0) return "0%";
                     const text = Number.isFinite(delta)
                         ? `${delta > 0 ? "▲" : "▼"}${Math.round(Math.abs(delta))}%`
                         : "▲new";
                     return theme.fg(delta > 0 ? "error" : "success", text);
-                };
+                }
                 const deltaColumn: Column = { label: "Δ", width: 9, cell: (_s, _r, _t, row) => colorDelta(row?.delta) };
-                const title = (width: number): string => {
-                    const tab = (label: string, active: boolean) =>
-                        active ? theme.fg("accent", `[${label}]`) : theme.fg("muted", ` ${label} `);
+                function title(width: number): string {
+                    function tab(label: string, active: boolean): string {
+                        return active ? theme.fg("accent", `[${label}]`) : theme.fg("muted", ` ${label} `);
+                    }
                     const left =
                         theme.fg("accent", theme.bold("Usage")) +
                         filters()
@@ -233,12 +243,13 @@ export default function (pi: ExtensionAPI) {
                             right,
                         width,
                     );
-                };
-                const footer = (width: number): string =>
-                    truncateToWidth(
+                }
+                function footer(width: number): string {
+                    return truncateToWidth(
                         theme.fg("dim", "enter open · esc back · tab/←→ group · [ ] day · q close · ↑↓ scroll"),
                         width,
                     );
+                }
                 return {
                     render(width: number) {
                         const rows = tui.terminal.rows;

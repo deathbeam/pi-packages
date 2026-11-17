@@ -178,6 +178,7 @@ async function executeEditPipeline(
 
     throwIfAborted(signal);
     const { bom, text: rawContent } = stripBom(file.text);
+    const hadUtf8DecodeErrors = file.hadUtf8DecodeErrors === true;
     const originalEnding = detectLineEnding(rawContent);
     const mixedEndingWarning = hasMixedLineEndings(rawContent)
         ? `File had mixed line endings (CRLF and LF); this edit rewrote it uniformly as ${originalEnding === "\r\n" ? "CRLF" : "LF"}.`
@@ -188,29 +189,31 @@ async function executeEditPipeline(
 
     const extraWarnings: string[] = [];
 
-    const buildResult = (parts: {
+    function buildResult(parts: {
         result: string;
         resultWarnings?: string[];
         noopEdits?: EditPipelineResult["noopEdits"];
         firstChangedLine?: number;
         lastChangedLine?: number;
-    }): EditPipelineResult => ({
-        path,
-        originalNormalized,
-        originalContent: bom + rawContent,
-        result: parts.result,
-        bom,
-        originalEnding,
-        hadUtf8DecodeErrors: file.hadUtf8DecodeErrors === true,
-        warnings: [
-            ...(mixedEndingWarning && parts.result !== originalNormalized ? [mixedEndingWarning] : []),
-            ...extraWarnings,
-            ...(parts.resultWarnings ?? []),
-        ],
-        noopEdits: parts.noopEdits,
-        firstChangedLine: parts.firstChangedLine,
-        lastChangedLine: parts.lastChangedLine,
-    });
+    }): EditPipelineResult {
+        return {
+            path,
+            originalNormalized,
+            originalContent: bom + rawContent,
+            result: parts.result,
+            bom,
+            originalEnding,
+            hadUtf8DecodeErrors,
+            warnings: [
+                ...(mixedEndingWarning && parts.result !== originalNormalized ? [mixedEndingWarning] : []),
+                ...extraWarnings,
+                ...(parts.resultWarnings ?? []),
+            ],
+            noopEdits: parts.noopEdits,
+            firstChangedLine: parts.firstChangedLine,
+            lastChangedLine: parts.lastChangedLine,
+        };
+    }
 
     // Stale anchors may be replayed against recent read snapshots below.
     let directResult: ReturnType<typeof applyHashlineEdits> | null = null;

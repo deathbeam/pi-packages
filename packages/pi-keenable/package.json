@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-keenable",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Minimal extension for web search and fetch using Keenable API",
   "type": "module",
   "license": "MIT",
@@ -27,7 +27,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "scripts": {
     "test": "node check.mjs"

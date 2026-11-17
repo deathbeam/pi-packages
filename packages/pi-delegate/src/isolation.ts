@@ -137,7 +137,9 @@ export function removeClone(iso: IsolationState): void {
  */
 export function applyClone(iso: IsolationState): ApplyResult {
     const root = rootOf(iso);
-    const run = (args: string[]) => git(args, { cwd: iso.clone });
+    function run(args: string[]): string {
+        return git(args, { cwd: iso.clone });
+    }
     // Commit uncommitted delegate work so the rebase carries it.
     run(["add", "-A"]);
     if (run(["status", "--porcelain"]).trim()) run([...IDENTITY, "commit", "--no-verify", "-m", "delegate work"]);

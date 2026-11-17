@@ -112,7 +112,7 @@ export default function (pi: ExtensionAPI) {
     const exiting = new Map<string, Promise<void>>();
 
     /** Waits for a cancelled child to exit; a child that never closes must not block steering forever. */
-    const waitForExit = async (id: string) => {
+    async function waitForExit(id: string) {
         const closed = exiting.get(id);
         if (!closed) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -123,41 +123,40 @@ export default function (pi: ExtensionAPI) {
         const result = await Promise.race([closed.then(() => "closed" as const), timeout]);
         clearTimeout(timer);
         if (result === "timeout") throw new Error(`Delegate job "${id}" is still exiting; call delegate_steer again.`);
-    };
+    }
 
     let ticker: ReturnType<typeof setInterval> | undefined;
     // Prompts are read once; drift happens one quick search at a time, so count it and nudge at 5, 10, 20, ...
     let directCalls = 0;
     let nextReminder = FIRST_REMINDER_AT;
 
-    const jobTarget = (rawId: unknown, theme: Theme): string => {
+    function jobTarget(rawId: unknown, theme: Theme): string {
         const id = jobId(rawId);
         const job = store.find(id);
         return job ? jobIdentity(theme, job) : theme.fg("muted", id || "…");
-    };
+    }
 
     /** The renderCall shared by every delegate tool: identity plus an optional payload. */
-    const callRenderer =
-        (toolName: string, identity: (args: any, theme: Theme) => string, payload: (args: any) => string = () => "") =>
-        (args: any, theme: Theme, context: RenderContext) =>
+    function callRenderer(
+        toolName: string,
+        identity: (args: any, theme: Theme) => string,
+        payload: (args: any) => string = () => "",
+    ) {
+        return (args: any, theme: Theme, context: RenderContext) =>
             toolLayout(toolName, identity(args, theme), payload(args), theme, context.expanded, context.keyHint);
+    }
 
     /** The job-id tools all identify the job the same way. */
-    const idCall = (toolName: string, payload: (args: any) => string = () => "") =>
-        callRenderer(toolName, (args, theme) => jobTarget(args?.id, theme), payload);
-
-    /** The mark is the call's outcome, not the job's status; a one-line header covers the simple tools. */
-    const headerResult = (tail: string) => (result: any, _options: any, theme: Theme, context: RenderContext) => {
-        const details = result.details as { id: string; agent: string } | undefined;
-        const body = resultText(result);
-        if (context.isError || !details?.agent) return resultFallback(body, theme, context.isError);
-        return new Text(`\n${resultHeader(theme, details, tail)}`, 0, 0);
-    };
+    function idCall(toolName: string, payload: (args: any) => string = () => "") {
+        return callRenderer(toolName, (args, theme) => jobTarget(args?.id, theme), payload);
+    }
 
     /** The clone is the unit: every job id that ran in it is only a handle, so state changes reach all of them. */
-    const jobsInClone = (clone: string) => store.all().filter((job) => job.isolation?.clone === clone);
+    function jobsInClone(clone: string) {
+        return store.all().filter((job) => job.isolation?.clone === clone);
+    }
 
-    const clonedJob = (id: string) => {
+    function clonedJob(id: string) {
         const job = store.findOrThrow(id);
         const isolation = job.isolation;
         if (!isolation)
@@ -167,26 +166,26 @@ export default function (pi: ExtensionAPI) {
                     : `Delegate job "${id}" did not run in an isolated clone.`,
             );
         return { job, isolation };
-    };
+    }
 
     /** Closing a clone is a clone-wide operation: every job id that ran in it stops pointing at it. */
-    const closeClone = (isolation: IsolationState) => {
+    function closeClone(isolation: IsolationState) {
         removeClone(isolation);
         for (const shared of jobsInClone(isolation.clone)) {
             shared.isolation = undefined;
             shared.cloneClosed = true;
             store.save(shared);
         }
-    };
+    }
 
     /** One job at a time per clone: a shared clone is a shared working directory. */
-    const requireIdleClone = (isolation: IsolationState) => {
+    function requireIdleClone(isolation: IsolationState) {
         const busy = store.live().find((job) => job.isolation?.clone === isolation.clone);
         if (busy)
             throw new Error(`Delegate job "${busy.id}" is running in this clone; wait for it or cancel it first.`);
-    };
+    }
 
-    const refreshWidget = (ctx: ExtensionContext) => {
+    function refreshWidget(ctx: ExtensionContext) {
         if (!ctx.hasUI) return;
         const jobs = store.live();
         if (jobs.length === 0) {
@@ -216,17 +215,17 @@ export default function (pi: ExtensionAPI) {
             for (const line of lines) container.addChild(new Text(line, 1, 0));
             return container;
         });
-    };
+    }
 
-    const syncTicker = (ctx: ExtensionContext) => {
+    function syncTicker(ctx: ExtensionContext) {
         if (store.live().length > 0) ticker ??= setInterval(() => refreshWidget(ctx), SPINNER_INTERVAL_MS);
         else if (ticker) {
             clearInterval(ticker);
             ticker = undefined;
         }
-    };
+    }
 
-    const finishJob = (ctx: ExtensionContext, job: DelegateJob, output?: string, error?: string) => {
+    function finishJob(ctx: ExtensionContext, job: DelegateJob, output?: string, error?: string) {
         if (!store.finish(job, error ? "failed" : "done", error ? `Error: ${error}` : undefined)) return;
         syncTicker(ctx);
         refreshWidget(ctx);
@@ -248,10 +247,10 @@ export default function (pi: ExtensionAPI) {
             { customType: RESULT_MESSAGE, content: reportText(report), display: true, details: report },
             { triggerTurn: true, deliverAs: "steer" },
         );
-    };
+    }
 
     /** Runs one delegate child: foreground runs return their output, background ones report on completion. */
-    const runDelegate = async (
+    async function runDelegate(
         ctx: ExtensionContext,
         agent: AgentFile,
         prior: InspectJob | undefined,
@@ -259,7 +258,7 @@ export default function (pi: ExtensionAPI) {
         task: string,
         signal: AbortSignal | undefined,
         prompt = task,
-    ) => {
+    ) {
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const { model, thinking } = mustResolveModel(fields.model, ctx, agent.model);
@@ -370,10 +369,10 @@ export default function (pi: ExtensionAPI) {
             ],
             details,
         };
-    };
+    }
 
     /** Swaps a running child's model over the RPC; the child confirms or rejects it, and never restarts. */
-    const swapModel = async (job: DelegateJob, request: string, ctx: ExtensionContext) => {
+    async function swapModel(job: DelegateJob, request: string, ctx: ExtensionContext) {
         if (!job.swapModel) throw new Error(`Delegate job "${job.id}" cannot switch models.`);
         const { model } = mustResolveModel(request, ctx);
         const [provider, ...rest] = model.split("/");
@@ -386,7 +385,7 @@ export default function (pi: ExtensionAPI) {
             job.contextWindow = contextWindowFor(ctx, model);
         });
         if (level) job.model = `${model}:${level}`;
-    };
+    }
 
     pi.on("session_shutdown", () => {
         if (ticker) clearInterval(ticker);
@@ -395,7 +394,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     // Rebuilt from the active branch: abandoned branches are alternative histories.
-    const restoreSession = (ctx: ExtensionContext) => {
+    function restoreSession(ctx: ExtensionContext) {
         const interrupted = store.restore(ctx.sessionManager.getBranch());
         // Custom entries never reach the model, so announce the interrupted jobs as a steered message.
         if (interrupted.length)
@@ -412,7 +411,7 @@ export default function (pi: ExtensionAPI) {
                 },
                 { deliverAs: "steer" },
             );
-    };
+    }
 
     pi.on("session_start", (_event, ctx) => restoreSession(ctx));
     pi.on("session_tree", (_event, ctx) => restoreSession(ctx));
@@ -682,8 +681,6 @@ export default function (pi: ExtensionAPI) {
             };
         },
         renderCall: idCall("delegate_cancel"),
-
-        renderResult: headerResult("cancellation requested"),
     });
 
     pi.registerTool({
@@ -773,7 +770,6 @@ export default function (pi: ExtensionAPI) {
             };
         },
         renderCall: idCall("delegate_discard"),
-        renderResult: headerResult("clone discarded"),
     });
 
     pi.registerTool({
@@ -787,10 +783,10 @@ export default function (pi: ExtensionAPI) {
             const jobs = store.all();
             if (!jobs.length) return { content: [{ type: "text", text: "No delegates yet." }], details: undefined };
             const running = jobs.filter((job) => job.status === "running").length;
-            const lastActivity = (job: InspectJob) => {
+            function lastActivity(job: InspectJob) {
                 const { tool } = lastToolCall(job);
                 return job.status === "running" && tool ? ` · ${tool.name}${tool.detail ? ` ${tool.detail}` : ""}` : "";
-            };
+            }
             const lines = jobs.map((job) => {
                 const tag = isolationWords(job);
                 return `- ${job.id} ${job.agent} · ${job.status}${tag ? ` · ${tag}` : ""} · ${jobLine(job, elapsedMs(job, now))}${lastActivity(job)}`;

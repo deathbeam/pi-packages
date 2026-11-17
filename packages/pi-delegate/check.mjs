@@ -1098,13 +1098,21 @@ setTimeout(() => process.exit(1), 5000).unref();
 `,
 );
 const fakeKeyHint = (_keybinding, description) => `«key»${description}`;
-// delegate_list intentionally keeps Pi's default rendering; the rest use compact call headers and keep failures visible.
-for (const tool of registered.filter((entry) => entry.name !== "delegate_list")) {
-    assert.equal(typeof tool.renderCall, "function", `${tool.name} has no call renderer`);
+// delegate_list keeps Pi's default call line; delegate_cancel and delegate_discard also keep Pi's default result
+// rendering. The rest use compact call headers and keep failures visible.
+const defaultResultTools = new Set(["delegate_cancel", "delegate_discard"]);
+for (const tool of registered) {
+    if (tool.name !== "delegate_list") {
+        assert.equal(typeof tool.renderCall, "function", `${tool.name} has no call renderer`);
+        const partial = tool.renderCall({}, theme, { expanded: false, argsComplete: false }).render(80);
+        assert.ok(stripVTControlCharacters(partial[0]).trim().startsWith(tool.name));
+        assert.doesNotMatch(partial.join("\n"), /undefined/);
+    }
+    if (defaultResultTools.has(tool.name)) {
+        assert.equal(tool.renderResult, undefined, `${tool.name} should inherit Pi's default result rendering`);
+        continue;
+    }
     assert.equal(typeof tool.renderResult, "function", `${tool.name} has no result renderer`);
-    const partial = tool.renderCall({}, theme, { expanded: false, argsComplete: false }).render(80);
-    assert.ok(stripVTControlCharacters(partial[0]).trim().startsWith(tool.name));
-    assert.doesNotMatch(partial.join("\n"), /undefined/);
     colored.length = 0;
     const failure = tool.renderResult(
         { content: [{ type: "text", text: "Specific failure" }], details: undefined },
@@ -1798,7 +1806,7 @@ try {
         () => {},
         tuiCtx,
     );
-    const cancellation = await cancel.execute("call", { id: cancelled.details.id }, undefined, () => {}, tuiCtx);
+    await cancel.execute("call", { id: cancelled.details.id }, undefined, () => {}, tuiCtx);
     assert.match(
         stripVTControlCharacters(
             cancel
@@ -1807,16 +1815,6 @@ try {
         ),
         new RegExp(`^delegate_cancel ${cancelled.details.id} explore`),
         "cancelled delegate identity lost from call header",
-    );
-    colored.length = 0;
-    const cancelledResult = cancel
-        .renderResult(cancellation, { expanded: false }, theme, { isError: false, keyHint: fakeKeyHint })
-        .render(120)
-        .join("\n");
-    assert.match(cancelledResult, new RegExp(`✓ ${cancelled.details.id} explore cancellation requested`));
-    assert.ok(
-        colored.some(([color, text]) => color === STATUS_COLORS.done && text === "✓"),
-        "cancellation mark must show the call's success, not the job's cancelled status",
     );
     const remaining = await delegate.execute(
         "call",

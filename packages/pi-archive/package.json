@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-archive",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Minimal extension for searching past Pi conversations.",
   "type": "module",
   "license": "MIT",
@@ -31,6 +31,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   }
 }

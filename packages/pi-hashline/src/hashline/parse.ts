@@ -7,8 +7,6 @@
 import { isRecord } from "../edit-normalize";
 import { NIBBLE_STR, HASH_ALPHABET_RE, HASH_LENGTH } from "./hash";
 
-// --- Types ---
-
 export type Anchor = { line: number; hash: string; textHint?: string };
 export type HashlineEdit =
     | { op: "replace"; pos: Anchor; end?: Anchor; lines: string[] }
@@ -44,8 +42,6 @@ const DISPLAY_PREFIX_PLUS_RE = new RegExp(`^\\+\\s*\\d+\\s*#\\s*${DISPLAY_HASH_Q
 export const BARE_PREFIX_RE = new RegExp(`^\\s*([${NIBBLE_STR}]{${HASH_LENGTH}}):`, "i");
 
 const ITEM_KEYS = new Set(["op", "pos", "end", "lines"]);
-
-// --- Parsing ---
 
 /**
  * Validate an anchor's hash for the fixed session length. Returns an error
@@ -128,8 +124,6 @@ function parseAnchorRef(ref: string): Anchor {
         ...(textHint !== undefined ? { textHint } : {}),
     };
 }
-
-// --- Content preprocessing ---
 
 function assertNoDisplayPrefixes(lines: string[]): void {
     for (const line of lines) {

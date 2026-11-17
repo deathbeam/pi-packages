@@ -261,15 +261,5 @@ export default function (pi: ExtensionAPI) {
                 );
             return container;
         },
-
-        renderResult(result, { isPartial }, theme, context) {
-            const text = result.content
-                .flatMap((block) => (block.type === "text" ? [block.text ?? ""] : []))
-                .join("\n");
-            if (context.isError) return new Text(`\n${theme.fg("error", text)}`, 0, 0);
-            if (isPartial) return new Text(`\n${theme.fg("muted", "generating…")}`, 0, 0);
-            const paths = (result.details as { paths?: string[] } | undefined)?.paths ?? [];
-            return new Text(`\n${paths.map((path) => theme.fg("toolOutput", path)).join("\n")}`, 0, 0);
-        },
     });
 }

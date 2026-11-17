@@ -53,30 +53,34 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
     const running = new Map<string, DelegateJob>();
     const history: InspectJob[] = [];
     const listeners = new Set<() => void>();
-    const notify = () => {
+    function notify() {
         for (const redraw of listeners) redraw();
-    };
+    }
     // A session_tree rebuild restores old entries; the history keeps one row per id across finish and relaunch.
-    const drop = (id: string) => {
+    function drop(id: string) {
         const stale = history.findIndex((item) => item.id === id);
         if (stale >= 0) history.splice(stale, 1);
-    };
-    const commit = (entry: InspectJob) => {
+    }
+    function commit(entry: InspectJob) {
         drop(entry.id);
         history.unshift(entry);
         append(JOB_ENTRY, snapshot(entry));
         notify();
-    };
-    const find = (id: string) => running.get(id) ?? history.find((item) => item.id === id);
-    const plain = (job: InspectJob) => {
+    }
+    function find(id: string) {
+        return running.get(id) ?? history.find((item) => item.id === id);
+    }
+    function plain(job: InspectJob) {
         const { controller, steer, swapModel, ...rest } = job as InspectJob & Partial<DelegateJob>;
         return rest;
-    };
+    }
     /** The serializable form of a job: runtime handles and the transcript stay out. */
-    const snapshot = (job: InspectJob): InspectJob => ({
-        ...plain(job),
-        messages: [],
-    });
+    function snapshot(job: InspectJob): InspectJob {
+        return {
+            ...plain(job),
+            messages: [],
+        };
+    }
 
     return {
         /** Every job a view can show: live first, then history. */

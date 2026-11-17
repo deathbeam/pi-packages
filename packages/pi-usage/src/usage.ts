@@ -29,12 +29,66 @@ export type Stats = {
     cacheWrite: number;
 };
 
+type CacheEntry = { size: number; mtimeMs: number; records: UsageRecord[] };
+type Cache = { version: number; files: Record<string, CacheEntry> };
+
+export type GroupMode = "day" | "provider" | "model" | "project";
+export type UsageFilter = { mode: GroupMode; key: string };
+
+export type GroupRow = {
+    key: string;
+    name: string;
+    stats: Stats;
+    requests: number;
+    delta?: number;
+    /** Nested model rows; only produced by provider grouping. */
+    children?: GroupRow[];
+};
+
+export type Summary = {
+    stats: Stats;
+    requests: number;
+    /** Distinct session ids (files) seen in the window. */
+    sessions: number;
+};
+
+export type DailyCost = { label: string; cost: number };
+
+type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; providers?: Set<string> };
+
+const CACHE_VERSION = 1;
+
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 }
 
 function num(value: unknown): number {
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function addStats(stats: Stats, record: UsageRecord): void {
+    stats.cost += record.cost;
+    stats.input += record.input;
+    stats.output += record.output;
+    stats.cacheRead += record.cacheRead;
+    stats.cacheWrite += record.cacheWrite;
+}
+
+function recordKey(record: UsageRecord, mode: GroupMode): string {
+    return mode === "day" ? dayKey(record.ts) : mode === "project" ? record.cwd : record[mode];
+}
+
+function tokens(s: Stats): number {
+    return s.input + s.output + s.cacheRead + s.cacheWrite;
+}
+
+/** Cost descending, then total tokens (so free models still rank by usage). */
+function byCost(a: GroupRow, b: GroupRow): number {
+    return b.stats.cost - a.stats.cost || tokens(b.stats) - tokens(a.stats);
+}
+
+function newTally(): Tally {
+    return { stats: emptyStats(), requests: 0 };
 }
 
 async function sessionFiles(dir: string, out: string[]): Promise<void> {
@@ -50,11 +104,6 @@ async function sessionFiles(dir: string, out: string[]): Promise<void> {
         else if (entry.name.endsWith(".jsonl")) out.push(path);
     }
 }
-
-type CacheEntry = { size: number; mtimeMs: number; records: UsageRecord[] };
-type Cache = { version: number; files: Record<string, CacheEntry> };
-
-const CACHE_VERSION = 1;
 
 async function readCache(file: string): Promise<Record<string, CacheEntry>> {
     try {
@@ -178,17 +227,6 @@ export async function collectUsage(
     return records;
 }
 
-function addStats(stats: Stats, record: UsageRecord): void {
-    stats.cost += record.cost;
-    stats.input += record.input;
-    stats.output += record.output;
-    stats.cacheRead += record.cacheRead;
-    stats.cacheWrite += record.cacheWrite;
-}
-
-export type GroupMode = "day" | "provider" | "model" | "project";
-export type UsageFilter = { mode: GroupMode; key: string };
-
 export function cacheView<T>(derive: () => T) {
     let cached: { key: string; value: T } | undefined;
     return (mode: GroupMode, filters: UsageFilter[], now = Date.now()): T => {
@@ -220,19 +258,15 @@ export function dayWindow(key: string, offset = 0): { since: number; until: numb
 // UTC ordinals count local calendar days without DST changing their length.
 export function windowDays(since: number, until: number): number {
     if (since >= until) return 0;
-    const ordinal = (ts: number) => {
+    function ordinal(ts: number): number {
         const d = new Date(ts);
         return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000;
-    };
+    }
     return ordinal(until - 1) - ordinal(since) + 1;
 }
 
 export function percentChange(current: number, previous: number): number {
     return previous === 0 ? (current === 0 ? 0 : Infinity) : ((current - previous) / previous) * 100;
-}
-
-function recordKey(record: UsageRecord, mode: GroupMode): string {
-    return mode === "day" ? dayKey(record.ts) : mode === "project" ? record.cwd : record[mode];
 }
 
 export function matchesFilter(record: UsageRecord, filter: UsageFilter): boolean {
@@ -280,25 +314,6 @@ export function comparison(records: UsageRecord[], now = Date.now()) {
     };
 }
 
-export type GroupRow = {
-    key: string;
-    name: string;
-    stats: Stats;
-    requests: number;
-    delta?: number;
-    /** Nested model rows; only produced by provider grouping. */
-    children?: GroupRow[];
-};
-
-const tokens = (s: Stats): number => s.input + s.output + s.cacheRead + s.cacheWrite;
-
-/** Cost descending, then total tokens (so free models still rank by usage). */
-const byCost = (a: GroupRow, b: GroupRow): number => b.stats.cost - a.stats.cost || tokens(b.stats) - tokens(a.stats);
-
-type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; providers?: Set<string> };
-
-const newTally = (): Tally => ({ stats: emptyStats(), requests: 0 });
-
 export function buildRows(
     records: UsageRecord[],
     sinceMs = 0,
@@ -344,22 +359,17 @@ export function buildRows(
             rows[i]!.delta = percentChange(rows[i]!.stats.cost, rows[i + 1]!.stats.cost);
         return rows;
     }
-    const toRow = ([name, group]: [string, Tally]): GroupRow => ({
-        key: name,
-        name: mode === "model" && group.providers!.size > 1 ? `${name} (${group.providers!.size})` : name,
-        stats: group.stats,
-        requests: group.requests,
-        children: group.models && [...group.models].map(toRow).sort(byCost),
-    });
+    function toRow([name, group]: [string, Tally]): GroupRow {
+        return {
+            key: name,
+            name: mode === "model" && group.providers!.size > 1 ? `${name} (${group.providers!.size})` : name,
+            stats: group.stats,
+            requests: group.requests,
+            children: group.models && [...group.models].map(toRow).sort(byCost),
+        };
+    }
     return [...groups].map(toRow).sort(byCost);
 }
-
-export type Summary = {
-    stats: Stats;
-    requests: number;
-    /** Distinct session ids (files) seen in the window. */
-    sessions: number;
-};
 
 /** Totals for the summary block: one pass over [sinceMs, untilMs). */
 export function summarize(records: UsageRecord[], sinceMs = 0, untilMs = Infinity): Summary {
@@ -375,9 +385,9 @@ export function summarize(records: UsageRecord[], sinceMs = 0, untilMs = Infinit
     return { stats, requests, sessions: sessions.size };
 }
 
-export type DailyCost = { label: string; cost: number };
-
-export const seriesKey = (key: string, parent?: string): string => JSON.stringify([key, parent ?? null]);
+export function seriesKey(key: string, parent?: string): string {
+    return JSON.stringify([key, parent ?? null]);
+}
 
 export function buildDailySeries(
     records: UsageRecord[],
@@ -396,11 +406,11 @@ export function buildDailySeries(
         cursor = dayWindow(key).until;
     }
     const costs = new Map<string, Map<number, number>>();
-    const add = (key: string, index: number, cost: number) => {
+    function add(key: string, index: number, cost: number): void {
         let values = costs.get(key);
         if (!values) costs.set(key, (values = new Map()));
         values.set(index, (values.get(index) ?? 0) + cost);
-    };
+    }
     for (const record of records) {
         if (record.ts < since || record.ts >= until) continue;
         const index = positions.get(dayKey(record.ts));

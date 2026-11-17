@@ -2,7 +2,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text, TruncatedText } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 interface ArchiveMatch {
@@ -44,6 +45,7 @@ const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
 const EXCERPT_RADIUS = 150;
 const TITLE_MAX_CHARS = 120;
+const COLLAPSED_LINES = 10;
 const OPTION_BOUNDS = [
     { name: "limit", min: 1, max: MAX_SEARCH_LIMIT },
     { name: "perSession", min: 1, max: MAX_PER_SESSION },
@@ -122,7 +124,7 @@ async function scanJsonLines(
     let oversizedLines = 0;
     let stopped = false;
 
-    const consume = (text: string): boolean => {
+    function consume(text: string): boolean {
         let start = 0;
         while (start < text.length) {
             const newline = text.indexOf("\n", start);
@@ -148,7 +150,7 @@ async function scanJsonLines(
             start = end;
         }
         return true;
-    };
+    }
 
     try {
         for await (const chunk of stream) {
@@ -178,10 +180,6 @@ async function scanJsonLines(
     }
 }
 
-function parseTerms(query: string): string[] {
-    return query.toLowerCase().split(/\s+/).filter(Boolean);
-}
-
 function matchesAll(text: string, terms: string[]): boolean {
     const lower = text.toLowerCase();
     return terms.every((t) => lower.includes(t));
@@ -208,7 +206,7 @@ async function searchSessions(
     signal?: AbortSignal,
     onProgress?: (filesScanned: number, matches: number) => void,
 ): Promise<SearchResult> {
-    const terms = parseTerms(query);
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     for (const { name, min, max } of OPTION_BOUNDS) {
         const value = opts[name];
         if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max)) {
@@ -258,8 +256,9 @@ async function searchSessions(
         return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: true, scanIncomplete: true };
 
     const currentDirName = opts.currentDir ? path.basename(opts.currentDir) : undefined;
-    const rank = (f: (typeof files)[number]) =>
-        f.file === opts.currentFile ? 0 : currentDirName && f.dir === currentDirName ? 1 : 2;
+    function rank(f: (typeof files)[number]) {
+        return f.file === opts.currentFile ? 0 : currentDirName && f.dir === currentDirName ? 1 : 2;
+    }
     files.sort((a, b) => rank(a) - rank(b) || b.mtime - a.mtime);
 
     const matches: ArchiveMatch[] = [];
@@ -378,14 +377,37 @@ function formatResults(query: string, result: SearchResult): string {
     let lastFile = "";
     for (const m of result.matches) {
         if (m.file !== lastFile) {
-            blocks.push(
-                `${m.file}\n[${m.currentSession ? "this session" : m.sameProject ? "other session in this project" : m.project} | ${m.date}]`,
-            );
+            blocks.push(`${m.file}\n[${matchLabel(m)} | ${m.date}]`);
             lastFile = m.file;
         }
         blocks[blocks.length - 1] += `\n- ${m.role}: ${m.excerpt.replace(/\s+/g, " ")}`;
     }
     return `Found ${result.matches.length} match(es) for "${query}"${result.offset ? ` at offset ${result.offset}` : ""} — at most ${result.perSession ?? DEFAULT_PER_SESSION} per session file (read or grep the file for more):\n\n${blocks.join("\n\n")}${note}`;
+}
+
+function matchLabel(m: ArchiveMatch): string {
+    return m.currentSession ? "this session" : m.sameProject ? "other session in this project" : m.project;
+}
+
+/** Absent, null and the literal "null" strict models send all mean "not set". */
+function callArg(value: unknown): string | undefined {
+    if (typeof value === "number") return String(value);
+    return typeof value === "string" && value !== "" && value !== "null" ? value : undefined;
+}
+
+function formatSearchCall(args: any, theme: Theme): string {
+    const query = callArg(args?.query);
+    const session = callArg(args?.session);
+    const limit = callArg(args?.limit);
+    const perSession = callArg(args?.perSession);
+    const offset = callArg(args?.offset);
+    let text = theme.fg("toolTitle", theme.bold("search_archive"));
+    if (query !== undefined) text += " " + theme.fg("accent", `"${query}"`);
+    if (session !== undefined) text += theme.fg("toolOutput", ` in ${session}`);
+    if (limit !== undefined) text += theme.fg("toolOutput", ` limit ${limit}`);
+    if (perSession !== undefined) text += theme.fg("toolOutput", ` per session ${perSession}`);
+    if (offset !== undefined) text += theme.fg("toolOutput", ` offset ${offset}`);
+    return text;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -427,6 +449,63 @@ export default function (pi: ExtensionAPI) {
                 }),
             ),
         }),
+        renderCall(args, theme, context) {
+            const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+            text.setText(formatSearchCall(args, theme));
+            return text;
+        },
+        renderResult(result, { expanded }, theme, context) {
+            const text = result.content.flatMap((b) => (b.type === "text" ? [b.text ?? ""] : [])).join("\n");
+            const details = result.details as
+                | { matches?: ArchiveMatch[]; filesScanned?: number; limitReached?: boolean; scanIncomplete?: boolean }
+                | undefined;
+            // Errors, partial scans and results saved before details.matches existed show the plain text.
+            if (context.isError || !details?.matches)
+                return new Text(`\n${theme.fg(context.isError ? "error" : "toolOutput", text)}`, 0, 0);
+            const { matches } = details;
+            const sessions = new Set(matches.map((m) => m.file)).size;
+            const warnings = [
+                details.limitReached && "limit reached",
+                details.scanIncomplete && "scan incomplete",
+            ].filter(Boolean);
+            const lines: string[] = [];
+            let lastFile = "";
+            for (const m of matches) {
+                if (m.file !== lastFile) {
+                    lines.push(`${theme.fg("accent", m.date)} ${theme.fg("muted", matchLabel(m))}`);
+                    if (expanded) lines.push(theme.fg("dim", m.file));
+                    lastFile = m.file;
+                }
+                lines.push(
+                    `  ${theme.fg("dim", `${m.role}:`)} ${theme.fg("toolOutput", m.excerpt.replace(/\s+/g, " ").trim())}`,
+                );
+            }
+            const shown = expanded ? lines : lines.slice(0, COLLAPSED_LINES);
+            const container = new Container();
+            container.addChild(new Spacer(1));
+            container.addChild(
+                new Text(
+                    theme.fg(matches.length ? "success" : "muted", `${matches.length} match(es)`) +
+                        theme.fg("muted", ` in ${sessions} session(s) · ${details.filesScanned ?? 0} files scanned`),
+                    0,
+                    0,
+                ),
+            );
+            // Collapsed hits stay one line each; expanded ones wrap in full.
+            for (const line of shown)
+                container.addChild(expanded ? new Text(line, 0, 0) : new TruncatedText(line, 0, 0));
+            if (lines.length > shown.length)
+                container.addChild(
+                    new Text(
+                        `${theme.fg("muted", `... (${lines.length - shown.length} more lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+                        0,
+                        0,
+                    ),
+                );
+            if (warnings.length)
+                container.addChild(new Text(theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`), 0, 0));
+            return container;
+        },
         async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
             // Strict models inject literal "null" for optional params they omit; drop it before reading any.
             const params = Object.fromEntries(
@@ -455,9 +534,12 @@ export default function (pi: ExtensionAPI) {
             return {
                 content: [{ type: "text", text: formatResults(params.query, result) }],
                 details: {
+                    matches: result.matches,
                     matchCount: result.matches.length,
                     filesScanned: result.filesScanned,
                     truncated: result.truncated,
+                    limitReached: result.limitReached === true,
+                    scanIncomplete: result.scanIncomplete === true,
                 },
             };
         },

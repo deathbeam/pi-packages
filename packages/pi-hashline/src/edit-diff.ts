@@ -1,7 +1,5 @@
 import * as Diff from "diff";
 
-// --- Line ending normalization ---
-
 export function detectLineEnding(content: string): "\r\n" | "\n" {
     const crlfIdx = content.indexOf("\r\n");
     const lfIdx = content.indexOf("\n");
@@ -35,8 +33,6 @@ export function hasMixedLineEndings(content: string): boolean {
 export function stripBom(content: string): { bom: string; text: string } {
     return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
-
-// --- Diff generation ---
 
 // Emits pi's standard diff line format (`+N content` / `-N content` /
 // ` N content`) so the TUI renders it with the shared renderDiff (colored

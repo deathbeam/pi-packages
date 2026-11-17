@@ -197,35 +197,44 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                     let lastWindow = { height: 0, total: 0 };
                     const transcripts = new Map<string, Transcript>();
                     const loaded = new Set<string>();
-                    const jobs = () => store.all();
+                    function jobs() {
+                        return store.all();
+                    }
                     // Format hints from the injected manager; an imported copy would not see the user's keybindings.
-                    const hint = (id: Keybinding, description: string) =>
-                        rawKeyHint(keys.getKeys(id).join("/"), description);
+                    function hint(id: Keybinding, description: string) {
+                        return rawKeyHint(keys.getKeys(id).join("/"), description);
+                    }
                     // Fixed rows: title, top rule, bottom rule, footer.
-                    const bodyHeight = () => Math.max(0, tui.terminal.rows - 4);
-                    const toolsLines = (job: InspectJob, width: number) =>
-                        wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
+                    function bodyHeight() {
+                        return Math.max(0, tui.terminal.rows - 4);
+                    }
+                    function toolsLines(job: InspectJob, width: number) {
+                        return wrapTextWithAnsi(formatTools(job.tools), Math.max(1, width)).map((line) =>
                             theme.fg("dim", line),
                         );
-                    const transcript = (job: InspectJob) => {
+                    }
+                    function transcript(job: InspectJob) {
                         let value = transcripts.get(job.id);
                         if (!value) {
                             value = new Transcript(theme);
                             transcripts.set(job.id, value);
                         }
                         return value;
-                    };
+                    }
                     // Restored jobs carry no messages: the child's session file is their history.
-                    const messagesOf = (job: InspectJob) => {
+                    function messagesOf(job: InspectJob) {
                         if (!job.messages.length && job.status !== "running" && !loaded.has(job.id)) {
                             loaded.add(job.id);
                             job.messages = sessionMessages(sessionDir, job.id);
                         }
                         return job.messages;
-                    };
-                    const renderJobs = (width: number, items: InspectJob[], selectedIndex: number): string[] => {
-                        const row = (text: string) =>
-                            truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│");
+                    }
+                    function renderJobs(width: number, items: InspectJob[], selectedIndex: number): string[] {
+                        function row(text: string) {
+                            return (
+                                truncateToWidth(text, Math.max(0, width - 1), "…", true) + theme.fg("borderMuted", "│")
+                            );
+                        }
                         const visible = Math.max(1, Math.floor((bodyHeight() - 1) / 3));
                         const start = Math.max(
                             0,
@@ -245,8 +254,8 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                             ...Array(Math.max(0, bodyHeight() - 1 - lines.length)).fill(row("")),
                             row(theme.fg("dim", `${selectedIndex + 1}/${items.length}`)),
                         ].slice(0, bodyHeight());
-                    };
-                    const renderHistory = (width: number, job: InspectJob): string[] => {
+                    }
+                    function renderHistory(width: number, job: InspectJob): string[] {
                         const tools = toolsLines(job, width);
                         // Fixed rows: header, model, description, rule, counter, plus the failure detail.
                         const height = Math.max(0, bodyHeight() - 5 - tools.length - (job.detail ? 1 : 0));
@@ -290,7 +299,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                                 // Pad every row so the pane's right edge holds still while the transcript scrolls.
                                 .map((line) => truncateToWidth(line, width, "…", true))
                         );
-                    };
+                    }
                     stopRedraw = store.subscribe(() => tui.requestRender());
                     return {
                         render(width: number) {

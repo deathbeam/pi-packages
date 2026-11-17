@@ -19,7 +19,6 @@ interface RgSubmatch {
     end: number;
 }
 
-/** rg --json match event. */
 interface RgMatchEvent {
     type: "match";
     data: {
@@ -64,7 +63,7 @@ const STDERR_MAX_BYTES = 64 * 1024;
 
 const RG_BIN = "rg";
 
-/** Detect whether ripgrep is available on PATH. Only called at registration time. */
+/** Only called at registration time, so the spawnSync cost is paid once. */
 function isRgAvailable(): boolean {
     try {
         const result = spawnSync(RG_BIN, ["--version"], { encoding: "utf-8" });
@@ -74,7 +73,6 @@ function isRgAvailable(): boolean {
     }
 }
 
-/** Merge a new range into an existing sorted, non-overlapping list. */
 function mergeRange(ranges: LineRange[], range: LineRange): void {
     let merged = range;
     const remaining: LineRange[] = [];
@@ -121,8 +119,9 @@ function toMatchRanges(submatches: readonly RgSubmatch[] | undefined, lineText: 
     if (!submatches || submatches.length === 0) return [];
     const isAscii = lineText.length === Buffer.byteLength(lineText, "utf8");
     const bytes = isAscii ? null : Buffer.from(lineText, "utf8");
-    const toCharOffset = (byteOffset: number): number =>
-        isAscii ? byteOffset : bytes!.subarray(0, byteOffset).toString("utf8").length;
+    function toCharOffset(byteOffset: number): number {
+        return isAscii ? byteOffset : bytes!.subarray(0, byteOffset).toString("utf8").length;
+    }
     return submatches.map((s) => [toCharOffset(s.start), toCharOffset(s.end)]);
 }
 
@@ -177,33 +176,33 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
         let stderr = "";
         let warning: string | undefined;
 
-        const cleanup = () => {
+        function cleanup() {
             signal?.removeEventListener("abort", onAbort);
-        };
+        }
 
-        const settleResolve = () => {
+        function settleResolve() {
             if (settled) return;
             settled = true;
             cleanup();
             resolve({ matchesByFile, matches: totalMatched, truncated, warning });
-        };
+        }
 
-        const settleReject = (error: Error) => {
+        function settleReject(error: Error) {
             if (settled) return;
             settled = true;
             cleanup();
             rl.close();
             reject(error);
-        };
+        }
 
-        const stopForLimit = () => {
+        function stopForLimit() {
             if (stoppedByLimit) return;
             truncated = true;
             stoppedByLimit = true;
             cleanup();
             rl.close();
             child.kill();
-        };
+        }
 
         // setEncoding lets Node's stream decoder handle multi-byte UTF-8 sequences
         // that span chunk boundaries correctly; spawn's options.encoding is an exec
@@ -229,10 +228,10 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
             stderr = appendLimitedStderr(stderr, chunk);
         });
 
-        const onAbort = () => {
+        function onAbort() {
             child.kill();
             settleReject(new Error("Aborted"));
-        };
+        }
         signal?.addEventListener("abort", onAbort, { once: true });
 
         child.on("error", (err: Error) => {
@@ -270,8 +269,12 @@ function runRg(args: string[], limit: number, signal: AbortSignal | undefined): 
 }
 
 function highlightMatchRanges(line: string, ranges: MatchRanges, theme: Theme): string {
-    const plain = (chunk: string) => theme.fg("toolOutput", chunk);
-    const match = (chunk: string) => theme.bold(theme.fg("accent", chunk));
+    function plain(chunk: string): string {
+        return theme.fg("toolOutput", chunk);
+    }
+    function match(chunk: string): string {
+        return theme.bold(theme.fg("accent", chunk));
+    }
     const parts: string[] = [];
     let pos = 0;
     for (const [start, end] of ranges) {
@@ -456,7 +459,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
             let omittedLines = 0;
             let outputBytes = 0;
             let outputCapped = false;
-            const addLine = (line: string): boolean => {
+            function addLine(line: string): boolean {
                 const nextBytes = outputBytes + Buffer.byteLength(line, "utf8") + (outputLineIndex ? 1 : 0);
                 if (nextBytes > DEFAULT_MAX_BYTES || outputLineIndex >= DEFAULT_MAX_LINES) {
                     outputCapped = true;
@@ -466,7 +469,7 @@ export function registerGrepTool(pi: ExtensionAPI): void {
                 outputBytes = nextBytes;
                 outputLineIndex++;
                 return true;
-            };
+            }
 
             fileLoop: for (const [filePath, matchRangesByLine] of matchesByFile) {
                 throwIfAborted(signal);

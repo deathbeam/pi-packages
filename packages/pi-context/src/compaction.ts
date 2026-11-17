@@ -14,6 +14,10 @@ function compactionSetting(file: string): string | undefined {
     }
 }
 
+function notify(ctx: ExtensionContext, message: string) {
+    if (ctx.hasUI) ctx.ui.notify(`${message}; using the session model`, "warning");
+}
+
 /** `context.compaction` as "provider/model-id[:thinking]"; project settings override global ones. */
 export function readCompactionModel(cwd: string) {
     const value =
@@ -26,10 +30,6 @@ export function readCompactionModel(cwd: string) {
     // A value without "provider/" gets an empty provider, so it fails model lookup like any unknown model.
     const slash = ref.indexOf("/");
     return { value, provider: slash > 0 ? ref.slice(0, slash) : "", id: ref.slice(slash + 1), thinking: match?.[2] };
-}
-
-function notify(ctx: ExtensionContext, message: string) {
-    if (ctx.hasUI) ctx.ui.notify(`${message}; using the session model`, "warning");
 }
 
 export function registerCompaction(pi: ExtensionAPI): void {

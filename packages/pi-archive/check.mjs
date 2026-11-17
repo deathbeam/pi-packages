@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { Readable } from "node:stream";
+import { Text } from "@earendil-works/pi-tui";
 import piArchive from "./index.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-archive-check-"));
@@ -14,7 +15,9 @@ fs.mkdirSync(projA);
 fs.mkdirSync(projB);
 fs.mkdirSync(projShort);
 
-const line = (obj) => JSON.stringify(obj);
+function line(obj) {
+    return JSON.stringify(obj);
+}
 const aaaa = path.join(projA, "2026-09-01T00-00-00-000Z_aaaa.jsonl");
 fs.writeFileSync(
     aaaa,
@@ -163,19 +166,25 @@ await piArchive({
         if (event === "before_agent_start") beforeAgentStart = handler;
     },
 });
-const archiveCtx = (entries = [], { dir = projA, file = currentFile } = {}) => ({
-    sessionManager: {
-        getEntries: () => entries,
-        getSessionDir: () => dir,
-        getSessionFile: () => file,
-    },
-});
-const search = async (params, ctx = archiveCtx(), signal) => {
+function archiveCtx(entries = [], { dir = projA, file = currentFile } = {}) {
+    return {
+        sessionManager: {
+            getEntries: () => entries,
+            getSessionDir: () => dir,
+            getSessionFile: () => file,
+        },
+    };
+}
+async function search(params, ctx = archiveCtx(), signal) {
     const r = await tool.execute("id", params, signal, undefined, ctx);
     return { text: r.content[0].text, details: r.details };
-};
-const hitLines = (text) => text.split("\n").filter((l) => l.startsWith("- "));
-const hits = async (params) => hitLines((await search(params)).text);
+}
+function hitLines(text) {
+    return text.split("\n").filter((l) => l.startsWith("- "));
+}
+async function hits(params) {
+    return hitLines((await search(params)).text);
+}
 
 // Ranking: current session first, then this project; compaction summaries and tool results are searchable.
 const jwt = await search({ query: "jwt" });
@@ -280,9 +289,95 @@ assert.match(
 // A missing archive is a clean miss.
 const missing = await search({ query: "jwt" }, archiveCtx([], { dir: path.join(root, "no-such-root", "sess") }));
 assert.match(missing.text, /No matches for "jwt" in 0 scanned session files\.$/);
-assert.deepEqual(missing.details, { matchCount: 0, filesScanned: 0, truncated: false });
+assert.deepEqual(missing.details, {
+    matches: [],
+    matchCount: 0,
+    filesScanned: 0,
+    truncated: false,
+    limitReached: false,
+    scanIncomplete: false,
+});
 
-const deny = (code) => Object.assign(new Error(`${code}: denied`), { code });
+// Renderers: grouped hits, collapsed to one line each, and a plain-text fallback for old details.
+const plainTheme = { fg: (_c, s) => s, bold: (s) => s };
+function renderCtx(isError = false) {
+    return {
+        isError,
+        keyHint: (_binding, description) => `ctrl+o ${description}`,
+        args: {},
+    };
+}
+function callLine(args) {
+    const call = tool.renderCall(args, plainTheme, { ...renderCtx(), lastComponent: undefined });
+    return call
+        .render(200)
+        .map((l) => l.trimEnd())
+        .join("\n");
+}
+const renderedJwt = await search({ query: "jwt" });
+const view = tool.renderResult(
+    { content: [{ type: "text", text: renderedJwt.text }], details: renderedJwt.details },
+    { expanded: false, isPartial: false },
+    plainTheme,
+    renderCtx(),
+);
+const viewText = view.render(200).join("\n");
+assert.match(viewText, /4 match\(es\) in \d session\(s\)/);
+// Collapsed hits over the limit end with the built-in expand hint.
+const many = tool.renderResult(
+    {
+        content: [{ type: "text", text: "many" }],
+        details: {
+            matches: Array.from({ length: 12 }, (_, i) => ({
+                file: "f",
+                date: "2026-09-01",
+                role: "user",
+                excerpt: `hit ${i}`,
+                sameProject: true,
+                project: "p",
+            })),
+            filesScanned: 1,
+        },
+    },
+    { expanded: false, isPartial: false },
+    plainTheme,
+    renderCtx(),
+);
+assert.match(many.render(200).join("\n"), /\.\.\. \(3 more lines, ctrl\+o to expand\)/);
+// A capped scan warns in the built-in truncation style.
+const cappedView = tool.renderResult(
+    { content: [{ type: "text", text: limited.text }], details: limited.details },
+    { expanded: false, isPartial: false },
+    plainTheme,
+    renderCtx(),
+);
+assert.match(cappedView.render(200).join("\n"), /\[Truncated: limit reached\]/);
+assert.match(viewText, /2026-09-01 other session in this project/);
+// The call line mirrors pi's grep: bold title, accent query, toolOutput options.
+assert.equal(callLine({ query: "jwt" }), 'search_archive "jwt"');
+assert.equal(
+    callLine({ query: "jwt", session: "projA", limit: 3, perSession: 2, offset: 4 }),
+    'search_archive "jwt" in projA limit 3 per session 2 offset 4',
+);
+// Omitted optionals arrive as null or the literal "null"; both are absent.
+assert.equal(
+    callLine({ query: "jwt", session: "null", limit: null, perSession: "null", offset: null }),
+    'search_archive "jwt"',
+);
+// The renderer reuses the component pi hands back, as the built-in ones do.
+const reusable = new Text("", 0, 0);
+assert.equal(tool.renderCall({ query: "jwt" }, plainTheme, { ...renderCtx(), lastComponent: reusable }), reusable);
+const legacy = tool.renderResult(
+    { content: [{ type: "text", text: "old text" }], details: { matchCount: 1 } },
+    { expanded: false, isPartial: false },
+    plainTheme,
+    renderCtx(),
+);
+assert.match(legacy.render(200).join("\n"), /old text/);
+
+function deny(code) {
+    return Object.assign(new Error(`${code}: denied`), { code });
+}
 const realReaddir = fs.promises.readdir;
 // Permission errors on the archive root must not look like clean misses.
 fs.promises.readdir = async (dir, opts) => {

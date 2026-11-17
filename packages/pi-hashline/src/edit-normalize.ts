@@ -1,6 +1,3 @@
-/** prepareArguments runs before Pi validation: accept file_path and JSON-string edits,
- * reject null "lines" payloads, but leave text-replace payloads for the anchor-guidance error. */
-
 export function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -35,6 +32,8 @@ function coerceEditsArray(edits: unknown): unknown {
     return parsed;
 }
 
+/** prepareArguments runs before Pi validation: accept file_path and JSON-string edits,
+ * reject null "lines" payloads, but leave text-replace payloads for the anchor-guidance error. */
 export function normalizeEditRequest(input: unknown): unknown {
     if (!isRecord(input)) {
         return input;

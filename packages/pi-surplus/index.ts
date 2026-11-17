@@ -17,17 +17,20 @@ const BASE_URL = "https://api.surplusintelligence.ai/v1";
 const ANTHROPIC_BASE_URL = "https://api.surplusintelligence.ai/anthropic";
 const API = "openai-completions";
 
-const strings = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+function strings(value: unknown): string[] {
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
 
 // Prices arrive as USD-per-token strings; Pi wants USD per million tokens.
-const perMillion = (value: unknown): number => {
+function perMillion(value: unknown): number {
     const price = Number(value) * 1e6;
     return Number.isFinite(price) && price > 0 ? Math.round(price * 1e6) / 1e6 : 0;
-};
+}
 
 // A 0 or missing limit is missing data, unlike a 0 price, so it falls back to the default.
-const limit = (value: unknown, fallback: number): number => (typeof value === "number" && value > 0 ? value : fallback);
+function limit(value: unknown, fallback: number): number {
+    return typeof value === "number" && value > 0 ? value : fallback;
+}
 
 function toPiModel(entry: CatalogEntry): ProviderModelConfig | undefined {
     const output = strings(entry.architecture?.output_modalities);
