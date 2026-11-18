@@ -1,7 +1,7 @@
 /** /usage — fullscreen token usage and cost dashboard. */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -162,8 +162,10 @@ export default function (pi: ExtensionAPI) {
             };
             let render = () => {};
             const agentDir = getAgentDir();
-            // ctx.sessionManager already resolved --session-dir, the env var and settings.sessionDir.
-            const sessionDir = ctx.sessionManager.getSessionDir();
+            // getSessionDir() is this project's encoded-cwd dir under the default layout; count every project.
+            // shortcut: a custom dir named like --x-- reads as the default layout, use usesDefaultSessionDir() once it is exposed
+            const projectDir = ctx.sessionManager.getSessionDir();
+            const sessionDir = basename(projectDir).startsWith("-") ? dirname(projectDir) : projectDir;
             const abort = new AbortController();
             const loaded = collectUsage(
                 sessionDir,

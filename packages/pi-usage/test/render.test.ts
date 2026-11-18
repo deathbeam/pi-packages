@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
@@ -65,7 +65,7 @@ function writeSessions(): void {
 
 type View = { render(width: number): string[]; handleInput(data: string): void };
 
-function mount(): View {
+function mount(sessionDirOverride: string = sessionDir): View {
     let view: View | undefined;
     let command: any;
     extension({ registerCommand: (_name: string, registered: any) => (command = registered) } as any);
@@ -80,7 +80,7 @@ function mount(): View {
     };
     const ctx = {
         mode: "tui",
-        sessionManager: { getSessionDir: () => sessionDir },
+        sessionManager: { getSessionDir: () => sessionDirOverride },
         ui,
     };
     void command.handler("", ctx);
@@ -130,5 +130,31 @@ describe("usage dashboard render", () => {
         await loaded(view);
         const widths = [200, 120, 80, 40, 20, 10, 5, 3, 2, 1, 1, 2, 5, 10, 20, 40, 80, 120, 200];
         for (const width of widths) assertFits(view, width);
+    });
+
+    it("counts every project when getSessionDir returns a single project dir", async () => {
+        // getSessionDir() returns <root>/--proj-a-- under the default layout; the scan must cover its parent.
+        const root = mkdtempSync(join(tmpdir(), "pi-usage-render-projects-"));
+        try {
+            for (const [project, cost] of [
+                ["--proj-a--", 0.5],
+                ["--proj-b--", 0.25],
+            ] as const) {
+                mkdirSync(join(root, project));
+                writeFileSync(
+                    join(root, project, "s.jsonl"),
+                    [
+                        sessionHeader(project, `/tmp/${project}`),
+                        messageLine("anthropic", "claude-opus-4-5", Date.now(), cost, 1000),
+                    ].join("\n"),
+                );
+            }
+            const view = mount(join(root, "--proj-a--"));
+            await loaded(view);
+            const total = view.render(100).find((line) => line.includes("Total"));
+            assert.ok(total?.includes("$0.75"), `proj-b usage is counted: ${total}`);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
