@@ -1,6 +1,7 @@
 # Pi packages
 
 - [@deathbeam/pi-archive](packages/pi-archive) - Minimal extension for searching past Pi conversations.
+- [@deathbeam/pi-combos](packages/pi-combos) - Minimal extension for model combos that fall back to the next model when one fails.
 - [@deathbeam/pi-context](packages/pi-context) - Minimal extension for context-window token economy: RTK rewriting, stale tool-result pruning, and a compaction model override.
 - [@deathbeam/pi-delegate](packages/pi-delegate) - Minimal extension for delegating tasks to subagents.
 - [@deathbeam/pi-hashline](packages/pi-hashline) - Hash-anchored read, edit, and grep.
