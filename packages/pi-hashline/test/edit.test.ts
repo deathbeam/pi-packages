@@ -185,6 +185,24 @@ describe("edit", () => {
         await h.edit({ path: file, edits });
         await assert.rejects(h.edit({ path: file, edits }), /E_DUPLICATE_EDIT/);
     });
+
+    it("keeps the duplicate guard after a partial read", async () => {
+        const file = h.write("partial-read.ts", sample);
+        const edits = [{ op: "append", lines: ["const tail = 4;"] }];
+        await h.edit({ path: file, edits });
+        // The paginated read never showed the appended line, so it cannot excuse a retry.
+        await h.read({ path: file, limit: 1 });
+        await assert.rejects(h.edit({ path: file, edits }), /E_DUPLICATE_EDIT/);
+    });
+
+    it("drops the duplicate guard after a full read", async () => {
+        const file = h.write("full-read.ts", sample);
+        const edits = [{ op: "append", lines: ["const tail = 4;"] }];
+        await h.edit({ path: file, edits });
+        await h.read({ path: file });
+        await h.edit({ path: file, edits });
+        assert.match(fileText(file), /const tail = 4;\n[\s\S]*const tail = 4;/);
+    });
 });
 
 describe("file shapes", () => {

@@ -19,6 +19,8 @@ export type UsageRecord = {
     cwd: string;
     /** Session id from the session header line; empty when the file has no header. */
     sessionId: string;
+    /** Assistant messages this record stands for. */
+    requests: number;
 };
 
 export type Stats = {
@@ -56,7 +58,7 @@ export type DailyCost = { label: string; cost: number };
 
 type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; providers?: Set<string> };
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -64,6 +66,29 @@ function emptyStats(): Stats {
 
 function num(value: unknown): number {
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** One record per (day, provider, model, cwd, session); the dashboard groups no finer than a day. */
+function aggregate(records: UsageRecord[]): UsageRecord[] {
+    const buckets = new Map<string, UsageRecord>();
+    for (const record of records) {
+        const key = JSON.stringify([
+            startOfDay(record.ts),
+            record.provider,
+            record.model,
+            record.cwd,
+            record.sessionId,
+        ]);
+        const bucket = buckets.get(key);
+        if (!bucket) {
+            buckets.set(key, { ...record });
+            continue;
+        }
+        addStats(bucket, record);
+        bucket.ts = Math.max(bucket.ts, record.ts);
+        bucket.requests += record.requests;
+    }
+    return [...buckets.values()];
 }
 
 function addStats(stats: Stats, record: UsageRecord): void {
@@ -133,7 +158,12 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
     const lines = createInterface({ input: createReadStream(file, "utf8"), crlfDelay: Infinity });
     for await (const line of lines) {
         // Cheap prefilter: escaped JSON inside tool results never matches this literal.
-        if (!line.includes('"role":"assistant"')) {
+        const isUsage =
+            line.includes('"role":"assistant"') ||
+            line.includes('"type":"usage"') ||
+            line.includes('"type":"compaction"') ||
+            line.includes('"type":"branch_summary"');
+        if (!isUsage) {
             // The session header (type:"session", cwd, id) is normally the first line.
             if (sessionId === "" && line.includes('"type":"session"')) {
                 try {
@@ -154,19 +184,36 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
         } catch {
             continue;
         }
-        const msg = entry?.message;
-        const usage = msg?.usage;
-        if (!usage || !msg.provider || !msg.model) continue;
+        const message = entry?.message;
+        const usage =
+            entry?.type === "message" ? (message?.role === "assistant" ? message.usage : undefined) : entry?.usage;
+        if (!usage) continue;
+        let provider: string;
+        let model: string;
+        if (entry.type === "message") {
+            if (!message.provider || !message.model) continue;
+            provider = String(message.provider);
+            model = String(message.model);
+        } else if (entry.type === "usage" && entry.provider && entry.model) {
+            provider = String(entry.provider);
+            model = String(entry.model);
+        } else {
+            // Compaction and branch-summary calls carry no model, so their cost gets its own row.
+            provider = "pi";
+            model = "summaries";
+        }
         const cost = typeof usage.cost === "number" ? usage.cost : num(usage.cost?.total);
+        const stamp = entry.type === "message" ? message.timestamp : entry.timestamp;
         records.push({
-            provider: String(msg.provider),
-            model: String(msg.model),
-            ts: num(msg.timestamp),
+            provider,
+            model,
+            ts: typeof stamp === "string" ? num(Date.parse(stamp)) : num(stamp),
             cost,
             input: num(usage.input),
             output: num(usage.output),
             cacheRead: num(usage.cacheRead),
             cacheWrite: num(usage.cacheWrite),
+            requests: 1,
             cwd,
             sessionId,
         });
@@ -191,6 +238,7 @@ export async function collectUsage(
     dir: string,
     onProgress?: (done: number, total: number) => void,
     cacheFile?: string,
+    signal?: AbortSignal,
 ): Promise<UsageRecord[]> {
     const files: string[] = [];
     await sessionFiles(dir, files);
@@ -199,6 +247,7 @@ export async function collectUsage(
     const records: UsageRecord[] = [];
     let dirty = false;
     for (const [done, file] of files.entries()) {
+        if (signal?.aborted) return records;
         onProgress?.(done, files.length);
         let info;
         try {
@@ -215,14 +264,15 @@ export async function collectUsage(
         }
         dirty = true;
         try {
-            const parsed = await parseFile(file);
+            const parsed = aggregate(await parseFile(file));
             next[file] = { size: info.size, mtimeMs: info.mtimeMs, records: parsed };
             for (const record of parsed) records.push(record);
         } catch {
             continue; // unreadable or truncated file: skip it, keep what other files gave
         }
     }
-    if (!cacheFile) return records;
+    // A closed dashboard must not rewrite the cache with a partial scan.
+    if (!cacheFile || signal?.aborted) return records;
     if (dirty || Object.keys(next).length !== Object.keys(cached).length) await writeCache(cacheFile, next);
     return records;
 }
@@ -334,13 +384,13 @@ export function buildRows(
             groups.set(key, group);
         }
         addStats(group.stats, record);
-        group.requests++;
+        group.requests += record.requests;
         if (mode === "model") group.providers!.add(record.provider);
         if (mode === "provider") {
             let model = group.models!.get(record.model);
             if (!model) group.models!.set(record.model, (model = newTally()));
             addStats(model.stats, record);
-            model.requests++;
+            model.requests += record.requests;
         }
     }
     if (mode === "day") {
@@ -379,7 +429,7 @@ export function summarize(records: UsageRecord[], sinceMs = 0, untilMs = Infinit
     for (const record of records) {
         if (record.ts < sinceMs || record.ts >= untilMs) continue;
         addStats(stats, record);
-        requests++;
+        requests += record.requests;
         sessions.add(record.sessionId);
     }
     return { stats, requests, sessions: sessions.size };

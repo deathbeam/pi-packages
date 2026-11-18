@@ -41,8 +41,10 @@ function toPiModel(entry: CatalogEntry): ProviderModelConfig | undefined {
     }
 
     const price = entry.pricing ?? {};
+    // The vendor field is free text, so casing varies.
+    const anthropic = typeof entry.provider === "string" && entry.provider.toLowerCase() === "anthropic";
     return {
-        ...(entry.provider === "Anthropic" ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
+        ...(anthropic ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
         ...(/^gpt-\d/.test(entry.id) ? { api: "openai-responses" } : {}),
         id: entry.id,
         name: typeof entry.name === "string" && entry.name ? entry.name : entry.id,

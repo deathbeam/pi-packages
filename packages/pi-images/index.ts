@@ -72,8 +72,8 @@ function describeImage(ctx: ExtensionContext, model: Model<Api>, block: ImageCon
                 return text;
             })
             .catch((error: unknown) => {
-                // Cache the failure so later requests skip the vision call; this caller still reports it once.
-                descriptions.set(key, Promise.resolve("unavailable"));
+                // Aborts and rate limits are temporary, so a failure must not stick for the process lifetime.
+                descriptions.delete(key);
                 throw error;
             });
         descriptions.set(key, description);
@@ -127,36 +127,35 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
-        const messages = [];
-        for (const message of event.messages) {
-            const content = imageContentOf(message);
-            if (!content) {
-                messages.push(message);
-                continue;
-            }
-            const next = [];
-            for (const block of content) {
-                const typed = block as { type?: unknown; text?: unknown };
-                if (typed.type === "image") {
-                    const description = await describeImage(ctx, model, block as ImageContent).catch(
-                        (error: unknown) => {
-                            ctx.ui.notify(
-                                `Describing an image with ${settings.vision} failed: ${error instanceof Error ? error.message : String(error)}`,
-                                "error",
+        const messages = await Promise.all(
+            event.messages.map(async (message) => {
+                const content = imageContentOf(message);
+                if (!content) return message;
+                const next = await Promise.all(
+                    content.map(async (block) => {
+                        const typed = block as { type?: unknown; text?: unknown };
+                        if (typed.type === "image") {
+                            const description = await describeImage(ctx, model, block as ImageContent).catch(
+                                (error: unknown) => {
+                                    ctx.ui.notify(
+                                        `Describing an image with ${settings.vision} failed: ${error instanceof Error ? error.message : String(error)}`,
+                                        "error",
+                                    );
+                                    return "unavailable";
+                                },
                             );
-                            return "unavailable";
-                        },
-                    );
-                    next.push({ type: "text", text: `[Image description: ${description}]` });
-                } else if (typed.type === "text" && typeof typed.text === "string") {
-                    const text = typed.text.replaceAll(OMITTED_NOTE, "").trim();
-                    if (text) next.push({ type: "text", text });
-                } else {
-                    next.push(block);
-                }
-            }
-            messages.push({ ...message, content: next });
-        }
+                            return { type: "text", text: `[Image description: ${description}]` };
+                        }
+                        if (typed.type === "text" && typeof typed.text === "string") {
+                            const text = typed.text.replaceAll(OMITTED_NOTE, "").trim();
+                            return text ? { type: "text", text } : null;
+                        }
+                        return block;
+                    }),
+                );
+                return { ...message, content: next.filter((block) => block !== null) };
+            }),
+        );
         return { messages };
     });
 

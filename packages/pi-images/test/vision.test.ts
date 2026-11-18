@@ -179,7 +179,7 @@ describe("vision handoff", () => {
         assert.equal(notifications.length, 2);
     });
 
-    it("reports a failed description once and caches the failure", async () => {
+    it("reports a failed description and retries it on the next request", async () => {
         writeSettings(project, { vision: "anthropic/v" });
         const messages = [{ role: "user", content: [image("ZmFpbA==")] }];
         const failed = await context({ messages }, failingVision());
@@ -188,7 +188,35 @@ describe("vision handoff", () => {
             { message: "Describing an image with anthropic/v failed: boom", type: "error" },
         ]);
         await context({ messages }, failingVision());
-        assert.equal(notifications.length, 1);
+        assert.equal(notifications.length, 2);
+    });
+
+    it("describes the images of a request in parallel", async () => {
+        writeSettings(project, { vision: "anthropic/v" });
+        const started: string[] = [];
+        let release = () => {};
+        const blocked = new Promise<void>((resolve) => (release = resolve));
+        const ctx = visionCtx({
+            complete: async (_model, request) => {
+                const data = request.messages[0].content[0].data;
+                started.push(data);
+                await blocked;
+                return { content: [{ type: "text", text: `desc-${data}` }] };
+            },
+        });
+        const messages = [
+            { role: "user", content: [image("cGFyMQ==")] },
+            { role: "user", content: [image("cGFyMg==")] },
+        ];
+        const pending = context({ messages }, ctx);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.deepEqual(started.sort(), ["cGFyMQ==", "cGFyMg=="]);
+        release();
+        const describedMessages = (await pending).messages.map((message: any) => message.content[0].text);
+        assert.deepEqual(describedMessages, [
+            "[Image description: desc-cGFyMQ==]",
+            "[Image description: desc-cGFyMg==]",
+        ]);
     });
 
     it("reports an empty description as a failure", async () => {

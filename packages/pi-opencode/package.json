@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-opencode",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "OpenCode Zen free models through the built-in opencode provider for Pi",
   "type": "module",
   "license": "MIT",

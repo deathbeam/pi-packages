@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import {
+    agentDir,
     baseCtx,
     cleanup,
     fakePi,
@@ -294,5 +295,39 @@ describe("crash recovery", () => {
             app.savedEntries.filter((entry) => entry.data?.id === "orphan2").map((entry) => entry.data.status),
             ["interrupted", "running", "failed", "running", "done"],
         );
+    });
+
+    // A tier swap must use the thinking level configured for that tier, exactly like a launch does.
+    it("swaps to a tier with its configured thinking level", async () => {
+        const settings = join(agentDir, "settings.json");
+        writeFileSync(settings, JSON.stringify({ delegate: { models: { strong: "anthropic/big:high" } } }));
+        try {
+            const app = recoverySession();
+            const job = await app.launch.execute(
+                "call",
+                { agent: "explore", description: "tier swap", task: "trace it" },
+                undefined,
+                () => {},
+                app.tuiCtx,
+            );
+            const before = childCommands().length;
+            await app.steer.execute(
+                "call",
+                { id: job.details.id, message: "go strong", model: "strong" },
+                undefined,
+                () => {},
+                app.tuiCtx,
+            );
+            assert.deepEqual(
+                childCommands()
+                    .slice(before)
+                    .map((line) => line.replace(/\s+/g, " ")),
+                ["set_model anthropic big", "set_thinking_level high"],
+                "a tier swap dropped the configured thinking level",
+            );
+            await app.cancel.execute("call", { id: job.details.id }, undefined, () => {}, app.tuiCtx);
+        } finally {
+            rmSync(settings, { force: true });
+        }
     });
 });

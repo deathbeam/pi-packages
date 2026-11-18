@@ -63,10 +63,11 @@ const STDERR_MAX_BYTES = 64 * 1024;
 
 const RG_BIN = "rg";
 
-/** Only called at registration time, so the spawnSync cost is paid once. */
-function isRgAvailable(): boolean {
+/** Only called at registration time, so the spawnSync cost is paid once; a hung rg must not stall extension load. */
+export function isRgAvailable(): boolean {
     try {
-        const result = spawnSync(RG_BIN, ["--version"], { encoding: "utf-8" });
+        const result = spawnSync(RG_BIN, ["--version"], { encoding: "utf-8", timeout: 2_000 });
+        // A timed-out probe is killed, which sets `error`, so it counts as absent.
         return result.error === undefined && result.status === 0;
     } catch {
         return false;

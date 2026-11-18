@@ -34,6 +34,23 @@ describe("archive access errors", () => {
         assert.equal(partial.details.truncated, true);
         assert.match(partial.text, /Search incomplete/);
     });
+
+    it("reports how many discovered files were actually scanned", async () => {
+        fs.createReadStream = (() =>
+            Readable.from(
+                (async function* () {
+                    yield '{"type":"message","message":{"role":"user","content":"x"}}\n';
+                    throw new Error("read failed");
+                })(),
+            )) as any;
+        const partial = await search({ query: "jwt" });
+        assert.equal(partial.details.truncated, true);
+        assert.ok(partial.details.filesTotal > partial.details.filesScanned);
+        assert.match(
+            partial.text,
+            new RegExp(`scanned ${partial.details.filesScanned} of ${partial.details.filesTotal} files`),
+        );
+    });
 });
 
 describe("aborted signal", () => {

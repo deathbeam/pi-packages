@@ -162,14 +162,18 @@ export default function (pi: ExtensionAPI) {
             };
             let render = () => {};
             const agentDir = getAgentDir();
+            // ctx.sessionManager already resolved --session-dir, the env var and settings.sessionDir.
+            const sessionDir = ctx.sessionManager.getSessionDir();
+            const abort = new AbortController();
             const loaded = collectUsage(
-                join(agentDir, "sessions"),
+                sessionDir,
                 (done, total) => {
                     state.done = done;
                     state.total = total;
                     render();
                 },
                 join(agentDir, "usage-cache.json"),
+                abort.signal,
             ).then((records) => {
                 state.records = records;
             });
@@ -208,8 +212,14 @@ export default function (pi: ExtensionAPI) {
                 function allDaily() {
                     return (allDays ??= dailyTotals(state.records!));
                 }
-                render = () => tui.requestRender();
+                render = () => {
+                    if (!abort.signal.aborted) tui.requestRender();
+                };
                 void loaded.then(render);
+                function close() {
+                    abort.abort();
+                    done(undefined);
+                }
                 function colorDelta(delta: number | undefined): string {
                     if (delta === undefined) return "-";
                     if (delta === 0) return "0%";
@@ -346,12 +356,12 @@ export default function (pi: ExtensionAPI) {
                     invalidate() {},
                     handleInput(data: string) {
                         if (data === "q") {
-                            done(undefined);
+                            close();
                             return;
                         } else if (keys.matches(data, "tui.select.cancel")) {
                             const frame = stack.pop();
                             if (!frame) {
-                                done(undefined);
+                                close();
                                 return;
                             }
                             ({ group, cursor, top } = frame);

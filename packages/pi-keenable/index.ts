@@ -26,11 +26,11 @@ async function keen(path: string, init: RequestInit = {}, signal?: AbortSignal):
     return res.json();
 }
 
-// Strict models inject literal "null" for optional params they omit; drop those before reading any.
-function definedParams<T extends object>(params: T): T {
-    return Object.fromEntries(
-        Object.entries(params).filter(([, value]) => value !== null && value !== undefined && value !== "null"),
-    ) as T;
+// Strict models inject literal "null" for optional params they omit; drop it from those, never from query or url.
+function definedOptionals<T extends object>(params: T, keys: readonly string[]): T {
+    const next = { ...params } as Record<string, unknown>;
+    for (const key of keys) if (next[key] == null || next[key] === "null") delete next[key];
+    return next as T;
 }
 
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -144,7 +144,7 @@ export default function (pi: ExtensionAPI) {
             return resultView(theme, context, summary, body, results.length - shown.length);
         },
         async execute(_id, rawParams, signal) {
-            const p = definedParams(rawParams);
+            const p = definedOptionals(rawParams, ["site", "max_results", "published_after", "published_before"]);
             const r = await keen(
                 "/v1/search",
                 {
@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
             );
         },
         async execute(_id, rawParams, signal) {
-            const p = definedParams(rawParams);
+            const p = definedOptionals(rawParams, ["max_chars", "live", "prompt"]);
             const q = new URLSearchParams({ url: p.url });
             if (p.max_chars !== undefined) q.set("max_chars", String(p.max_chars));
             if (p.live) q.set("live", "true");

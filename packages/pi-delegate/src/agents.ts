@@ -112,20 +112,26 @@ function splitThinking(value: string): { model: string; thinking?: string } {
 }
 
 // Precedence: requested `:<thinking>` suffix, then the tier suffix, then the session level.
+// `explicit` is the level the request names outright; undefined means it only inherits the session level.
 export function resolveModel(
     value: string | undefined,
     models: Record<string, unknown>,
     ctx: Pick<ExtensionContext, "model" | "thinkingLevel">,
-): { model?: string; thinking?: string } {
+): { model?: string; thinking?: string; explicit?: string } {
     const split = splitThinking(value ?? "");
     const thinking = split.thinking ?? ctx.thinkingLevel;
-    if (split.model && !MODEL_TIERS.has(split.model)) return { model: split.model, thinking };
+    if (split.model && !MODEL_TIERS.has(split.model)) return { model: split.model, thinking, explicit: split.thinking };
     const configured = models[split.model];
     if (typeof configured === "string" && configured) {
         const tier = splitThinking(configured);
-        return { model: tier.model, thinking: split.thinking ?? tier.thinking ?? ctx.thinkingLevel };
+        const explicit = split.thinking ?? tier.thinking;
+        return { model: tier.model, thinking: explicit ?? ctx.thinkingLevel, explicit };
     }
-    return { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, thinking };
+    return {
+        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        thinking,
+        explicit: split.thinking,
+    };
 }
 
 export function contextWindowFor(ctx: ExtensionContext, model: string | undefined): number | undefined {

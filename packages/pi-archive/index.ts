@@ -27,8 +27,8 @@ interface SearchOptions {
 
 interface SearchResult {
     matches: ArchiveMatch[];
-    bytesScanned: number;
     filesScanned: number;
+    filesTotal: number;
     truncated: boolean;
     limitReached?: boolean;
     scanIncomplete?: boolean;
@@ -36,7 +36,6 @@ interface SearchResult {
     offset?: number;
 }
 
-const MAX_TOTAL_BYTES = 400 * 1024 * 1024;
 const DEFAULT_PER_SESSION = 3;
 const MAX_PER_SESSION = 1000;
 const MAX_OFFSET = 10000;
@@ -93,90 +92,60 @@ function entryText(entry: unknown): { role: string; text: string } | null {
     return null;
 }
 
+/** Case-insensitive gate for a term JSON.stringify writes verbatim; null when only parsing can decide. */
+function termPattern(term: string): RegExp | null {
+    // Quotes and backslashes are escaped on disk; non-ASCII folds differently under /i. Both skip the gate.
+    return /^[\x20\x21\x23-\x5b\x5d-\x7e]+$/.test(term)
+        ? new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+        : null;
+}
+
 /** LF-only JSONL: readline also splits literal U+2028/U+2029 inside JSON strings. */
 async function scanJsonLines(
     file: string,
-    maxBytes: number,
     signal: AbortSignal | undefined,
     onLine: (line: string) => boolean,
-): Promise<{ bytes: number; incomplete: boolean; oversizedLines: number }> {
-    const empty = { bytes: 0, incomplete: false, oversizedLines: 0 };
-    if (signal?.aborted || maxBytes <= 0) return { ...empty, incomplete: maxBytes <= 0 };
-
-    let size: number;
-    try {
-        size = (await fs.promises.stat(file)).size;
-    } catch {
-        return { ...empty, incomplete: true };
-    }
-    if (size === 0) return empty;
-
-    const stream = fs.createReadStream(file, {
-        start: 0,
-        end: Math.min(size, maxBytes) - 1,
-        encoding: "utf8",
-        highWaterMark: READ_CHUNK_BYTES,
-    });
-    let bytes = 0;
+): Promise<{ stopped: boolean; oversizedLines: number }> {
     let pending = "";
     let pendingBytes = 0;
     let skippingLine = false;
     let oversizedLines = 0;
     let stopped = false;
 
-    function consume(text: string): boolean {
-        let start = 0;
-        while (start < text.length) {
-            const newline = text.indexOf("\n", start);
-            const end = newline === -1 ? text.length : newline + 1;
-            if (skippingLine) {
-                if (newline !== -1) skippingLine = false;
-            } else {
-                const part = text.slice(start, end);
-                pending += part;
-                pendingBytes += Buffer.byteLength(part);
-                if (pendingBytes > MAX_LINE_BYTES) {
-                    oversizedLines++;
-                    pending = "";
-                    pendingBytes = 0;
-                    skippingLine = newline === -1;
-                } else if (newline !== -1) {
-                    if (!onLine(pending.slice(0, -1))) return false;
-                    pending = "";
-                    pendingBytes = 0;
-                }
-            }
-            if (newline === -1) return true;
-            start = end;
-        }
-        return true;
-    }
-
     try {
+        const stream = fs.createReadStream(file, { encoding: "utf8", highWaterMark: READ_CHUNK_BYTES });
         for await (const chunk of stream) {
             if (signal?.aborted) {
                 stopped = true;
                 break;
             }
             const text = chunk as string;
-            bytes += Buffer.byteLength(text);
-            if (!consume(text)) {
-                stopped = true;
-                break;
+            let start = 0;
+            for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
+                if (skippingLine) skippingLine = false;
+                else if (!onLine(pending + text.slice(start, newline))) {
+                    stopped = true;
+                    break;
+                }
+                pending = "";
+                pendingBytes = 0;
+                start = newline + 1;
+            }
+            if (stopped) break;
+            const tail = text.slice(start);
+            pending += tail;
+            pendingBytes += Buffer.byteLength(tail);
+            if (pendingBytes > MAX_LINE_BYTES) {
+                oversizedLines++;
+                pending = "";
+                pendingBytes = 0;
+                skippingLine = true;
             }
         }
         if (!stopped && !signal?.aborted && pending && !skippingLine) onLine(pending);
-        let incomplete = size > maxBytes;
-        if (!incomplete && !stopped && !signal?.aborted) {
-            try {
-                incomplete = (await fs.promises.stat(file)).size > bytes;
-            } catch {
-                incomplete = true;
-            }
-        }
-        return { bytes, incomplete, oversizedLines };
+        return { stopped: stopped || (signal?.aborted ?? false), oversizedLines };
     } catch {
-        return { bytes, incomplete: true, oversizedLines };
+        return { stopped: true, oversizedLines };
     }
 }
 
@@ -213,7 +182,15 @@ async function searchSessions(
             throw new RangeError(`${name} must be an integer from ${min} to ${max}`);
         }
     }
-    if (terms.length === 0) return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: false };
+    const empty = (overrides: Partial<SearchResult> = {}): SearchResult => ({
+        matches: [],
+        filesScanned: 0,
+        filesTotal: 0,
+        truncated: false,
+        ...overrides,
+    });
+    if (terms.length === 0) return empty();
+    const patterns = terms.map(termPattern);
     const limit = opts.limit ?? 20;
     const perSession = opts.perSession ?? DEFAULT_PER_SESSION;
     const offset = opts.offset ?? 0;
@@ -225,14 +202,27 @@ async function searchSessions(
     } catch (err) {
         // A missing archive is normal; other errors must not look like clean misses.
         if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
-        return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: false };
+        return empty();
     }
     let incompleteDiscovery = false;
+    async function addFile(dir: string, dirName: string, name: string): Promise<void> {
+        const file = path.join(dir, name);
+        try {
+            files.push({ file, dir: dirName, name, mtime: (await fs.promises.stat(file)).mtimeMs });
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") incompleteDiscovery = true;
+        }
+    }
+    // The archive root holds one dir per project; a custom session dir holds its own JSONL files.
     for (const entry of rootEntries) {
         if (signal?.aborted) break;
-        if (!entry.isDirectory()) continue;
-        const dirName = entry.name;
+        const dirName = entry.isFile() ? path.basename(root) : entry.name;
         if (filter && !dirName.toLowerCase().includes(filter)) continue;
+        if (entry.isFile()) {
+            if (entry.name.endsWith(".jsonl")) await addFile(root, dirName, entry.name);
+            continue;
+        }
+        if (!entry.isDirectory()) continue;
         const dir = path.join(root, dirName);
         let entries: fs.Dirent[];
         try {
@@ -244,16 +234,10 @@ async function searchSessions(
         for (const fileEntry of entries) {
             if (signal?.aborted) break;
             if (!fileEntry.isFile() || !fileEntry.name.endsWith(".jsonl")) continue;
-            const file = path.join(dir, fileEntry.name);
-            try {
-                files.push({ file, dir: dirName, name: fileEntry.name, mtime: (await fs.promises.stat(file)).mtimeMs });
-            } catch (err) {
-                if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") incompleteDiscovery = true;
-            }
+            await addFile(dir, dirName, fileEntry.name);
         }
     }
-    if (signal?.aborted)
-        return { matches: [], bytesScanned: 0, filesScanned: 0, truncated: true, scanIncomplete: true };
+    if (signal?.aborted) return empty({ filesTotal: files.length, truncated: true, scanIncomplete: true });
 
     const currentDirName = opts.currentDir ? path.basename(opts.currentDir) : undefined;
     function rank(f: (typeof files)[number]) {
@@ -264,21 +248,20 @@ async function searchSessions(
     const matches: ArchiveMatch[] = [];
     // shortcut: live offsets can shift as sessions grow, use entry-ID cursors when paging must be exact
     let skipped = 0;
-    let bytes = 0;
     let filesScanned = 0;
     let incompleteReason: string | undefined = incompleteDiscovery ? "partial discovery" : undefined;
     let limitReached = false;
     for (const { file, dir, name } of files) {
-        if (signal?.aborted || bytes >= MAX_TOTAL_BYTES) {
-            incompleteReason ??= signal?.aborted ? "aborted" : "bytes cap";
+        if (signal?.aborted) {
+            incompleteReason ??= "aborted";
             break;
         }
         onProgress?.(filesScanned, matches.length);
         // shortcut: newest hits require scanning each file, index offsets when archive searches get slow
         const fileMessages: ArchiveMatch[] = [];
         const fileTools: ArchiveMatch[] = [];
-        const scan = await scanJsonLines(file, MAX_TOTAL_BYTES - bytes, signal, (line) => {
-            if (!line || !terms.some((t) => line.toLowerCase().includes(t))) return true;
+        const scan = await scanJsonLines(file, signal, (line) => {
+            if (patterns.some((pattern) => pattern && !pattern.test(line))) return true;
             const parsed = parseJsonLine(line);
             if (!parsed) return true;
             const et = entryText(parsed);
@@ -296,7 +279,6 @@ async function searchSessions(
             if (bucket.length > perSession) bucket.shift();
             return true;
         });
-        bytes += scan.bytes;
         filesScanned++;
         // shortcut: prefer dialogue with one tool hit, add relevance ranking when noisy matches persist
         const keepMessages = fileTools.length && perSession > 1 ? perSession - 1 : perSession;
@@ -307,8 +289,8 @@ async function searchSessions(
             if (skipped < offset) skipped++;
             else if (matches.length < limit) matches.push(hit);
         }
-        if (signal?.aborted || scan.incomplete) {
-            incompleteReason ??= "scan stopped";
+        if (scan.stopped) {
+            incompleteReason ??= signal?.aborted ? "aborted" : "scan stopped";
             break;
         }
         if (scan.oversizedLines > 0) incompleteReason ??= "oversized line";
@@ -320,8 +302,8 @@ async function searchSessions(
     const scanIncomplete = incompleteReason !== undefined;
     return {
         matches,
-        bytesScanned: bytes,
         filesScanned,
+        filesTotal: files.length,
         truncated: scanIncomplete || limitReached,
         limitReached,
         scanIncomplete,
@@ -332,7 +314,7 @@ async function searchSessions(
 
 async function firstUserTitle(file: string): Promise<string | null> {
     let title: string | null = null;
-    await scanJsonLines(file, Number.MAX_SAFE_INTEGER, undefined, (line) => {
+    await scanJsonLines(file, undefined, (line) => {
         const et = entryText(parseJsonLine(line));
         if (et?.role !== "user" || !et.text.trim()) return true;
         title = et.text.length > TITLE_MAX_CHARS ? et.text.slice(0, TITLE_MAX_CHARS) + "…" : et.text;
@@ -367,7 +349,9 @@ function recentSessions(
 function formatResults(query: string, result: SearchResult): string {
     const notes = [
         result.limitReached ? "Result limit reached; increase offset to check for more." : "",
-        result.scanIncomplete ? "Search incomplete; narrow the search or check archive access." : "",
+        result.scanIncomplete
+            ? `Search incomplete; scanned ${result.filesScanned} of ${result.filesTotal} files. Narrow the search or check archive access.`
+            : "",
     ].filter(Boolean);
     const note = notes.length ? `\n(${notes.join(" ")})` : "";
     if (result.matches.length === 0) {
@@ -456,9 +440,7 @@ export default function (pi: ExtensionAPI) {
         },
         renderResult(result, { expanded }, theme, context) {
             const text = result.content.flatMap((b) => (b.type === "text" ? [b.text ?? ""] : [])).join("\n");
-            const details = result.details as
-                | { matches?: ArchiveMatch[]; filesScanned?: number; limitReached?: boolean; scanIncomplete?: boolean }
-                | undefined;
+            const details = result.details as SearchResult | undefined;
             // Errors, partial scans and results saved before details.matches existed show the plain text.
             if (context.isError || !details?.matches)
                 return new Text(`\n${theme.fg(context.isError ? "error" : "toolOutput", text)}`, 0, 0);
@@ -486,7 +468,10 @@ export default function (pi: ExtensionAPI) {
             container.addChild(
                 new Text(
                     theme.fg(matches.length ? "success" : "muted", `${matches.length} match(es)`) +
-                        theme.fg("muted", ` in ${sessions} session(s) · ${details.filesScanned ?? 0} files scanned`),
+                        theme.fg(
+                            "muted",
+                            ` in ${sessions} session(s) · ${details.filesScanned ?? 0}${details.scanIncomplete ? ` of ${details.filesTotal ?? 0}` : ""} files scanned`,
+                        ),
                     0,
                     0,
                 ),
@@ -507,12 +492,15 @@ export default function (pi: ExtensionAPI) {
             return container;
         },
         async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
-            // Strict models inject literal "null" for optional params they omit; drop it before reading any.
-            const params = Object.fromEntries(
-                Object.entries(rawParams).filter(([, value]) => value !== null && value !== "null"),
-            ) as typeof rawParams;
+            // Strict models inject literal "null" for optional params they omit; drop it from those, never from the query.
+            const params = { ...rawParams } as typeof rawParams & Record<string, unknown>;
+            for (const key of ["session", "limit", "perSession", "offset"]) {
+                if (params[key] === null || params[key] === "null") delete params[key];
+            }
             const sessionDir = ctx.sessionManager.getSessionDir();
-            const root = path.dirname(sessionDir);
+            // Default sessions nest under an encoded-cwd dir; a custom session dir holds the JSONL files directly.
+            // shortcut: a custom dir named like --x-- reads as the default layout, use usesDefaultSessionDir() once it is exposed
+            const root = path.basename(sessionDir).startsWith("-") ? path.dirname(sessionDir) : sessionDir;
             const result = await searchSessions(
                 root,
                 params.query,
@@ -537,6 +525,7 @@ export default function (pi: ExtensionAPI) {
                     matches: result.matches,
                     matchCount: result.matches.length,
                     filesScanned: result.filesScanned,
+                    filesTotal: result.filesTotal,
                     truncated: result.truncated,
                     limitReached: result.limitReached === true,
                     scanIncomplete: result.scanIncomplete === true,

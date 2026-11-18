@@ -41,15 +41,18 @@ describe("resolveModel", () => {
         assert.deepEqual(resolveModel("anthropic/x", {}, session), {
             model: "anthropic/x",
             thinking: "medium",
+            explicit: undefined,
         });
         assert.deepEqual(resolveModel("anthropic/x:high", {}, session), {
             model: "anthropic/x",
             thinking: "high",
+            explicit: "high",
         });
         // Only known levels split, so colon-bearing ids stay whole.
         assert.deepEqual(resolveModel("ollama/llama3:8b", {}, session), {
             model: "ollama/llama3:8b",
             thinking: "medium",
+            explicit: undefined,
         });
     });
 
@@ -57,23 +60,35 @@ describe("resolveModel", () => {
         assert.deepEqual(resolveModel("cheap", { cheap: "anthropic/h" }, session), {
             model: "anthropic/h",
             thinking: "medium",
+            explicit: undefined,
         });
         assert.deepEqual(resolveModel("cheap", { cheap: "google/flash:low" }, session), {
             model: "google/flash",
             thinking: "low",
+            explicit: "low",
         });
         assert.deepEqual(resolveModel("cheap:high", { cheap: "google/flash:low" }, session), {
             model: "google/flash",
             thinking: "high",
+            explicit: "high",
         });
     });
 
     it("falls back to the session model for a missing or malformed tier", () => {
-        assert.deepEqual(resolveModel("cheap:low", {}, session), { model: "anthropic/m", thinking: "low" });
+        assert.deepEqual(resolveModel("cheap:low", {}, session), {
+            model: "anthropic/m",
+            thinking: "low",
+            explicit: "low",
+        });
         assert.deepEqual(resolveModel("cheap", { cheap: { model: "x/y" } }, session), {
             model: "anthropic/m",
             thinking: "medium",
+            explicit: undefined,
         });
-        assert.deepEqual(resolveModel(undefined, {}, {} as any), { model: undefined, thinking: undefined });
+        assert.deepEqual(resolveModel(undefined, {}, {} as any), {
+            model: undefined,
+            thinking: undefined,
+            explicit: undefined,
+        });
     });
 });

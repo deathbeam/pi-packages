@@ -177,9 +177,13 @@ export function registerPrune(pi: ExtensionAPI, gain: Gain): void {
             cacheInvalidated ||
             modelKey(ctx.model) !== lastModelKey ||
             Date.now() - lastRequestAt >= cacheTtlMs(ctx.model);
+        // Each request re-sends the whole transcript, so savings count only on the request that pruned the id.
+        const newlyPruned = new Set<string>();
         if (cold) {
             for (const item of superseded(event.messages, ctx.cwd)) {
-                if (!pruned.has(item.toolCallId)) pruned.set(item.toolCallId, item.text);
+                if (pruned.has(item.toolCallId)) continue;
+                pruned.set(item.toolCallId, item.text);
+                newlyPruned.add(item.toolCallId);
             }
         }
         if (pruned.size === 0) return;
@@ -191,11 +195,11 @@ export function registerPrune(pi: ExtensionAPI, gain: Gain): void {
             const text = pruned.get(message.toolCallId);
             if (text === undefined) return message;
             replaced = true;
-            savedChars += textLength(message.content) - text.length;
+            if (newlyPruned.has(message.toolCallId)) savedChars += textLength(message.content) - text.length;
             return { ...message, content: [{ type: "text" as const, text }] };
         });
         if (!replaced) return;
-        gain.record("prune", Math.round(savedChars / 4)); // Estimated at 4 chars per token.
+        if (savedChars > 0) gain.record("prune", Math.round(savedChars / 4)); // Estimated at 4 chars per token.
         return { messages };
     });
 }

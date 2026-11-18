@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, it } from "vitest";
 import { aaaa, archiveCtx, currentFile, ffff, hitLines, hits, removeArchive, root, search } from "./helpers.ts";
 
 afterAll(removeArchive);
+
+/** A session dir of its own, so a test controls the exact JSONL bytes and chunk boundaries. */
+function archive(entries: unknown[]): { ctx: any; cleanup: () => void } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-archive-gate-"));
+    const file = path.join(dir, "2026-09-10T00-00-00-000Z_jjjj.jsonl");
+    fs.writeFileSync(file, entries.map((entry) => JSON.stringify(entry) + "\n").join(""));
+    return { ctx: archiveCtx([], { dir, file }), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+function message(content: string) {
+    return { type: "message", message: { role: "user", content } };
+}
 
 describe("ranking", () => {
     it("puts the current session first, then this project, and searches summaries and tool results", async () => {
@@ -75,6 +89,10 @@ describe("session filter", () => {
 
     it('drops the literal "null" that strict models send', async () => {
         assert.equal((await search({ query: "jwt", session: "null" })).details.matchCount, 4);
+    });
+
+    it('searches the required query even when it is the literal "null"', async () => {
+        assert.deepEqual(await hits({ query: "null" }), ["- user: a null query is searched"]);
     });
 });
 
@@ -165,10 +183,65 @@ describe("missing archive", () => {
             matches: [],
             matchCount: 0,
             filesScanned: 0,
+            filesTotal: 0,
             truncated: false,
             limitReached: false,
             scanIncomplete: false,
         });
         assert.match(missing.text, /No matches for "jwt" in 0 scanned session files\.$/);
+    });
+});
+
+describe("custom session dir", () => {
+    it("searches JSONL files stored directly in the session dir", async () => {
+        const { ctx, cleanup } = archive([message("customdir hit")]);
+        try {
+            const result = await search({ query: "customdir" }, ctx);
+            assert.deepEqual(hitLines(result.text), ["- user: customdir hit"]);
+            assert.match(result.text, /\[this session \| 2026-09-10\]/);
+            assert.equal(result.details.filesScanned, 1);
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+describe("prefilter", () => {
+    const CHUNK = 64 * 1024; // READ_CHUNK_BYTES: chunks the scanner reads at a time.
+
+    it("keeps case-insensitive and JSON-escaped matches", async () => {
+        const { ctx, cleanup } = archive([message('He said "Escaped" and\nbroke the line')]);
+        try {
+            assert.deepEqual(hitLines((await search({ query: "ESCAPED" }, ctx)).text), [
+                '- user: He said "Escaped" and broke the line',
+            ]);
+            assert.equal((await search({ query: "said escaped" }, ctx)).details.matchCount, 1);
+            // The quote exists only after JSON unescaping, so a gated prefilter must not rule this line out.
+            assert.equal((await search({ query: 'said "escaped"' }, ctx)).details.matchCount, 1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("finds a term split by the read boundary", async () => {
+        // Center the term on the chunk boundary so no chunk holds it whole.
+        const head = JSON.stringify(message("boundaryhit")).indexOf("boundaryhit");
+        const content = "a".repeat(CHUNK - 5 - head) + "boundaryhit" + "a".repeat(60_000);
+        assert.equal(JSON.stringify(message(content)).indexOf("boundaryhit") + 5, CHUNK);
+        const { ctx, cleanup } = archive([message(content)]);
+        try {
+            assert.equal((await search({ query: "boundaryhit" }, ctx)).details.matchCount, 1);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("finds terms spread across chunks of one long line", async () => {
+        const { ctx, cleanup } = archive([message("leftterm" + "b".repeat(200_000) + "rightterm")]);
+        try {
+            assert.equal((await search({ query: "leftterm rightterm" }, ctx)).details.matchCount, 1);
+        } finally {
+            cleanup();
+        }
     });
 });

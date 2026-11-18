@@ -1,7 +1,7 @@
 # [@deathbeam/pi-context](https://www.npmjs.com/package/@deathbeam/pi-context)
 
-Keep context small: rewrite bash commands through [RTK](https://github.com/rtk-ai/rtk) when `rtk` is in `PATH`, prune stale tool results (superseded reads/edits, failed file calls, re-run bash commands), and set the compaction model.
-Use `/gain` command to see how many tokens were saved.
+Keep the context small: rewrite bash commands through [RTK](https://github.com/rtk-ai/rtk) when `rtk` is in `PATH`, prune tool results that a later call made stale, and compact with a cheaper model.
+Use the `/gain` command to see the tokens saved.
 
 ## Installation
 
@@ -23,7 +23,7 @@ Optional `context` settings live in `~/.pi/agent/settings.json` or `.pi/settings
 }
 ```
 
-- `compaction` is a `provider/model-id` string with an optional `:<thinking>` suffix. When set, it is used as the compaction model. Project settings override global ones.
+- `compaction` is a `provider/model-id` string with an optional `:<thinking>` suffix, used as the compaction model. Project settings override global ones.
 
 ## Development
 

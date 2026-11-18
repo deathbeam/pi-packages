@@ -1,6 +1,6 @@
 # [@deathbeam/pi-usage](https://www.npmjs.com/package/@deathbeam/pi-usage)
 
-Use the `/usage` command for a fullscreen dashboard of token usage and costs.
+Use the `/usage` command for a fullscreen dashboard of token usage and cost per day, provider, model, and project.
 
 ## Installation
 
@@ -26,6 +26,8 @@ pi install git:github.com/deathbeam/pi-packages  # all my packages
 Day rows include days without usage. Δ compares cost with the previous day. The sparkline always shows total cost per day across all history; the day in context is highlighted.
 
 The summary compares the daily spend so far this week and month with last week and month. Weeks start on Monday in local time. `▲new` means the previous period had no spend.
+
+Compaction and branch summaries are counted under `pi / summaries`.
 
 ## Development
 

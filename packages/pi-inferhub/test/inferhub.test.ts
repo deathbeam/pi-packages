@@ -39,6 +39,7 @@ const catalog = {
             max_output_tokens: 32000,
         },
         { id: "cx/gpt-6.1-sol", owned_by: "cx", modality: "text", reasoning_levels: ["low", "medium", "high"] },
+        { id: "gpt-oss-20b", owned_by: "other", modality: "text" },
         { id: "alias/glm-5.3", owned_by: "alias" },
         { id: "plain", owned_by: "other", modality: "text", input_token_limit: 0, max_output_tokens: 0 },
         { id: "image-out", output_modality: "image" },
@@ -57,6 +58,7 @@ const comboFixture = [
             { kind: "model", model: "gone/removed" },
         ],
     },
+    { slug: "empty", name: "Empty Combo", members: [{ kind: "model", model: "gone/removed" }] },
     { name: "Combo without a slug" },
 ];
 
@@ -138,7 +140,7 @@ describe("registration", () => {
             config.models.filter((model: any) => model.id.startsWith("combo/")),
             [],
         );
-        assert.equal(config.models.length, 6);
+        assert.equal(config.models.length, 7);
     });
 
     it("skips the startup fetch under PI_OFFLINE", async () => {
@@ -178,6 +180,7 @@ describe("model catalog", () => {
             "zhipu/glm-5.3",
             "cc/claude-haiku-4-5",
             "cx/gpt-6.1-sol",
+            "gpt-oss-20b",
             "alias/glm-5.3",
             "plain",
             "combo/fast",
@@ -224,10 +227,14 @@ describe("model catalog", () => {
 
     it("routes Claude and GPT models through their native APIs", () => {
         assert.deepEqual(
-            ["cc/claude-haiku-4-5", "cx/gpt-6.1-sol", "glm-5.3"].map((id) => [models[id].api, models[id].baseUrl]),
+            ["cc/claude-haiku-4-5", "cx/gpt-6.1-sol", "gpt-oss-20b", "glm-5.3"].map((id) => [
+                models[id].api,
+                models[id].baseUrl,
+            ]),
             [
                 ["anthropic-messages", "https://api.inferhub.dev"],
                 ["openai-responses", undefined],
+                [undefined, undefined],
                 [undefined, undefined],
             ],
         );

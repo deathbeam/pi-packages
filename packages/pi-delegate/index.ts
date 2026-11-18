@@ -89,13 +89,6 @@ function resultText(result: { content: unknown }): string {
     return textParts(result.content).join("\n");
 }
 
-/** One resolution path for launches and swaps; the error names the requested model. */
-function mustResolveModel(request: string | undefined, ctx: ExtensionContext, fallback?: string) {
-    const { model, thinking } = resolveModel(request ?? fallback, configFor(ctx.cwd).models ?? {}, ctx);
-    if (!model) throw new Error(`No model found for "${request ?? fallback}".`);
-    return { model, thinking };
-}
-
 /** Isolated jobs append the clone location and a change stat so the orchestrator can apply the work. */
 function withIsolation(output: string, isolation: IsolationState | undefined): string {
     return isolation ? [output, isolationSummary(isolation)].filter(Boolean).join("\n\n") : output;
@@ -110,8 +103,10 @@ export default function (pi: ExtensionAPI) {
     const store = createJobStore(pi.appendEntry);
     // A cancelled child can outlive its job row; a revive waits for it so two children never share a pinned session.
     const exiting = new Map<string, Promise<void>>();
+    // A clone an apply or discard owns: a revive that waited on the same exiting child must not spawn into it.
+    const closing = new Set<string>();
 
-    /** Waits for a cancelled child to exit; a child that never closes must not block steering forever. */
+    /** Waits for a cancelled child to exit; a child that never closes must not block its successor forever. */
     async function waitForExit(id: string) {
         const closed = exiting.get(id);
         if (!closed) return;
@@ -122,7 +117,7 @@ export default function (pi: ExtensionAPI) {
         });
         const result = await Promise.race([closed.then(() => "closed" as const), timeout]);
         clearTimeout(timer);
-        if (result === "timeout") throw new Error(`Delegate job "${id}" is still exiting; call delegate_steer again.`);
+        if (result === "timeout") throw new Error(`Delegate job "${id}" is still exiting; try again.`);
     }
 
     let ticker: ReturnType<typeof setInterval> | undefined;
@@ -179,10 +174,25 @@ export default function (pi: ExtensionAPI) {
     }
 
     /** One job at a time per clone: a shared clone is a shared working directory. */
-    function requireIdleClone(isolation: IsolationState) {
+    async function requireIdleClone(isolation: IsolationState) {
         const busy = store.live().find((job) => job.isolation?.clone === isolation.clone);
         if (busy)
             throw new Error(`Delegate job "${busy.id}" is running in this clone; wait for it or cancel it first.`);
+        // A cancelled child leaves the live set at once but can keep writing in its clone until SIGKILL.
+        for (const job of jobsInClone(isolation.clone)) await waitForExit(job.id);
+    }
+
+    /** Claims the clone before waiting; on success the mark stays as the tombstone a waiting revive checks. */
+    async function claimClone<T>(isolation: IsolationState, run: () => T): Promise<T> {
+        closing.add(isolation.clone);
+        try {
+            await requireIdleClone(isolation);
+            return run();
+        } catch (error) {
+            // A failed operation keeps the clone, so children may still spawn in it.
+            closing.delete(isolation.clone);
+            throw error;
+        }
     }
 
     function refreshWidget(ctx: ExtensionContext) {
@@ -261,7 +271,9 @@ export default function (pi: ExtensionAPI) {
     ) {
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
-        const { model, thinking } = mustResolveModel(fields.model, ctx, agent.model);
+        const requested = fields.model ?? agent.model;
+        const { model, thinking } = resolveModel(requested, configFor(ctx.cwd).models ?? {}, ctx);
+        if (!model) throw new Error(`No model found for "${requested}".`);
         const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
             (tool) => !DELEGATION_TOOLS.has(tool),
         );
@@ -269,7 +281,7 @@ export default function (pi: ExtensionAPI) {
         const id = prior?.id ?? randomUUID().slice(0, 8);
         const isolation =
             prior?.isolation ?? fields.clone ?? (fields.isolated ? createIsolation(ctx.cwd, id) : undefined);
-        if (isolation) requireIdleClone(isolation);
+        if (isolation) await requireIdleClone(isolation);
 
         const job: DelegateJob = {
             // A revived job keeps its id: the pinned child session id reopens the old transcript.
@@ -313,6 +325,9 @@ export default function (pi: ExtensionAPI) {
                 "--append-system-prompt",
                 `You are working in an isolated git clone at ${isolation.clone}. Your working directory is ${cwd}; run every command from it with relative paths. Any path under ${ctx.cwd} means the same file under ${cwd}. Your edits stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " Git commands that write, such as commit and rebase, work here and change only this clone. `git diff main-snapshot` shows every change made in it." : ""}`,
             );
+        // Same tick as the spawn: a claim that landed while we waited would delete the clone under a fresh child.
+        if (isolation && closing.has(isolation.clone))
+            throw new Error(`The clone at ${isolation.clone} is being applied or discarded; wait for it to finish.`);
         const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
             cwd,
             shell: false,
@@ -374,11 +389,11 @@ export default function (pi: ExtensionAPI) {
     /** Swaps a running child's model over the RPC; the child confirms or rejects it, and never restarts. */
     async function swapModel(job: DelegateJob, request: string, ctx: ExtensionContext) {
         if (!job.swapModel) throw new Error(`Delegate job "${job.id}" cannot switch models.`);
-        const { model } = mustResolveModel(request, ctx);
+        const { model, explicit: level } = resolveModel(request, configFor(ctx.cwd).models ?? {}, ctx);
+        if (!model) throw new Error(`No model found for "${request}".`);
         const [provider, ...rest] = model.split("/");
         if (!rest.length) throw new Error(`Model "${model}" has no provider prefix.`);
-        // Only an explicit :thinking suffix changes the level; an inherited one must not silently reset it.
-        const level = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(request)?.[1];
+        // Only an explicit :thinking suffix, on the request or its tier, changes the level; an inherited one must not silently reset it.
         // The display lands on the set_model ack, so a thinking-level failure cannot leave it stale.
         await job.swapModel(provider, rest.join("/"), level, () => {
             job.model = model;
@@ -695,9 +710,9 @@ export default function (pi: ExtensionAPI) {
         async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
             const id = jobId(rawParams.id);
             const { job, isolation } = clonedJob(id);
-            requireIdleClone(isolation);
-            const result = applyClone(isolation);
+            const result = await claimClone(isolation, () => applyClone(isolation));
             if (result.kind === "conflict") {
+                closing.delete(isolation.clone);
                 // Base rule: base tracks the newest snapshot, so the next apply works whether or not the delegate rebased yet.
                 for (const shared of jobsInClone(isolation.clone)) {
                     shared.isolation = { ...isolation, base: result.snapshot };
@@ -757,8 +772,7 @@ export default function (pi: ExtensionAPI) {
         async execute(_toolCallId, rawParams, _signal, _onUpdate, _ctx) {
             const id = jobId(rawParams.id);
             const { job, isolation } = clonedJob(id);
-            requireIdleClone(isolation);
-            closeClone(isolation);
+            await claimClone(isolation, () => closeClone(isolation));
             return {
                 content: [
                     {

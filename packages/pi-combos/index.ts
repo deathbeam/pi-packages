@@ -13,6 +13,7 @@ import type { ExtensionAPI, ModelRegistry, ProviderModelConfig } from "@earendil
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 type Cooldown = { failures: number; until: number };
+type ErrorEvent = Extract<AssistantMessageEvent, { type: "error" }>;
 
 const PROVIDER = "combo";
 // pi only offers these levels when the model maps them; members map them for real.
@@ -20,26 +21,32 @@ const EXTENDED_LEVELS = ["xhigh", "max"] as const;
 const COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 30 * 60_000;
 
-function settingsCombos(file: string): Record<string, unknown> {
+/** Undefined when the file exists but does not parse. */
+function settingsCombos(file: string): Record<string, unknown> | undefined {
     try {
         return JSON.parse(fs.readFileSync(file, "utf8"))?.combos ?? {};
     } catch {
-        return {};
+        return fs.existsSync(file) ? undefined : {};
     }
 }
 
-/** Project combos replace global ones of the same name. */
-function readCombos(cwd: string): Map<string, string[]> {
-    const combos = {
-        ...settingsCombos(path.join(getAgentDir(), "settings.json")),
-        ...settingsCombos(path.join(cwd, CONFIG_DIR_NAME, "settings.json")),
-    };
-    return new Map(
-        Object.entries(combos).map(([name, refs]) => [
-            name,
-            Array.isArray(refs) ? refs.filter((ref) => typeof ref === "string") : [],
-        ]),
-    );
+/** Project combos replace global ones of the same name, and only a trusted project contributes them. */
+function readCombos(cwd: string, trusted: boolean): { combos: Map<string, string[]>; invalid?: string } {
+    const files = [path.join(getAgentDir(), "settings.json")];
+    if (trusted) files.push(path.join(cwd, CONFIG_DIR_NAME, "settings.json"));
+    const combos = new Map<string, string[]>();
+    let invalid: string | undefined;
+    for (const file of files) {
+        const parsed = settingsCombos(file);
+        if (parsed === undefined) {
+            invalid ??= file;
+            continue;
+        }
+        for (const [name, refs] of Object.entries(parsed)) {
+            combos.set(name, Array.isArray(refs) ? refs.filter((ref) => typeof ref === "string") : []);
+        }
+    }
+    return { combos, invalid };
 }
 
 function findModel(ref: string, registry: ModelRegistry): Model<Api> | undefined {
@@ -97,7 +104,7 @@ async function pipe(
 ): Promise<void> {
     const cooling = (model: Model<Api>) => (cooldowns.get(memberKey(model))?.until ?? 0) > Date.now();
     const ordered = [...members.filter((member) => !cooling(member)), ...members.filter(cooling)];
-    let failure: AssistantMessageEvent | undefined;
+    let failure: ErrorEvent | undefined;
     for (const member of ordered) {
         let start: AssistantMessageEvent | undefined;
         let started = false;
@@ -110,8 +117,10 @@ async function pipe(
                 if (event.type === "error" && event.reason !== "aborted") {
                     failure = event;
                     const failures = (cooldowns.get(memberKey(member))?.failures ?? 0) + 1;
-                    const wait = Math.min(COOLDOWN_MS * 2 ** (failures - 1), MAX_COOLDOWN_MS);
-                    cooldowns.set(memberKey(member), { failures, until: Date.now() + wait });
+                    cooldowns.set(memberKey(member), {
+                        failures,
+                        until: Date.now() + Math.min(COOLDOWN_MS * 2 ** (failures - 1), MAX_COOLDOWN_MS),
+                    });
                     break;
                 }
                 started = true;
@@ -123,10 +132,10 @@ async function pipe(
             if (event.type === "done") return out.end(event.message);
             if (event.type === "error") return out.end(event.error);
         }
-        if (started) return out.end();
     }
+    // shortcut: every member stream ends with done or error, so a silent one ends this stream without a result.
     if (failure) out.push(failure);
-    out.end();
+    out.end(failure?.error);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -154,8 +163,8 @@ export default function (pi: ExtensionAPI) {
         });
     }
 
-    // pi restores a resumed session's model before session_start, so the ids must exist at load time.
-    const names = [...readCombos(process.cwd()).keys()];
+    // pi restores a resumed session's model before session_start, so every configured id exists before trust is known.
+    const names = [...readCombos(process.cwd(), true).combos.keys()];
     if (names.length > 0) register(names.map(pendingModel));
 
     pi.on("session_start", (_event, ctx) => {
@@ -163,7 +172,8 @@ export default function (pi: ExtensionAPI) {
         registry = current;
         combos = new Map();
         const unknown: string[] = [];
-        for (const [name, refs] of readCombos(ctx.cwd)) {
+        const { combos: configured, invalid } = readCombos(ctx.cwd, ctx.isProjectTrusted());
+        for (const [name, refs] of configured) {
             const members = refs.flatMap((ref) => {
                 const model = findModel(ref, current);
                 if (!model) unknown.push(ref);
@@ -176,5 +186,6 @@ export default function (pi: ExtensionAPI) {
         else pi.unregisterProvider(PROVIDER);
         if (unknown.length > 0 && ctx.hasUI)
             ctx.ui.notify(`Combos skip unknown models: ${unknown.join(", ")}`, "warning");
+        if (invalid && ctx.hasUI) ctx.ui.notify(`Combos ignore invalid JSON in ${invalid}`, "warning");
     });
 }

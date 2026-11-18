@@ -1,8 +1,7 @@
 # [@deathbeam/pi-delegate](https://www.npmjs.com/package/@deathbeam/pi-delegate)
 
-Run subagents with `delegate`, `delegate_list`, `delegate_steer`, `delegate_cancel`, `delegate_apply`, and
-`delegate_discard`.
-Use `/delegate` command to inspect jobs in a full-screen TUI.
+Run subagents in the background with `delegate`, and manage them with `delegate_list`, `delegate_steer`, `delegate_cancel`, `delegate_apply`, and `delegate_discard`.
+`/delegate` opens a fullscreen inspector for live and recent jobs.
 
 ## Installation
 
@@ -29,7 +28,10 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
 }
 ```
 
-Agents are Markdown files with frontmatter, the body becomes the child's system prompt:
+- `agentDirs` adds directories to search for agents. The bundled agents and `~/.agents/agents` are always loaded.
+- `models` maps the `cheap`, `balanced`, and `strong` tiers to a `provider/model-id` with an optional `:<thinking>` suffix. A tier without an entry uses the session model.
+
+Agents are Markdown files with frontmatter. The body becomes the delegate's system prompt.
 
 ```markdown
 ---
@@ -43,16 +45,16 @@ isolated: false
 Explore the codebase and report relevant paths.
 ```
 
-- `name` is required and must be unique
-- `description` is required
+- `name` is required and must be unique.
+- `description` is required.
 - `tools` is optional, a comma-separated list of tool names. Defaults to the session tools.
 - `model` is optional, a tier name or `provider/model[:thinking]`. Defaults to the session model.
-- `isolated` is optional, defaults to `false`. See [Isolation](#isolation).
+- `isolated` is optional and defaults to `false`. See [Isolation](#isolation).
 
 ## Isolation
 
 `isolated: true` (on a `delegate` call or in agent frontmatter) runs the delegate in its own git clone at
-`.pi/worktrees/<id>`, starting from your current working tree including uncommitted changes.
+`.pi/worktrees/<job id>`, starting from your current working tree including uncommitted changes.
 
 `delegate_apply` merges the result into your working tree as uncommitted changes.
 `delegate_discard` discards the clone and its changes.

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
@@ -75,6 +75,7 @@ function usageRecord(over: Partial<UsageRecord> = {}): UsageRecord {
         cacheWrite: 0,
         cwd: "/tmp",
         sessionId: "s1",
+        requests: 1,
         ...over,
     };
 }
@@ -527,5 +528,71 @@ describe("usage cache", () => {
         const { sessions, cacheFile } = sessionTree([first]);
         writeFileSync(cacheFile, "{not json");
         assert.deepEqual(await collectUsage(sessions, undefined, cacheFile), await collectUsage(sessions));
+    });
+
+    it("stops at the first file when aborted and leaves the cache alone", async () => {
+        const { sessions, cacheFile } = sessionTree([first, second]);
+        const controller = new AbortController();
+        controller.abort();
+        assert.deepEqual(await collectUsage(sessions, undefined, cacheFile, controller.signal), []);
+        assert.equal(existsSync(cacheFile), false);
+    });
+
+    it("stores one record per day, provider, model, cwd and session", async () => {
+        const { sessions, file, cacheFile } = sessionTree([
+            messageLine("anthropic", "claude-x", daysAgo(0), messageUsage()),
+            messageLine("anthropic", "claude-x", daysAgo(0), messageUsage({ cost: { total: 0.25 } })),
+            messageLine("anthropic", "claude-x", daysAgo(1), messageUsage()),
+        ]);
+        const aggregated = await collectUsage(sessions, undefined, cacheFile);
+        assert.deepEqual(
+            aggregated.map((record) => [dayKey(record.ts), record.requests, record.cost]),
+            [
+                [dayKey(daysAgo(0)), 2, 0.75],
+                [dayKey(daysAgo(1)), 1, 0.5],
+            ],
+        );
+        assert.equal(buildRows(aggregated, 0, "model")[0]!.requests, 3);
+        assert.equal(JSON.parse(readFileSync(cacheFile, "utf8")).files[file].records.length, 2);
+    });
+});
+
+describe("non-message usage entries", () => {
+    it("counts usage entries and summarization calls like pi does", async () => {
+        const stamp = new Date(at("2025-01-02")).toISOString();
+        const { sessions } = sessionTree([
+            JSON.stringify({
+                type: "usage",
+                timestamp: stamp,
+                kind: "cache_warm",
+                provider: "anthropic",
+                model: "claude-x",
+                usage: messageUsage({ input: 0, output: 0, cost: { total: 0.015 } }),
+            }),
+            JSON.stringify({
+                type: "compaction",
+                timestamp: stamp,
+                usage: messageUsage({ input: 1000, output: 100, cost: { total: 0.3 } }),
+            }),
+            JSON.stringify({
+                type: "branch_summary",
+                timestamp: stamp,
+                usage: messageUsage({ input: 200, output: 20, cost: { total: 0.2 } }),
+            }),
+            // Tool results keep their own session files; counting them here would double-count.
+            JSON.stringify({
+                type: "message",
+                message: { role: "toolResult", toolName: "bash", usage: messageUsage(), content: [] },
+            }),
+        ]);
+        const parsed = await collectUsage(sessions);
+        assert.deepEqual(
+            parsed.map((record) => [record.provider, record.model, record.cost, record.input, record.requests]),
+            [
+                ["anthropic", "claude-x", 0.015, 0, 1],
+                ["pi", "summaries", 0.5, 1200, 2],
+            ],
+        );
+        assert.equal(summarize(parsed).requests, 3);
     });
 });

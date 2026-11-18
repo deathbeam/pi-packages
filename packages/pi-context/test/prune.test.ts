@@ -217,3 +217,27 @@ describe("cache-aware pruning gate", () => {
         assert.deepEqual(prunedIds(context([...readThenEdit("g3", fileA), turn([])], noCache)), []);
     });
 });
+
+describe("pruning savings", () => {
+    const model = { provider: "p", id: "m", promptCache: { short: 300 } };
+
+    it("counts a pruned result once, not once per request", async () => {
+        const { handlers, commands } = await loadExtension();
+        const result = (id: string, text: string) => ({ ...toolResult(id), content: [{ type: "text", text }] });
+        const messages = [
+            turn([["s1", "read", readA]]),
+            result("s1", "x".repeat(400)),
+            turn([["s2", "edit", editA]]),
+            toolResult("s2"),
+            turn([]),
+        ];
+        // Every request rebuilds the transcript, so each one re-sees the same stale result.
+        for (let request = 0; request < 3; request++) {
+            fire(handlers, "context", { type: "context", messages }, { cwd: dir, model });
+        }
+        let notified = "";
+        await commands.get("gain").handler("", { ui: { notify: (text: string) => (notified = text) } });
+        const tokens = Math.round((400 - placeholder(fileA).length) / 4);
+        assert.match(notified, new RegExp(`prune\\s+${tokens}\\b`));
+    });
+});

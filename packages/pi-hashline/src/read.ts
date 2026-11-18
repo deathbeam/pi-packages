@@ -273,16 +273,15 @@ export function registerReadTool(pi: ExtensionAPI): void {
                 limit: params.limit,
                 raw: params.raw,
             });
-            // Capture snapshot for stale-anchor recovery. Only hashline (non-raw)
-            // reads mint anchors, so raw reads must not update the slot; anchors
-            // from a raw read do not exist, so there is nothing to recover against.
+            // Only hashline (non-raw) reads mint anchors, so raw reads must not replace the recovery snapshot.
             if (!params.raw) {
                 const canonicalWritePath = await resolveMutationTargetPath(absolutePath);
                 rememberReadSnapshot(canonicalWritePath, normalized);
-                // A deliberate re-read after an edit clears the duplicate-edit guard
-                // for this path; the model has seen the current state and any
-                // subsequent identical payload is intentional, not a retry loop.
-                clearAppliedPayload(canonicalWritePath);
+                // Only a complete re-read clears the duplicate-edit guard: a paginated or
+                // truncated page may not show the lines an identical payload would duplicate.
+                if (!preview.truncation && preview.nextOffset === undefined && !preview.advisory) {
+                    clearAppliedPayload(canonicalWritePath);
+                }
             }
 
             // Invalid UTF-8 bytes are decoded as U+FFFD, matching Pi's built-in

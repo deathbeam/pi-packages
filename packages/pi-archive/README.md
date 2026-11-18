@@ -1,6 +1,7 @@
 # [@deathbeam/pi-archive](https://www.npmjs.com/package/@deathbeam/pi-archive)
 
-Search past Pi sessions with `search_archive` and show recent session titles.
+Search this session and past pi sessions with the `search_archive` tool, including messages compacted away.
+New sessions also start with the first user message of the five most recent sessions in the project.
 
 ## Installation
 

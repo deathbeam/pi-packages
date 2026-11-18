@@ -5,7 +5,7 @@
  * belong in fresh `read` calls, not invisible `details` branches.
  */
 
-import { generateDiffString } from "./edit-diff";
+import { generateDiffString } from "@earendil-works/pi-coding-agent";
 import { computeAffectedLineRange, formatHashlineRegion, splitVisibleLines, type NoopEdit } from "./hashline";
 
 type ToolResult = {
@@ -104,7 +104,7 @@ export function buildChangedResponse(input: SuccessResponseInput): ToolResult {
     return {
         content: [{ type: "text", text }],
         details: {
-            diff: generateDiffString(originalNormalized, result),
+            diff: generateDiffString(originalNormalized, result).diff,
             firstChangedLine: editMeta.firstChangedLine,
             warnings: warnings ?? [],
         },

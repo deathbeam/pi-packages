@@ -118,6 +118,7 @@ writeJsonl(path.join(projShort, "2026-09-07T00-00-00-000Z_gggg.jsonl"), [
     { type: "session", version: 3, id: "gggg" },
     { type: "message", message: { role: "user", content: "zephyr works in short projects" } },
     { type: "message", message: { role: "user", content: "x".repeat(400) + "needle" + "y".repeat(400) } },
+    { type: "message", message: { role: "user", content: "a null query is searched" } },
 ]);
 
 // No user message: the recent-sessions hint falls back to "(no user message)".

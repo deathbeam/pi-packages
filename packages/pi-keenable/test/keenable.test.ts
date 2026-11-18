@@ -140,6 +140,15 @@ describe("pi-keenable", () => {
             await tools.web_fetch.execute("n2", { url: "https://example.com/", prompt: "null" });
             assert.equal(lastUrl().searchParams.get("prompt"), null);
         });
+
+        it('keeps the literal "null" in required params', async () => {
+            stubFetch({ results: [] });
+            await tools.web_search.execute("n", { query: "null" });
+            assert.deepEqual(JSON.parse(lastCall().init.body), { query: "null" });
+            stubFetch({ title: "T", url: "u", content: "body" });
+            await tools.web_fetch.execute("n2", { url: "null" });
+            assert.equal(lastUrl().searchParams.get("url"), "null");
+        });
     });
 
     describe("abort", () => {

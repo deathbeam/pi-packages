@@ -86,11 +86,12 @@ function toPiModel(
     const label = sources.find(
         (source) => typeof source.upstream_label === "string" && source.upstream_label,
     )?.upstream_label;
-    const name = normalizeName(entry.id);
+    // A combo is routed by the provider, not by whatever its slug looks like.
+    const bare = entry.id.startsWith("combo/") ? "" : entry.id.split("/").at(-1)!.toLowerCase();
 
     return {
-        ...(name.startsWith("claude") ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
-        ...(name.startsWith("gpt") ? { api: "openai-responses" } : {}),
+        ...(bare.startsWith("claude") ? { api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL } : {}),
+        ...(/^gpt-\d/.test(bare) ? { api: "openai-responses" } : {}),
         id: entry.id,
         name: displayName ?? (typeof label === "string" ? label : entry.id),
         reasoning: true,
@@ -145,12 +146,14 @@ function buildComboModels(entries: CatalogEntry[], combos: ComboEntry[]): Provid
         entries.flatMap((entry) => (typeof entry.id === "string" ? [[entry.id, entry] as const] : [])),
     );
     return combos.flatMap((combo) => {
+        if (typeof combo.slug !== "string" || !combo.slug) return [];
         const members = (Array.isArray(combo.members) ? combo.members : []).flatMap((member) => {
             const id = member.kind === "alias" ? member.alias : member.model;
             const entry = typeof id === "string" ? byId.get(id) : undefined;
             return entry ? sourcesFor(entry, byName) : [];
         });
-        if (typeof combo.slug !== "string" || !combo.slug) return [];
+        // Without a single known member the combo has no limits, prices or api to offer.
+        if (members.length === 0) return [];
         const model = toPiModel(
             { id: `combo/${combo.slug}` },
             members,

@@ -1,6 +1,6 @@
 # [@deathbeam/pi-images](https://www.npmjs.com/package/@deathbeam/pi-images)
 
-Describe images for vision-less models and generate images with the `image_generate` tool.
+Describe images for models that cannot see them and generate images with the `image_generate` tool.
 
 ## Installation
 
@@ -24,9 +24,9 @@ Optional `images` settings live in `~/.pi/agent/settings.json` or `.pi/settings.
 }
 ```
 
-- `vision` is the model used to describe images. Only used when model does not have vision and when configured
-- `generate` is the model used to generate images. Only used when configured.
-- `outputDir` is the directory where generated images are saved. Defaults to `.pi/images`.
+- `vision` is the `provider/model-id` used to describe images when the current model cannot see them. Images stay undescribed when unset.
+- `generate` is the `provider/model-id` used by `image_generate`. The tool fails when unset.
+- `outputDir` is where generated images are saved. Defaults to `.pi/images`.
 
 ## Development
 

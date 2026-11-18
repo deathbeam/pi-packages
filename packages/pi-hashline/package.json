@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-hashline",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "Hashline read/edit/grep tool overrides for Pi",
   "type": "module",
   "license": "MIT",
@@ -33,7 +33,6 @@
     "xxhashjs": "^0.2.2"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   }

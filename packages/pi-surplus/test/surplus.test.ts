@@ -4,7 +4,7 @@ import extension from "../index.ts";
 
 const BASE_URL = "https://api.surplusintelligence.ai/v1";
 const ANTHROPIC_BASE_URL = "https://api.surplusintelligence.ai/anthropic";
-const CHAT_MODEL_IDS = ["vision-reasoner", "plain", "claude-x", "gpt-6.1-sol", "openai-gpt-oss-20b"];
+const CHAT_MODEL_IDS = ["vision-reasoner", "plain", "claude-x", "claude-lower", "gpt-6.1-sol", "openai-gpt-oss-20b"];
 
 const realFetch = globalThis.fetch;
 const calls: { url: string; init: any }[] = [];
@@ -34,6 +34,7 @@ const catalog = {
             supported_features: ["streaming"],
         }),
         entry("claude-x", ["text"], ["text"], { provider: "Anthropic" }),
+        entry("claude-lower", ["text"], ["text"], { provider: "anthropic" }),
         entry("gpt-6.1-sol", ["text"], ["text"], { provider: "OpenAI" }),
         entry("openai-gpt-oss-20b", ["text"], ["text"], { provider: "OpenAI" }),
         entry("image-gen", ["text"], ["image"]),
@@ -100,6 +101,7 @@ describe("pi-surplus", () => {
                     { id: "vision-reasoner", api: undefined, baseUrl: undefined },
                     { id: "plain", api: undefined, baseUrl: undefined },
                     { id: "claude-x", api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL },
+                    { id: "claude-lower", api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL },
                     { id: "gpt-6.1-sol", api: "openai-responses", baseUrl: undefined },
                     { id: "openai-gpt-oss-20b", api: undefined, baseUrl: undefined },
                 ],

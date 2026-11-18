@@ -22,9 +22,18 @@ function setup() {
     return { fire };
 }
 
-const model = (id: string, api = "openai-completions", provider = "opencode") => ({ provider, id, api });
+const ZERO_COST = { input: 0, output: 0 };
 
-const context = (current = model("big-pickle"), sessionId = "pi-session-1") => ({
+const model = (id: string, api = "openai-completions", provider = "opencode", cost = { input: 1, output: 2 }) => ({
+    provider,
+    id,
+    api,
+    cost,
+});
+
+const free = (id: string, api = "openai-completions") => model(id, api, "opencode", ZERO_COST);
+
+const context = (current = free("big-pickle"), sessionId = "pi-session-1") => ({
     model: current,
     sessionManager: { getSessionId: () => sessionId },
 });
@@ -63,23 +72,24 @@ describe("OpenCode identity headers", () => {
         fire(
             "before_provider_headers",
             { type: "before_provider_headers", headers: other },
-            context(model("big-pickle"), "pi-session-2"),
+            context(free("big-pickle"), "pi-session-2"),
         );
         assert.notEqual(other["x-opencode-session"], first["x-opencode-session"]);
     });
 
-    it("recognizes the big-pickle alias and every -free model", () => {
+    it("recognizes every zero-cost model", () => {
         const { fire } = setup();
         for (const id of ["big-pickle", "deepseek-v4.1-flash-free", "beam-free"]) {
             const sent = headers();
-            fire("before_provider_headers", { type: "before_provider_headers", headers: sent }, context(model(id)));
+            fire("before_provider_headers", { type: "before_provider_headers", headers: sent }, context(free(id)));
             assert.equal(sent["x-opencode-client"], "cli", id);
         }
     });
 
     it("leaves paid models and other providers alone", () => {
         const { fire } = setup();
-        for (const current of [model("claude-sonnet-5"), model("big-pickle", "openai-completions", "other")]) {
+        const paid = [model("claude-sonnet-5"), model("fake-free"), model("big-pickle", "openai-completions", "other")];
+        for (const current of paid) {
             const sent = headers();
             fire("before_provider_headers", { type: "before_provider_headers", headers: sent }, context(current));
             assert.deepEqual(sent, headers(), current.id);
@@ -147,7 +157,7 @@ describe("free-tier tool declarations", () => {
         const { fire } = setup();
         const payload = { model: "big-pickle" };
 
-        for (const current of [model("claude-sonnet-5"), model("big-pickle", "anthropic-messages")]) {
+        for (const current of [model("claude-sonnet-5"), free("big-pickle", "anthropic-messages")]) {
             assert.equal(
                 fire("before_provider_request", { type: "before_provider_request", payload }, context(current)),
                 undefined,

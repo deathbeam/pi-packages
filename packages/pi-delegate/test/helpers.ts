@@ -246,7 +246,7 @@ function writeFakeCli(dir: string): string {
     writeFileSync(
         cli,
         `
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 const COMMANDS_LOG = '${join(dir, "commands.log")}';
 const ARGV_LOG = '${join(dir, "argv.log")}';
 const EMPTY_MARKER = '${join(dir, "empty")}';
@@ -315,11 +315,13 @@ process.stdin.on("data", (data) => {
             send({ type: "response", command: "steer", id: command.id, success: true });
             if (stage === 2) send({ type: "agent_settled" });
         } else if (command.type === "abort") {
-            // A slow exit is the window in which a revive that does not wait would overlap this child.
+            // A slow exit is the window in which apply or a revive that does not wait races this child's last write.
+            const late = promptMessage === "late writer";
             setTimeout(() => {
+                if (late) writeFileSync("late.txt", "late\\n");
                 send({ type: "response", command: "abort", id: command.id, success: true });
                 send({ type: "agent_settled", aborted: true });
-            }, promptMessage === "close during revive" ? 300 : 0);
+            }, late || promptMessage === "close during revive" ? 300 : 0);
         }
     }
 });

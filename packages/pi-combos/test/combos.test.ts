@@ -87,11 +87,12 @@ function start(
     combos: Record<string, string[]>,
     models: Model<any>[],
     replies: Record<string, AssistantMessageEvent[]>,
+    options: { trusted?: boolean; hasUI?: boolean; settings?: string } = {},
 ) {
     const cwd = mkdtempSync(join(tmpdir(), "pi-combos-cwd-"));
     cwds.push(cwd);
     mkdirSync(join(cwd, ".pi"));
-    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ combos }));
+    writeFileSync(join(cwd, ".pi", "settings.json"), options.settings ?? JSON.stringify({ combos }));
 
     const providers = new Map<string, any>();
     const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
@@ -110,11 +111,21 @@ function start(
         },
     };
 
+    const notifications: string[] = [];
     extension(pi);
     for (const handler of handlers.get("session_start") ?? []) {
-        handler({}, { cwd, modelRegistry: registry, hasUI: false });
+        handler(
+            {},
+            {
+                cwd,
+                modelRegistry: registry,
+                hasUI: options.hasUI ?? false,
+                isProjectTrusted: () => options.trusted ?? true,
+                ui: { notify: (text: string) => notifications.push(text) },
+            },
+        );
     }
-    return { provider: providers.get("combo"), calls };
+    return { provider: providers.get("combo"), calls, notifications };
 }
 
 const PROVIDER = "combo";
@@ -301,6 +312,24 @@ describe("pi-combos", () => {
         assert.equal(calls.length, 1);
     });
 
+    it("ends with the last error when every member fails before output", async () => {
+        const { provider, calls } = start({ smart: ["anthropic/flaky"] }, [model("anthropic", "flaky")], {
+            flaky: [failed()],
+        });
+        assert.ok(provider, "combo provider registered");
+
+        const { events, result } = await send(provider, {});
+        assert.deepEqual(
+            events.map((event) => event.type),
+            ["error"],
+        );
+        assert.equal(result.stopReason, "error");
+        assert.deepEqual(
+            calls.map((call) => call.member.id),
+            ["flaky"],
+        );
+    });
+
     it("strips the combo provider credentials before forwarding to a member", async () => {
         const signal = new AbortController().signal;
         const { provider, calls } = start({ smart: ["openai/ok"] }, [model("openai", "ok")], {
@@ -393,5 +422,16 @@ describe("pi-combos", () => {
             if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
             else process.env.ANTHROPIC_API_KEY = previousKey;
         }
+    });
+
+    it("ignores project combos when the project is not trusted", () => {
+        const { provider } = start({ smart: ["anthropic/a"] }, [model("anthropic", "a")], {}, { trusted: false });
+        assert.equal(provider, undefined);
+    });
+
+    it("warns about a settings file that does not parse", () => {
+        const { notifications } = start({}, [], {}, { trusted: true, hasUI: true, settings: "{ nope" });
+        assert.equal(notifications.length, 1);
+        assert.match(notifications[0], /Combos ignore invalid JSON in .*\.pi[/\\]settings\.json/);
     });
 });

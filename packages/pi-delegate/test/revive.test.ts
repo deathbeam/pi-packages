@@ -255,7 +255,25 @@ describe("shared clone", () => {
                 isoCtx,
             );
             await app.discard.execute("call", { id: closing.details.id }, undefined, () => {});
-            await assert.rejects(reviving, /already applied or discarded/);
+            await assert.rejects(reviving, /applied or discarded/);
+        } finally {
+            repo.remove();
+        }
+    });
+});
+
+describe("apply while a cancelled child still writes", () => {
+    // delegate_cancel drops the job at once, but the child keeps writing in its clone until SIGTERM or the 5s SIGKILL.
+    it("waits for the child to exit before applying", async () => {
+        const repo = tempGitRepo({ "seed.txt": "seed\n" });
+        try {
+            const app = delegateSession();
+            const isoCtx = { ...app.tuiCtx, cwd: repo.dir };
+            const job = await launch(app, isoCtx, { description: "late writer", task: "late writer", isolated: true });
+            await cancelJob(app, isoCtx, job);
+            const applied = await app.apply.execute("call", { id: job.details.id }, undefined, () => {});
+            assert.match(applied.content[0].text, /Applied the changes/);
+            assert.equal(readFileSync(join(repo.dir, "late.txt"), "utf8"), "late\n", "apply raced the exiting child");
         } finally {
             repo.remove();
         }

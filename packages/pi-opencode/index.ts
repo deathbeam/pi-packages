@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-type FreeModel = { provider: string; id: string; api: string };
+type FreeModel = { provider: string; id: string; api: string; cost: { input: number; output: number } };
 
 const CLI_VERSION = "1.19.0";
 const ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -37,8 +37,9 @@ function generatedId(descending: boolean): string {
     return timestamp + Array.from(randomBytes(14), (byte) => ID_CHARS[byte % ID_CHARS.length]).join("");
 }
 
+// shortcut: Zen's free lane is every zero-cost model, which today is the -free ids and big-pickle.
 function isFreeModel(model: FreeModel): boolean {
-    return model.provider === "opencode" && (model.id === "big-pickle" || model.id.endsWith("-free"));
+    return model.provider === "opencode" && model.cost.input === 0 && model.cost.output === 0;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

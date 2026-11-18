@@ -1,8 +1,10 @@
 # [@deathbeam/pi-hashline](https://www.npmjs.com/package/@deathbeam/pi-hashline)
 
-Override Pi's read, edit, and grep with hash-anchored operations. Grep requires `rg`.
-Fork of [pi-hashline-edit](https://www.npmjs.com/package/pi-hashline-edit) with cleanup, bugfixes and native tool output UI.
-See [this blog post](https://stencil.so/blog/the-harness-problem) for the motivation behind this package.
+Replace pi's `read`, `edit`, and `grep` tools with hash-anchored versions that address lines as `LINE#HASH`.
+`grep` needs `rg` in `PATH`; without it, the built-in grep stays.
+
+Fork of [pi-hashline-edit](https://www.npmjs.com/package/pi-hashline-edit) with bug fixes and native tool output.
+See [the blog post](https://stencil.so/blog/the-harness-problem) for why it exists.
 
 ## Installation
 

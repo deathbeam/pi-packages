@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
+import { isRgAvailable } from "../src/grep.ts";
 import { createHarness, needleLines, oversizedMatch, wideLines, type Harness } from "./helpers.ts";
 
 let h: Harness;
@@ -148,5 +149,21 @@ describe("grep", () => {
     it('treats the pattern "null" as a real pattern', async () => {
         const result = await h.grep({ pattern: "null", path: h.write("null-pattern.txt", "null here\nother\n") });
         assert.match(result.content[0].text, /#[A-Z]{3}:null here/);
+    });
+});
+
+describe("rg availability probe", () => {
+    it("gives up on a hung rg instead of blocking extension load", () => {
+        const bin = join(h.dir, "hung-rg-bin");
+        mkdirSync(bin, { recursive: true });
+        writeFileSync(join(bin, "rg"), "#!/bin/sh\nsleep 30\n");
+        chmodSync(join(bin, "rg"), 0o755);
+        const original = process.env.PATH;
+        process.env.PATH = `${bin}:${original}`;
+        try {
+            assert.equal(isRgAvailable(), false, "a hung probe counts as absent");
+        } finally {
+            process.env.PATH = original;
+        }
     });
 });
