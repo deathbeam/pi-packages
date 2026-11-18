@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import { cleanupTempDirs, tempDir, writeSettings } from "./helpers.ts";
 import index from "../index.ts";
 import { saveImages } from "../src/generate.ts";
@@ -97,7 +97,7 @@ describe("image_generate", () => {
             size: "1024x1024",
         });
         const saved = result.details.paths[0];
-        assert.match(saved, /^out\/image-\d+-1\.png$/);
+        assert.match(saved, /^out\/image-\d+-1-[0-9a-f]{8}\.png$/);
         assert.deepEqual(readFileSync(join(project, saved)), png);
         assert.deepEqual(result.content, [
             { type: "text", text: `![generated image](${saved})` },
@@ -125,7 +125,7 @@ describe("image_generate", () => {
             () => new Response(jpeg, { status: 200, headers: { "content-type": "image/jpeg" } }),
         ]);
         assert.equal(lastRequest().url, "https://cdn.example/img");
-        assert.match(result.details.paths[0], /^out\/image-\d+-1\.jpg$/);
+        assert.match(result.details.paths[0], /^out\/image-\d+-1-[0-9a-f]{8}\.jpg$/);
         assert.deepEqual(readFileSync(join(project, result.details.paths[0])), jpeg);
     });
 
@@ -286,7 +286,22 @@ describe("saveImages", () => {
         ]);
         assert.equal(saved.length, 2);
         assert.notEqual(saved[0], saved[1]);
-        assert.match(saved[0], /^\.pi\/images\/image-\d+-1\.png$/);
-        assert.match(saved[1], /^\.pi\/images\/image-\d+-2\.jpg$/);
+        assert.match(saved[0], /^\.pi\/images\/image-\d+-1-[0-9a-f]{8}\.png$/);
+        assert.match(saved[1], /^\.pi\/images\/image-\d+-2-[0-9a-f]{8}\.jpg$/);
+    });
+
+    it("keeps both files when two saves land in the same millisecond", () => {
+        const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+        try {
+            const first = saveImages(project, ".pi/images", [{ data: pngB64, mimeType: "image/png" }]);
+            const second = saveImages(project, ".pi/images", [
+                { data: Buffer.from([1, 2, 3]).toString("base64"), mimeType: "image/png" },
+            ]);
+            assert.notEqual(first[0], second[0]);
+            assert.deepEqual(readFileSync(join(project, first[0])), png);
+            assert.deepEqual(readFileSync(join(project, second[0])), Buffer.from([1, 2, 3]));
+        } finally {
+            now.mockRestore();
+        }
     });
 });

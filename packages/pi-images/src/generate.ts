@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -214,8 +214,9 @@ export function saveImages(cwd: string, outputDir: string, images: GeneratedImag
     const dir = resolve(cwd, outputDir);
     mkdirSync(dir, { recursive: true });
     const stamp = Date.now();
+    const suffix = randomUUID().slice(0, 8);
     return images.map((image, index) => {
-        const file = join(dir, `image-${stamp}-${index + 1}.${extFor(image.mimeType)}`);
+        const file = join(dir, `image-${stamp}-${index + 1}-${suffix}.${extFor(image.mimeType)}`);
         writeFileSync(file, Buffer.from(image.data, "base64"));
         return relative(cwd, file);
     });

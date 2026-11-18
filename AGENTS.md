@@ -26,7 +26,7 @@ Monorepo of pi extensions. Each `packages/<name>/` is published to npm on its ow
 
 - Order in every file: imports, types, constants, helpers, default export.
 - Named helpers are `function` declarations; inline callbacks stay arrows.
-- Comments explain a non-obvious why. Mark a deliberate limit `// shortcut: <limit>, <when to upgrade>`.
+- Comments explain a non-obvious why. No comment that restates the code or narrates a change. Mark a deliberate limit `// shortcut: <limit>, <when to upgrade>`.
 
 ## pi dependencies
 

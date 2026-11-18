@@ -169,6 +169,16 @@ describe("vision handoff", () => {
         assert.equal(notifications.length, 1);
     });
 
+    it("warns again after a new session starts", async () => {
+        writeSettings(project, { vision: "anthropic/blind" });
+        handlers.session_start({}, visionCtx());
+        await context({ messages: transcript("c2Vzc2lvbg==") }, blindVision());
+        assert.equal(notifications.length, 1);
+        handlers.session_start({}, visionCtx());
+        await context({ messages: transcript("c2Vzc2lvbg==") }, blindVision());
+        assert.equal(notifications.length, 2);
+    });
+
     it("reports a failed description once and caches the failure", async () => {
         writeSettings(project, { vision: "anthropic/v" });
         const messages = [{ role: "user", content: [image("ZmFpbA==")] }];

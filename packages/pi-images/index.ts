@@ -90,6 +90,10 @@ function imageContentOf(message: unknown): any[] | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+    pi.on("session_start", () => {
+        warnedNotVision = false;
+    });
+
     pi.on("context", async (event, ctx) => {
         // The hook runs on every LLM call; bail before touching settings when the model already sees images.
         if (ctx.model?.input.includes("image")) return;
