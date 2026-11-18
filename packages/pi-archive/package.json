@@ -26,9 +26,6 @@
       "./index.ts"
     ]
   },
-  "scripts": {
-    "test": "node check.mjs"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

@@ -28,9 +28,6 @@
       "./index.ts"
     ]
   },
-  "scripts": {
-    "test": "node check.mjs"
-  },
   "dependencies": {
     "diff": "^8.0.2",
     "xxhashjs": "^0.2.2"

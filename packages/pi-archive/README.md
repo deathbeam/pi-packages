@@ -16,6 +16,6 @@ From this package directory:
 
 ```sh
 npm install
-npm test
+npm test -- packages/pi-archive  # from the repo root
 pi install .
 ```

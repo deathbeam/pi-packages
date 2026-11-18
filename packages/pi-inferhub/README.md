@@ -17,6 +17,6 @@ From this package directory:
 
 ```sh
 npm install
-npm test
+npm test -- packages/pi-inferhub  # from the repo root
 pi install .
 ```

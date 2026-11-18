@@ -34,6 +34,11 @@ From this package directory:
 
 ```sh
 npm install
-npm test
 pi install .
+```
+
+Run the tests from the repo root:
+
+```sh
+npm test -- packages/pi-images  # from the repo root
 ```

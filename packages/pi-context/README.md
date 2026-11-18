@@ -31,6 +31,11 @@ From this package directory:
 
 ```sh
 npm install
-npm test
 pi install .
+```
+
+From the repo root:
+
+```sh
+npm test -- packages/pi-context  # from the repo root
 ```

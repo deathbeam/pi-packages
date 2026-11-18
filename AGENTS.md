@@ -5,21 +5,22 @@ Monorepo of pi extensions. Each `packages/<name>/` is published to npm on its ow
 ## Layout
 
 - `index.ts` is the extension entry and the only file `pi.extensions` names. Put code in `src/` once it outgrows one file.
-- List every shipped path in `package.json` `files`. Add `src`, `prompts` or `agents` there when you create them; `check.mjs` stays unpublished.
+- List every shipped path in `package.json` `files`. Add `src`, `prompts` or `agents` there when you create them; `test` stays unpublished.
 - Packages share no code. Copy a small helper into the package that needs it rather than importing across packages.
 - Add a new package's `index.ts` to the root `package.json` `pi.extensions` too.
 - Each package README documents its tools, config and env vars. Keep it current with user-visible changes.
 
 ## Commands
 
-`node check.mjs` in a package, `npm test` for all of them, `npm run check` for `tsc --noEmit`, `npm run format` for prettier. There is no build: Node >= 22.19 strips types, and the published artifact is the TypeScript source.
+`npm test` runs vitest over every package, `npm test -- packages/<name>` runs one, `npm run check` for `tsc --noEmit` (tests included), `npm run format` for prettier. There is no build: Node >= 22.19 strips types, and the published artifact is the TypeScript source.
 
-## check.mjs
+## Tests
 
-- A plain script: `node:assert/strict`, top-level awaits, a `console.log` per passing section, non-zero exit on the first failed assert.
+- Tests live in `packages/<name>/test/<area>.test.ts`, one file per feature area (`render`, `search`, ...). A package with a single file names it after the package without the `pi-` prefix (`usage.test.ts`). Shared fixtures go in `test/helpers.ts`. Import `describe`/`it` from `vitest`; assert with `node:assert/strict`.
 - Call the default export with a hand-written stub of the ExtensionAPI methods the code uses, e.g. `{ registerTool: (t) => (tools[t.name] = t) }`. Add a stub member when the code starts calling a new one.
 - Call `initTheme()` before exercising a renderer: the theme is a global singleton.
-- Relative imports carry the `.ts` extension so plain Node can load them. pi-hashline is the exception: extensionless imports, loaded through `jiti` in its check.
+- Restore globals you replace (`fetch`, env vars, temp dirs) in `afterEach`/`afterAll`.
+- Relative imports carry the `.ts` extension so plain Node can load them. pi-hashline is the exception: extensionless imports, which vitest resolves.
 
 ## Code
 

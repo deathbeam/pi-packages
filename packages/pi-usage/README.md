@@ -33,6 +33,6 @@ From this package directory:
 
 ```sh
 npm install
-npm test
+npm test -- packages/pi-usage  # from the repo root
 pi install .
 ```

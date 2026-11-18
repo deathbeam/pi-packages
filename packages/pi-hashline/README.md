@@ -18,6 +18,7 @@ From this package directory:
 
 ```sh
 npm install
-npm test
+# from the repo root:
+npm test -- packages/pi-hashline  # from the repo root
 pi install .
 ```

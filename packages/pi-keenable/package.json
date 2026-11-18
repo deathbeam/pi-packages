@@ -29,8 +29,5 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
-  },
-  "scripts": {
-    "test": "node check.mjs"
   }
 }
