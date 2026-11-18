@@ -58,7 +58,7 @@ export type DailyCost = { label: string; cost: number };
 
 type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; providers?: Set<string> };
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -199,20 +199,26 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             model = String(entry.model);
         } else {
             // Compaction and branch-summary calls carry no model, so their cost gets its own row.
-            provider = "pi";
-            model = "summaries";
+            provider = "(summaries)";
+            model = entry.type;
         }
         const cost = typeof usage.cost === "number" ? usage.cost : num(usage.cost?.total);
+        const input = num(usage.input);
+        const output = num(usage.output);
+        const cacheRead = num(usage.cacheRead);
+        const cacheWrite = num(usage.cacheWrite);
+        // An aborted request (delegate children report one) carries no usage; counting it adds a phantom row.
+        if (cost === 0 && input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) continue;
         const stamp = entry.type === "message" ? message.timestamp : entry.timestamp;
         records.push({
             provider,
             model,
             ts: typeof stamp === "string" ? num(Date.parse(stamp)) : num(stamp),
             cost,
-            input: num(usage.input),
-            output: num(usage.output),
-            cacheRead: num(usage.cacheRead),
-            cacheWrite: num(usage.cacheWrite),
+            input,
+            output,
+            cacheRead,
+            cacheWrite,
             requests: 1,
             cwd,
             sessionId,

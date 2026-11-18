@@ -27,7 +27,7 @@ Day rows include days without usage. Δ compares cost with the previous day. The
 
 The summary compares the daily spend so far this week and month with last week and month. Weeks start on Monday in local time. `▲new` means the previous period had no spend.
 
-Compaction and branch summaries are counted under `pi / summaries`.
+Compaction and branch summaries are counted under `(summaries)`.
 
 ## Development
 

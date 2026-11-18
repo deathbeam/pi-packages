@@ -555,6 +555,17 @@ describe("usage cache", () => {
         assert.equal(buildRows(aggregated, 0, "model")[0]!.requests, 3);
         assert.equal(JSON.parse(readFileSync(cacheFile, "utf8")).files[file].records.length, 2);
     });
+
+    it("skips an assistant message that reports no tokens and no cost", async () => {
+        const { sessions } = sessionTree([
+            messageLine("combo", "cheap", daysAgo(0), messageUsage({ input: 0, output: 0, cost: { total: 0 } })),
+            messageLine("anthropic", "claude-x", daysAgo(0), messageUsage()),
+        ]);
+        assert.deepEqual(
+            (await collectUsage(sessions)).map((record) => [record.provider, record.model, record.requests]),
+            [["anthropic", "claude-x", 1]],
+        );
+    });
 });
 
 describe("non-message usage entries", () => {
@@ -590,7 +601,8 @@ describe("non-message usage entries", () => {
             parsed.map((record) => [record.provider, record.model, record.cost, record.input, record.requests]),
             [
                 ["anthropic", "claude-x", 0.015, 0, 1],
-                ["pi", "summaries", 0.5, 1200, 2],
+                ["(summaries)", "compaction", 0.3, 1000, 1],
+                ["(summaries)", "branch_summary", 0.2, 200, 1],
             ],
         );
         assert.equal(summarize(parsed).requests, 3);
