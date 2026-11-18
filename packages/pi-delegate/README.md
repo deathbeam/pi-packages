@@ -61,10 +61,10 @@ Any later delegate can share that clone with `clone: <job id>`, for review, test
 
 ## Development
 
-From the repository root:
+From the repo root:
 
 ```sh
 npm install
-npm test -- packages/pi-delegate  # from the repo root
+npm test -- packages/pi-delegate
 pi install ./packages/pi-delegate
 ```

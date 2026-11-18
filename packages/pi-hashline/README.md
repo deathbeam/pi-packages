@@ -14,11 +14,10 @@ pi install git:github.com/deathbeam/pi-packages  # all my packages
 
 ## Development
 
-From this package directory:
+From the repo root:
 
 ```sh
 npm install
-# from the repo root:
-npm test -- packages/pi-hashline  # from the repo root
-pi install .
+npm test -- packages/pi-hashline
+pi install ./packages/pi-hashline
 ```

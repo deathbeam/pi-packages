@@ -12,6 +12,7 @@
   "pi": {
     "extensions": [
       "./packages/pi-archive/index.ts",
+      "./packages/pi-combos/index.ts",
       "./packages/pi-context/index.ts",
       "./packages/pi-delegate/index.ts",
       "./packages/pi-hashline/index.ts",

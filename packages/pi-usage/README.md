@@ -2,6 +2,14 @@
 
 Use the `/usage` command for a fullscreen dashboard of token usage and costs.
 
+## Installation
+
+```sh
+# Choose one:
+pi install npm:@deathbeam/pi-usage               # this package
+pi install git:github.com/deathbeam/pi-packages  # all my packages
+```
+
 ## Keys
 
 | Key                   | Action                                       |
@@ -19,20 +27,12 @@ Day rows include days without usage. Δ compares cost with the previous day. The
 
 The summary compares the daily spend so far this week and month with last week and month. Weeks start on Monday in local time. `▲new` means the previous period had no spend.
 
-## Installation
-
-```sh
-# Choose one:
-pi install npm:@deathbeam/pi-usage               # this package
-pi install git:github.com/deathbeam/pi-packages  # all my packages
-```
-
 ## Development
 
-From this package directory:
+From the repo root:
 
 ```sh
 npm install
-npm test -- packages/pi-usage  # from the repo root
-pi install .
+npm test -- packages/pi-usage
+pi install ./packages/pi-usage
 ```

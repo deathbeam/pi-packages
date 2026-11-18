@@ -27,15 +27,10 @@ Optional `context` settings live in `~/.pi/agent/settings.json` or `.pi/settings
 
 ## Development
 
-From this package directory:
-
-```sh
-npm install
-pi install .
-```
-
 From the repo root:
 
 ```sh
-npm test -- packages/pi-context  # from the repo root
+npm install
+npm test -- packages/pi-context
+pi install ./packages/pi-context
 ```

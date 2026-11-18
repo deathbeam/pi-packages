@@ -13,10 +13,10 @@ pi install git:github.com/deathbeam/pi-packages  # all my packages
 
 ## Development
 
-From this package directory:
+From the repo root:
 
 ```sh
 npm install
-npm test
-pi install .
+npm test -- packages/pi-surplus
+pi install ./packages/pi-surplus
 ```

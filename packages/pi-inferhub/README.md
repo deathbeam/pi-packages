@@ -13,10 +13,10 @@ pi install git:github.com/deathbeam/pi-packages  # all my packages
 
 ## Development
 
-From this package directory:
+From the repo root:
 
 ```sh
 npm install
-npm test -- packages/pi-inferhub  # from the repo root
-pi install .
+npm test -- packages/pi-inferhub
+pi install ./packages/pi-inferhub
 ```

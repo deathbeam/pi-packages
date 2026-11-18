@@ -30,15 +30,10 @@ Optional `images` settings live in `~/.pi/agent/settings.json` or `.pi/settings.
 
 ## Development
 
-From this package directory:
+From the repo root:
 
 ```sh
 npm install
-pi install .
-```
-
-Run the tests from the repo root:
-
-```sh
-npm test -- packages/pi-images  # from the repo root
+npm test -- packages/pi-images
+pi install ./packages/pi-images
 ```
