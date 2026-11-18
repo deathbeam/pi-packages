@@ -8,11 +8,15 @@ import type {
     SimpleStreamOptions,
     TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ModelRegistry, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
+type Cooldown = { failures: number; until: number };
+
 const PROVIDER = "combo";
+// pi only offers these levels when the model maps them; members map them for real.
+const EXTENDED_LEVELS = ["xhigh", "max"] as const;
 const COOLDOWN_MS = 60_000;
 const MAX_COOLDOWN_MS = 30 * 60_000;
 
@@ -38,41 +42,46 @@ function readCombos(cwd: string): Map<string, string[]> {
     );
 }
 
-function resolveMembers(refs: string[], registry: ModelRegistry): Model<Api>[] {
-    return refs.flatMap((ref) => {
-        const slash = ref.indexOf("/");
-        const provider = ref.slice(0, slash);
-        const model = slash > 0 && provider !== PROVIDER ? registry.find(provider, ref.slice(slash + 1)) : undefined;
-        return model ? [model] : [];
-    });
+function findModel(ref: string, registry: ModelRegistry): Model<Api> | undefined {
+    const slash = ref.indexOf("/");
+    const provider = ref.slice(0, slash);
+    return slash > 0 && provider !== PROVIDER ? registry.find(provider, ref.slice(slash + 1)) : undefined;
 }
 
-/** Limits every member can meet. */
+function memberKey(model: Model<Api>): string {
+    return `${model.provider}/${model.id}`;
+}
+
+/** Limits every member can meet; thinking levels any member can use, since each clamps its own. */
 function comboModel(name: string, members: Model<Api>[]): ProviderModelConfig {
+    const levels = new Set(members.flatMap(getSupportedThinkingLevels));
     return {
         id: name,
         name,
         input: members[0].input.filter((input) => members.every((member) => member.input.includes(input))),
         cost: members[0].cost,
         reasoning: members.some((member) => member.reasoning),
+        thinkingLevelMap: Object.fromEntries(
+            EXTENDED_LEVELS.filter((level) => levels.has(level)).map((level) => [level, level]),
+        ),
         contextWindow: Math.min(...members.map((member) => member.contextWindow)),
         maxTokens: Math.min(...members.map((member) => member.maxTokens)),
     };
 }
 
+/** Stands in until session_start; anything stricter would clamp a restored thinking level. */
 function pendingModel(name: string): ProviderModelConfig {
     return {
         id: name,
         name,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        reasoning: false,
+        reasoning: true,
+        thinkingLevelMap: Object.fromEntries(EXTENDED_LEVELS.map((level) => [level, level])),
         contextWindow: 128000,
         maxTokens: 16384,
     };
 }
-
-type Cooldown = { failures: number; until: number };
 
 /**
  * Tries members in order; a member that fails before any output hands over to the next one and
@@ -86,8 +95,7 @@ async function pipe(
     context: TranscriptContext,
     options: SimpleStreamOptions,
 ): Promise<void> {
-    const key = (model: Model<Api>) => `${model.provider}/${model.id}`;
-    const cooling = (model: Model<Api>) => (cooldowns.get(key(model))?.until ?? 0) > Date.now();
+    const cooling = (model: Model<Api>) => (cooldowns.get(memberKey(model))?.until ?? 0) > Date.now();
     const ordered = [...members.filter((member) => !cooling(member)), ...members.filter(cooling)];
     let failure: AssistantMessageEvent | undefined;
     for (const member of ordered) {
@@ -101,13 +109,13 @@ async function pipe(
                 }
                 if (event.type === "error" && event.reason !== "aborted") {
                     failure = event;
-                    const failures = (cooldowns.get(key(member))?.failures ?? 0) + 1;
+                    const failures = (cooldowns.get(memberKey(member))?.failures ?? 0) + 1;
                     const wait = Math.min(COOLDOWN_MS * 2 ** (failures - 1), MAX_COOLDOWN_MS);
-                    cooldowns.set(key(member), { failures, until: Date.now() + wait });
+                    cooldowns.set(memberKey(member), { failures, until: Date.now() + wait });
                     break;
                 }
                 started = true;
-                cooldowns.delete(key(member));
+                cooldowns.delete(memberKey(member));
                 // pi ignores updates that arrive before start.
                 if (start) out.push(start);
             }
@@ -151,19 +159,22 @@ export default function (pi: ExtensionAPI) {
     if (names.length > 0) register(names.map(pendingModel));
 
     pi.on("session_start", (_event, ctx) => {
-        registry = ctx.modelRegistry;
+        const current = ctx.modelRegistry;
+        registry = current;
         combos = new Map();
         const unknown: string[] = [];
         for (const [name, refs] of readCombos(ctx.cwd)) {
-            const members = resolveMembers(refs, registry);
+            const members = refs.flatMap((ref) => {
+                const model = findModel(ref, current);
+                if (!model) unknown.push(ref);
+                return model ? [model] : [];
+            });
             if (members.length > 0) combos.set(name, members);
-            else unknown.push(name);
         }
 
         if (combos.size > 0) register([...combos].map(([name, members]) => comboModel(name, members)));
         else pi.unregisterProvider(PROVIDER);
-        if (unknown.length > 0 && ctx.hasUI) {
-            ctx.ui.notify(`Combo ${unknown.join(", ")}: no known models, skipped`, "warning");
-        }
+        if (unknown.length > 0 && ctx.hasUI)
+            ctx.ui.notify(`Combos skip unknown models: ${unknown.join(", ")}`, "warning");
     });
 }

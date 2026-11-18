@@ -2,8 +2,16 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AssistantMessage, AssistantMessageEvent, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import {
+    createAgentSessionFromServices,
+    createAgentSessionServices,
+    ModelRuntime,
+    SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
 import extension from "../index.ts";
 
@@ -109,7 +117,62 @@ function start(
     return { provider: providers.get("combo"), calls };
 }
 
+const PROVIDER = "combo";
+
 const combo = (name: string) => ({ id: name }) as Model<any>;
+
+/** Registers the load-time placeholder models of a fresh cwd, without session_start. */
+function loadOnly(combos: Record<string, string[]>): any {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-combos-cwd-"));
+    cwds.push(cwd);
+    mkdirSync(join(cwd, ".pi"));
+    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ combos }));
+
+    const providers = new Map<string, any>();
+    const pi: any = {
+        on: () => {},
+        registerProvider: (name: string, config: any) => providers.set(name, config),
+        unregisterProvider: (name: string) => providers.delete(name),
+    };
+    const previousCwd = process.cwd();
+    process.chdir(cwd);
+    try {
+        extension(pi);
+    } finally {
+        process.chdir(previousCwd);
+    }
+    // pi restores the session model before session_start, so the ids must exist here already.
+    return providers.get(PROVIDER);
+}
+
+/** A reasoning member, with a thinkingLevelMap entry (or null) per level passed in. */
+function reasoning(provider: string, id: string, levels: Record<string, string | null>): Model<any> {
+    return model(provider, id, { reasoning: true, thinkingLevelMap: levels });
+}
+
+/** Runs the real pi startup on the combo and checks the level survives session_start. */
+async function assertThinkingLevel(dir: string): Promise<void> {
+    const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
+    const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
+    const services = await createAgentSessionServices({
+        cwd: dir,
+        agentDir: dir,
+        modelRuntime,
+        resourceLoaderOptions: { additionalExtensionPaths: [extensionPath] },
+    });
+    const { session } = await createAgentSessionFromServices({
+        services,
+        sessionManager: SessionManager.create(dir, join(dir, "sessions")),
+        thinkingLevel: "high",
+        noTools: "all",
+    });
+    assert.equal(session.model?.provider, PROVIDER);
+    assert.equal(session.thinkingLevel, "high", "before session_start");
+
+    await session.bindExtensions({});
+    assert.equal(session.thinkingLevel, "high", "after session_start");
+    session.dispose();
+}
 
 async function send(
     provider: any,
@@ -124,27 +187,7 @@ async function send(
 
 describe("pi-combos", () => {
     it("registers combo ids at load time, before session_start", () => {
-        const cwd = mkdtempSync(join(tmpdir(), "pi-combos-cwd-"));
-        cwds.push(cwd);
-        mkdirSync(join(cwd, ".pi"));
-        writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ combos: { smart: ["anthropic/a"] } }));
-
-        const providers = new Map<string, any>();
-        const pi: any = {
-            on: () => {},
-            registerProvider: (name: string, config: any) => providers.set(name, config),
-            unregisterProvider: (name: string) => providers.delete(name),
-        };
-        const previousCwd = process.cwd();
-        process.chdir(cwd);
-        try {
-            extension(pi);
-        } finally {
-            process.chdir(previousCwd);
-        }
-
-        // pi restores the session model before session_start, so the ids must exist here already.
-        const provider = providers.get("combo");
+        const provider = loadOnly({ smart: ["anthropic/a"] });
         assert.deepEqual(
             provider.models.map((entry: { id: string }) => entry.id),
             ["smart"],
@@ -298,5 +341,57 @@ describe("pi-combos", () => {
         assert.equal(registered.maxTokens, 4000);
         assert.deepEqual(registered.input, ["text"]);
         assert.equal(registered.reasoning, true);
+    });
+
+    it("keeps the thinking level of a reasoning combo at load time", () => {
+        const provider = loadOnly({ smart: ["anthropic/a"] });
+        const [pending] = provider.models as ProviderModelConfig[];
+        assert.ok(getSupportedThinkingLevels(pending as any).includes("high"));
+        assert.ok(getSupportedThinkingLevels(pending as any).includes("max"));
+    });
+
+    it("keeps high, and max only when a member supports it", () => {
+        const { provider } = start(
+            { smart: ["anthropic/a", "openai/b"] },
+            [reasoning("anthropic", "a", {}), reasoning("openai", "b", { xhigh: "xhigh" })],
+            {},
+        );
+        const [registered] = provider.models as ProviderModelConfig[];
+        assert.deepEqual(getSupportedThinkingLevels(registered as any), [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ]);
+    });
+
+    it("starts a real session on the combo at the configured thinking level", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "pi-combos-session-"));
+        cwds.push(dir);
+        mkdirSync(join(dir, "sessions"), { recursive: true });
+        mkdirSync(join(dir, ".pi"));
+        writeFileSync(
+            join(dir, ".pi", "settings.json"),
+            JSON.stringify({
+                defaultProvider: "combo",
+                defaultModel: "smart",
+                defaultThinkingLevel: "high",
+                combos: { smart: ["anthropic/claude-opus-4-7"] },
+            }),
+        );
+        const previousKey = process.env.ANTHROPIC_API_KEY;
+        process.env.ANTHROPIC_API_KEY = "test-key";
+        // The load-time registration of the extension reads the process cwd.
+        const previousCwd = process.cwd();
+        process.chdir(dir);
+        try {
+            await assertThinkingLevel(dir);
+        } finally {
+            process.chdir(previousCwd);
+            if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+            else process.env.ANTHROPIC_API_KEY = previousKey;
+        }
     });
 });
