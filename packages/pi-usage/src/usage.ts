@@ -58,7 +58,7 @@ export type DailyCost = { label: string; cost: number };
 
 type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; providers?: Set<string> };
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -198,9 +198,10 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             provider = String(entry.provider);
             model = String(entry.model);
         } else {
-            // Compaction and branch-summary calls carry no model, so their cost gets its own row.
-            provider = "(summaries)";
-            model = entry.type;
+            // Compaction and branch-summary calls carry no model, so their cost gets its own row. Subagent
+            // artifact transcripts carry no type at all and keep provider/model on the nested message.
+            provider = String(message?.provider || entry.provider || "(summaries)");
+            model = String(message?.model || entry.model || entry.type || "unknown");
         }
         const cost = typeof usage.cost === "number" ? usage.cost : num(usage.cost?.total);
         const input = num(usage.input);

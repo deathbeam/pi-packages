@@ -174,6 +174,33 @@ describe("collectUsage", () => {
         ]);
     });
 
+    // Regression: subagent artifact transcripts carry no entry `type` and keep provider/model on the nested
+    // message, so the row name came out undefined and crashed the table renderer.
+    it("names rows from the nested message of subagent artifact transcripts", async () => {
+        const artifact = JSON.stringify({
+            recordType: "message",
+            role: "assistant",
+            model: "glm-5.3",
+            timestamp: daysAgo(0),
+            usage: messageUsage({ cost: 0.25 }),
+            message: { role: "assistant", provider: "inferhub", model: "glm-5.3", content: [] },
+        });
+        const tree = sessionTree([
+            artifact,
+            JSON.stringify({ role: "assistant", usage: messageUsage({ cost: 0.5 }) }),
+        ]);
+        const parsed = await collectUsage(tree.sessions);
+        assert.deepEqual(
+            parsed.map((record) => [record.provider, record.model]),
+            [
+                ["inferhub", "glm-5.3"],
+                ["(summaries)", "unknown"],
+            ],
+        );
+        for (const name of buildRows(parsed, 0, "model").map((row) => row.name))
+            assert.equal(typeof name, "string");
+    });
+
     it("returns nothing for a directory that does not exist", async () => {
         assert.deepEqual(await collectUsage(join(tempDir("pi-usage-missing-"), "sessions")), []);
     });
