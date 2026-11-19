@@ -336,9 +336,12 @@ describe("dayWindow", () => {
         assert.deepEqual(comparison(dstRecords, at("2025-09-08")), {
             today: 9,
             week: 9,
+            weekTotal: 9,
             lastWeek: 12 / 7,
             month: 21 / 8,
+            monthTotal: 21,
             lastMonth: 0,
+            lastMonthTotal: 0,
         });
         assert.deepEqual(
             dailyTotals(dstRecords, { since: midnight("2025-09-06"), until: midnight("2025-09-10") }).map((day) => [
@@ -364,20 +367,26 @@ describe("comparison", () => {
         usageRecord({ ts: at("2025-05-22"), cost: 100 }),
     ];
 
-    it("averages the daily cost of today, this week and this month against the previous ones", () => {
+    it("totals and averages the week and month against the previous ones", () => {
         assert.deepEqual(comparison(sample, at("2025-05-21")), {
             today: 9,
             week: 3,
+            weekTotal: 9,
             lastWeek: 4,
             month: 47 / 21,
+            monthTotal: 47,
             lastMonth: 1,
+            lastMonthTotal: 30,
         });
         assert.deepEqual(comparison([], at("2025-05-21")), {
             today: 0,
             week: 0,
+            weekTotal: 0,
             lastWeek: 0,
             month: 0,
+            monthTotal: 0,
             lastMonth: 0,
+            lastMonthTotal: 0,
         });
         assert.equal(
             comparison(
@@ -393,7 +402,7 @@ describe("comparison", () => {
             [usageRecord({ ts: at("2025-05-18"), cost: 7 }), usageRecord({ ts: at("2025-05-19"), cost: 10 })],
             at("2025-05-19"),
         );
-        assert.deepEqual([monday.week, monday.lastWeek], [10, 1]);
+        assert.deepEqual([monday.week, monday.weekTotal, monday.lastWeek], [10, 10, 1]);
     });
 
     it("counts the leap day in the month window", () => {
@@ -602,6 +611,38 @@ describe("summaryModel", () => {
         assert.equal(summaryModel(records, false, at("2025-05-21")).trends, undefined);
     });
 
+    it("projects the month from the daily average so far", () => {
+        // $10 over the 21 days of May 2025 that had started; February has 28 days and 10 had started.
+        assert.equal(model.trends?.projection, (10 / 21) * 31);
+        const february = [usageRecord({ ts: at("2025-02-01"), cost: 10 })];
+        assert.equal(summaryModel(february, true, at("2025-02-10")).trends?.projection, 28);
+    });
+
+    it("splits the delegate child cost out of the total", () => {
+        const mixed = [
+            usageRecord({ sessionId: "main", ts: at("2025-05-21"), cost: 3 }),
+            usageRecord({ sessionId: "delegate-cee55d71", ts: at("2025-05-21"), cost: 1 }),
+        ];
+        assert.deepEqual(summaryModel(mixed, false, at("2025-05-21")).delegates, { cost: 1, share: 0.25 });
+        assert.deepEqual(summaryModel([], true, at("2025-05-21")).delegates, { cost: 0, share: 0 });
+    });
+
+    it("ranks the top providers next to the models and projects", () => {
+        const mixed = [
+            usageRecord({ provider: "openai", ts: at("2025-05-21"), cost: 4 }),
+            usageRecord({ provider: "anthropic", ts: at("2025-05-21"), cost: 6 }),
+            usageRecord({ provider: "google", ts: at("2025-05-21"), cost: 0.5 }),
+        ];
+        assert.deepEqual(
+            summaryModel(mixed, false, at("2025-05-21")).top.providers.map((row) => [row.name, row.stats.cost]),
+            [
+                ["anthropic", 6],
+                ["openai", 4],
+                ["google", 0.5],
+            ],
+        );
+    });
+
     it("ranks the top models, projects and sessions by cost", () => {
         assert.deepEqual(
             model.top.models.map((row) => [row.name, row.stats.cost]),
@@ -627,7 +668,8 @@ describe("summaryModel", () => {
         assert.deepEqual(empty.streak, { current: 0, longest: 0 });
         assert.equal(empty.busiest, undefined);
         assert.deepEqual(empty.daily, []);
-        assert.deepEqual(empty.top, { models: [], projects: [], sessions: [] });
+        assert.deepEqual(empty.top, { models: [], providers: [], projects: [], sessions: [] });
+        assert.deepEqual(empty.delegates, { cost: 0, share: 0 });
     });
 });
 

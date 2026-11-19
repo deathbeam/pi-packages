@@ -29,16 +29,31 @@ export type Heatmap = { header: string; rows: (HeatCell | undefined)[][] };
 
 export type Trends = {
     today: number;
-    /** Per-day spend so far this week and this month, with the change against the previous one. */
+    /** Totals and per-day spend so far this week and this month, against the previous ones. */
     week: number;
+    weekTotal: number;
     weekDelta: number;
     month: number;
+    monthTotal: number;
     monthDelta: number;
+    lastMonthTotal: number;
+    /** This month's per-day average spread over every day of the month. */
+    projection: number;
 };
 
-export type TopLists = { models: GroupRow[]; projects: GroupRow[]; sessions: GroupRow[] };
+export type TopLists = {
+    models: GroupRow[];
+    providers: GroupRow[];
+    projects: GroupRow[];
+    sessions: GroupRow[];
+};
+
+/** Delegate child sessions and their share of the total cost, as a fraction. */
+export type Delegates = { cost: number; share: number };
 
 type Cell = { label: string; value: string };
+type GridColumn = { label: number; width: number };
+type TrendRow = { label: string; total: string; perDay?: string; delta?: string; suffix?: string; accent?: boolean };
 type List = { title: string; mode?: GroupMode; rows: GroupRow[] };
 type Section = { title: string; maxColumns: number; cells: (width: number) => Cell[] };
 
@@ -56,6 +71,7 @@ export type SummaryModel = {
     /** Absent when a single day is in context: there is nothing to compare it with. */
     trends?: Trends;
     top: TopLists;
+    delegates: Delegates;
 };
 
 const WEEKDAYS = ["Mon", "", "Wed", "", "Fri", "", ""];
@@ -69,12 +85,16 @@ const HEAT_LEVELS = [
 ] as const;
 const INDENT = "  ";
 const COLUMN_GAP = 3;
+/** pi-delegate children persist their own sessions under this id prefix. */
+const DELEGATE_PREFIX = "delegate-";
 /** Narrowest a section may get before it is stacked instead of placed beside another. */
 const MIN_SECTION_WIDTH = 44;
 /** Longest a name column grows; a longer list would push the bar too far from the name. */
 const MAX_NAME_WIDTH = 30;
 /** Space the bar and the cost take in a top list row. */
 const LIST_OVERHEAD = 24;
+/** Two lists share a row while each keeps its names readable. */
+const LISTS_PER_ROW = 2;
 
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -82,12 +102,18 @@ function emptyStats(): Stats {
 
 function trends(records: UsageRecord[], now: number): Trends {
     const compare = comparison(records, now);
+    const date = new Date(now);
+    const monthDays = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
     return {
         today: compare.today,
         week: compare.week,
+        weekTotal: compare.weekTotal,
         weekDelta: percentChange(compare.week, compare.lastWeek),
         month: compare.month,
+        monthTotal: compare.monthTotal,
         monthDelta: percentChange(compare.month, compare.lastMonth),
+        lastMonthTotal: compare.lastMonthTotal,
+        projection: compare.month * monthDays,
     };
 }
 
@@ -106,28 +132,35 @@ function cellText(cell: Cell, theme: Theme, labelWidth = visibleWidth(cell.label
     return theme.fg("muted", padWidth(cell.label, labelWidth)) + "  " + cell.value;
 }
 
-/** One label/value column per entry, sized to its widest cell plus the gap. */
-function columnWidths(cells: Cell[], count: number, theme: Theme): number[] {
+/** Widest label and widest padded value per column, plus the gap; labels pad so values line up. */
+function gridColumns(cells: Cell[], count: number, theme: Theme): GridColumn[] {
+    const labels = Array.from({ length: count }, () => 0);
+    for (const [index, cell] of cells.entries()) {
+        const column = index % count;
+        labels[column] = Math.max(labels[column]!, visibleWidth(cell.label));
+    }
     const widths = Array.from({ length: count }, () => 0);
     for (const [index, cell] of cells.entries()) {
         const column = index % count;
-        widths[column] = Math.max(widths[column]!, visibleWidth(cellText(cell, theme)) + COLUMN_GAP);
+        widths[column] = Math.max(widths[column]!, visibleWidth(cellText(cell, theme, labels[column]!)) + COLUMN_GAP);
     }
-    return widths;
+    return labels.map((label, column) => ({ label, width: widths[column]! }));
 }
 
 /** Label/value pairs in as many aligned columns as `maxColumns` and the width allow. */
 function grid(cells: Cell[], width: number, maxColumns: number, theme: Theme): string[] {
     for (let count = Math.min(cells.length, maxColumns); count > 0; count--) {
-        const widths = columnWidths(cells, count, theme);
-        const used = widths.reduce((sum, column) => sum + column, 0) - COLUMN_GAP;
+        const columns = gridColumns(cells, count, theme);
+        const used = columns.reduce((sum, column) => sum + column.width, 0) - COLUMN_GAP;
         if (count > 1 && used > width) continue;
         const rows: string[] = [];
         for (let start = 0; start < cells.length; start += count) {
             rows.push(
                 cells
                     .slice(start, start + count)
-                    .map((cell, column) => padWidth(cellText(cell, theme), widths[column]!))
+                    .map((cell, column) =>
+                        padWidth(cellText(cell, theme, columns[column]!.label), columns[column]!.width),
+                    )
                     .join("")
                     .trimEnd(),
             );
@@ -186,6 +219,17 @@ function activity(daily: DailyCost[], width: number, theme: Theme): string[] {
     return rows;
 }
 
+/** Delegate children cost against the whole set; the id prefix is the only marker of a delegate session. */
+function delegateSplit(records: UsageRecord[]): Delegates {
+    let cost = 0;
+    let total = 0;
+    for (const record of records) {
+        total += record.cost;
+        if (record.sessionId.startsWith(DELEGATE_PREFIX)) cost += record.cost;
+    }
+    return { cost, share: total > 0 ? cost / total : 0 };
+}
+
 /** Cost, volume and token cells; one group per column so the three start side by side. */
 function kpiGroups(model: SummaryModel, theme: Theme): Cell[][] {
     const { stats } = model;
@@ -194,6 +238,13 @@ function kpiGroups(model: SummaryModel, theme: Theme): Cell[][] {
             { label: "Total", value: cellValue(formatCost(stats.cost), true, theme) },
             { label: "Per day", value: cellValue(formatCost(model.perDay), false, theme) },
             { label: "Per session", value: cellValue(formatCost(model.perSession), false, theme) },
+            {
+                label: "Delegates",
+                value:
+                    cellValue(formatCost(model.delegates.cost), false, theme) +
+                    "  " +
+                    theme.fg("muted", `${Math.round(100 * model.delegates.share)}%`),
+            },
         ],
         [
             { label: "Reqs", value: cellValue(formatTokens(model.requests), false, theme) },
@@ -234,21 +285,52 @@ function kpiBlock(groups: Cell[][], width: number, theme: Theme): string[] {
     );
 }
 
-function trendCells(model: SummaryModel, width: number, theme: Theme): Cell[] {
+/** Total, then per day, then the change against the previous period. */
+function trendRows(model: SummaryModel, theme: Theme): TrendRow[] {
     const trends = model.trends!;
-    /** Bold average, colored delta, muted comparison; only the suffix is dropped when space runs out. */
-    function trend(label: string, average: number, delta: number, suffix: string): Cell {
-        const avg = `${formatCost(average)}/day`;
-        const change = deltaText(delta, theme);
-        // grid() skips its width test for a single column, so an oversized value would be cut mid-word.
-        const fits = visibleWidth(`${label}  ${avg}  ${change} ${suffix}`) <= width;
-        return { label, value: `${theme.bold(avg)}  ${change}${fits ? theme.fg("muted", ` ${suffix}`) : ""}` };
-    }
     return [
-        { label: "Today", value: cellValue(formatCost(trends.today), true, theme) },
-        trend("This week", trends.week, trends.weekDelta, "vs last week"),
-        trend("This month", trends.month, trends.monthDelta, "vs last month"),
+        { label: "Today", total: formatCost(trends.today), accent: true },
+        {
+            label: "This week",
+            total: formatCost(trends.weekTotal),
+            perDay: `${formatCost(trends.week)}/day`,
+            delta: deltaText(trends.weekDelta, theme),
+            suffix: "vs last week",
+        },
+        {
+            label: "This month",
+            total: formatCost(trends.monthTotal),
+            perDay: `${formatCost(trends.month)}/day`,
+            delta: deltaText(trends.monthDelta, theme),
+            suffix: "vs last month",
+        },
+        {
+            label: "Projected",
+            total: formatCost(trends.projection),
+            suffix: `vs ${formatCost(trends.lastMonthTotal)} last month`,
+        },
     ];
+}
+
+/** The per-day columns go before the total is dropped, and the wording goes last: the total always stays. */
+function trendCells(model: SummaryModel, width: number, theme: Theme): Cell[] {
+    const rows = trendRows(model, theme);
+    const labelWidth = Math.max(...rows.map((row) => visibleWidth(row.label)));
+    const totalWidth = Math.max(...rows.map((row) => visibleWidth(row.total)));
+    const perDayWidth = Math.max(...rows.map((row) => visibleWidth(row.perDay ?? "")));
+    const deltaWidth = Math.max(...rows.map((row) => visibleWidth(row.delta ?? "")));
+    // One decision for the whole block: a column shown on some rows only would break the alignment.
+    const detailed = labelWidth + 2 + totalWidth + 2 + perDayWidth + 2 + deltaWidth <= width;
+    return rows.map((row) => {
+        const total = padWidth(cellValue(row.total, row.accent === true, theme), totalWidth);
+        const perDay = detailed && row.perDay !== undefined ? "  " + padWidth(theme.bold(row.perDay), perDayWidth) : "";
+        const delta = detailed && row.delta !== undefined ? "  " + row.delta : "";
+        const value = total + perDay + delta;
+        const suffix = row.suffix === undefined ? "" : ` ${row.suffix}`;
+        // grid() skips its width test for a single column, so an oversized row would be cut mid-word.
+        const fits = labelWidth + 2 + visibleWidth(value) + visibleWidth(suffix) <= width;
+        return { label: row.label, value: value + (fits ? theme.fg("muted", suffix) : "") };
+    });
 }
 
 function days(count: number): string {
@@ -296,15 +378,24 @@ function sideBySide(blocks: string[][], widths: number[]): string[] {
     return lines;
 }
 
-function listRow(lists: List[], totalCost: number, width: number, theme: Theme): string[] {
-    const widths = rowWidths(width, lists.length);
+/** One row of lists at the given column widths, so the pairs line up down the rows. */
+function listRow(lists: List[], widths: number[], totalCost: number, theme: Theme): string[] {
     return sideBySide(
         lists.map((list, column) => listBlock(list, totalCost, widths[column]!, theme)),
         widths,
     );
 }
 
-/** Trends and streaks share a row while each keeps a readable width. */
+/** A section's heading and its cell grid, rendered into `width`. */
+function sectionBlock(section: Section, width: number, theme: Theme): string[] {
+    const bodyWidth = Math.max(1, width - INDENT.length);
+    return [
+        heading(theme, section.title),
+        ...indent(grid(section.cells(bodyWidth), bodyWidth, section.maxColumns, theme)),
+    ];
+}
+
+/** Trends and streaks share a row while each keeps its content width instead of an even share. */
 function sections(items: Section[], width: number, theme: Theme): string[] {
     const count = Math.max(
         1,
@@ -314,17 +405,19 @@ function sections(items: Section[], width: number, theme: Theme): string[] {
     for (let start = 0; start < items.length; start += count) {
         if (lines.length > 0) lines.push("");
         const row = items.slice(start, start + count);
-        const widths = rowWidths(width, row.length);
+        // Render at the full width first: a section that needs less keeps its wording and sits next to its
+        // neighbour instead of being squeezed into half the terminal.
+        const natural = row.map((section) => sectionBlock(section, width, theme));
+        const widths = natural.map((block) => Math.max(...block.map((line) => visibleWidth(line))));
+        if (widths.reduce((sum, column) => sum + column, 0) + COLUMN_GAP * (row.length - 1) <= width) {
+            lines.push(...sideBySide(natural, widths));
+            continue;
+        }
+        const share = rowWidths(width, row.length);
         lines.push(
             ...sideBySide(
-                row.map((section, column) => {
-                    const bodyWidth = Math.max(1, widths[column]! - INDENT.length);
-                    return [
-                        heading(theme, section.title),
-                        ...indent(grid(section.cells(bodyWidth), bodyWidth, section.maxColumns, theme)),
-                    ];
-                }),
-                widths,
+                row.map((section, column) => sectionBlock(section, share[column]!, theme)),
+                share,
             ),
         );
     }
@@ -476,9 +569,11 @@ export function summaryModel(
         trends: withTrends ? trends(records, now) : undefined,
         top: {
             models: topGroups(records, 0, Infinity, "model"),
+            providers: topGroups(records, 0, Infinity, "provider"),
             projects: topGroups(records, 0, Infinity, "project"),
             sessions: topSessions(records, 0, Infinity),
         },
+        delegates: delegateSplit(records),
     };
 }
 
@@ -495,27 +590,24 @@ export function summaryLines(model: SummaryModel, width: number, theme: Theme): 
     const lists = (
         [
             { title: "Models", mode: "model", rows: model.top.models },
+            { title: "Providers", mode: "provider", rows: model.top.providers },
             { title: "Projects", mode: "project", rows: model.top.projects },
+            { title: "Sessions", rows: model.top.sessions },
         ] satisfies List[]
     ).filter((list) => list.rows.length > 0);
-    let listColumn = width;
-    if (lists.length > 0) {
-        // Names are the point of a list, so two blocks share a row only while both keep them readable.
-        const needed = lists.reduce((sum, list) => sum + listWidth(list, width), 0) + COLUMN_GAP * (lists.length - 1);
-        if (needed <= width) {
-            listColumn = rowWidths(width, lists.length)[0]!;
-            lines.push("", ...listRow(lists, model.stats.cost, width, theme));
-        } else {
-            for (const list of lists) lines.push("", ...listBlock(list, model.stats.cost, width, theme));
-        }
-    }
-    const sessions: List = { title: "Sessions", rows: model.top.sessions };
-    if (sessions.rows.length > 0) {
-        // Session names carry the date and the id, so the block outgrows its column rather than cut them.
-        lines.push(
-            "",
-            ...listBlock(sessions, model.stats.cost, Math.max(listColumn, listWidth(sessions, width)), theme),
-        );
+    // A list column is as wide as the widest list that lands in it, so the pairs line up down the rows and
+    // stop at their content instead of hugging the right edge of a wide terminal.
+    const listColumns = Array.from({ length: LISTS_PER_ROW }, (_, column) =>
+        Math.max(
+            0,
+            ...lists.filter((_, index) => index % LISTS_PER_ROW === column).map((list) => listWidth(list, width)),
+        ),
+    );
+    const paired = lists.length > 1 && listColumns.reduce((sum, column) => sum + column, 0) + COLUMN_GAP <= width;
+    for (let start = 0; start < lists.length; start += paired ? LISTS_PER_ROW : 1) {
+        const row = lists.slice(start, start + (paired ? LISTS_PER_ROW : 1));
+        const widths = row.map((_, column) => (paired ? listColumns[column]! : width));
+        lines.push("", ...listRow(row, widths, model.stats.cost, theme));
     }
     return lines;
 }

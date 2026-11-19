@@ -366,9 +366,12 @@ export function comparison(records: UsageRecord[], now = Date.now()) {
     return {
         today: todayCost,
         week: weekCost / windowDays(weekStart, until),
+        weekTotal: weekCost,
         lastWeek: lastWeekCost / 7,
         month: monthCost / windowDays(monthStart, until),
+        monthTotal: monthCost,
         lastMonth: lastMonthCost / windowDays(lastMonth, monthStart),
+        lastMonthTotal: lastMonthCost,
     };
 }
 

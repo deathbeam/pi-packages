@@ -143,15 +143,21 @@ describe("usage dashboard render", () => {
     it("opens on the summary view and renders every section", async () => {
         const tall = mount(sessionDir, 80);
         await loaded(tall);
-        for (const width of [40, 80, 100, 160]) {
-            const text = tall.render(width).join("\n");
+        for (const width of [40, 60, 80, 100, 160]) {
+            const lines = tall.render(width);
+            for (const [i, line] of lines.entries())
+                assert.ok(visibleWidth(line) <= width, `width ${width}: line ${i} is ${visibleWidth(line)} wide`);
+            const text = lines.join("\n");
             for (const part of [
                 "[Summary]",
                 "Total",
+                "Delegates",
                 "Trends",
+                "Projected",
                 "Streaks",
                 "Activity",
                 "Models",
+                "Providers",
                 "Projects",
                 "Sessions",
             ])
@@ -159,7 +165,7 @@ describe("usage dashboard render", () => {
         }
         const view = mount();
         await loaded(view);
-        for (const width of [40, 80, 100, 160]) assertFits(view, width);
+        for (const width of [40, 60, 100, 160]) assertFits(view, width);
         // Enter does nothing on a view without rows, and the tab bar keeps Summary selected.
         view.handleInput("\r");
         assert.ok(view.render(100)[0]!.includes("[Summary]"));
@@ -341,6 +347,80 @@ describe("summary layout", () => {
     it("prefixes each session with its start date", () => {
         const text = summaryLines(summaryModel(records, false, now), 100, theme).join("\n");
         assert.ok(text.includes("05-18 01a05b pi-packages"), text);
+    });
+
+    it("projects the month and splits the delegate cost out of the totals", () => {
+        const delegates = [...records, { ...record(now, 5), sessionId: "delegate-cee55d71" }];
+        const text = summaryLines(summaryModel(delegates, true, now), 100, theme).join("\n");
+        assert.ok(text.includes("Delegates") && text.includes("26%"), text); // 5 of 19 dollars
+        assert.ok(text.includes("Projected") && text.includes("$"), text);
+        const narrow = summaryLines(summaryModel(records, true, now), 24, theme).find((line) =>
+            line.includes("Projected"),
+        );
+        assert.ok(narrow?.includes("$"), `projection row at 24: ${narrow}`);
+        assert.ok(!narrow?.includes("last month"), `no room for the wording at 24: ${narrow}`);
+        assert.ok(
+            !summaryLines(summaryModel(records, false, now), 100, theme)
+                .join("\n")
+                .includes("Projected"),
+        );
+    });
+
+    it("pairs models with providers and projects with sessions when wide", () => {
+        const model = summaryModel(records, false, now);
+        const rows = summaryLines(model, 120, theme);
+        assert.ok(
+            rows.some((line) => line.includes("Models") && line.includes("Providers")),
+            rows.join("\n"),
+        );
+        assert.ok(
+            rows.some((line) => line.includes("Projects") && line.includes("Sessions")),
+            rows.join("\n"),
+        );
+        const narrow = summaryLines(model, 60, theme);
+        for (const title of ["Models", "Providers", "Projects", "Sessions"])
+            assert.ok(
+                narrow.some((line) => line.trim() === title),
+                `narrow keeps ${title} on its own row`,
+            );
+    });
+
+    it("puts the period total before the per-day average", () => {
+        const week = summaryLines(summaryModel(records, true, now), 100, theme).find((line) =>
+            line.includes("This week"),
+        )!;
+        assert.ok(week.indexOf("$12.00") < week.indexOf("/day"), week); // $12 spent, $4.00 per day
+        assert.ok(week.indexOf("/day") < Math.max(week.indexOf("▲"), week.indexOf("▼")), week);
+        assert.ok(week.includes("vs last week"), week);
+    });
+
+    it("aligns the trend labels, totals, averages and changes", () => {
+        const rows = summaryLines(summaryModel(records, true, now), 100, theme).filter((line) =>
+            ["Today", "This week", "This month", "Projected"].some((label) => line.trim().startsWith(label)),
+        );
+        assert.equal(rows.length, 4, rows.join("\n"));
+        assert.equal(new Set(rows.map((line) => line.indexOf("$"))).size, 1, "the totals share a column");
+        const averaged = rows.filter((line) => line.includes("/day"));
+        assert.equal(new Set(averaged.map((line) => line.indexOf("/day"))).size, 1, "the averages share a column");
+        const deltas = averaged.map((line) => Math.max(line.indexOf("▲"), line.indexOf("▼")));
+        assert.equal(new Set(deltas).size, 1, `the changes share a column: ${averaged.join("\n")}`);
+    });
+
+    it("compares the projection with last month's total", () => {
+        const april = [...records, record(new Date(2025, 3, 15, 12).getTime(), 8)];
+        const line = summaryLines(summaryModel(april, true, now), 100, theme).find((row) => row.includes("Projected"))!;
+        assert.ok(line.includes("vs $8.00 last month"), line);
+        assert.ok(!line.includes("%"), "the per-day change already carries the percentage");
+    });
+
+    it("keeps side-by-side blocks at their content width on a wide terminal", () => {
+        const wide = summaryLines(summaryModel(records, false, now), 160, theme);
+        const streaks = wide.find((line) => line.includes("Streaks"))!;
+        assert.ok(streaks.indexOf("Streaks") < 80, `streaks at ${streaks.indexOf("Streaks")}: ${streaks}`);
+        const providers = wide.find((line) => line.includes("Providers"))!;
+        const sessions = wide.find((line) => line.includes("Projects") && line.includes("Sessions"))!;
+        assert.ok(providers.indexOf("Providers") < 80, `providers at ${providers.indexOf("Providers")}`);
+        assert.equal(providers.indexOf("Providers"), sessions.indexOf("Sessions"), "the pairs share a column");
     });
 
     it("stacks the top lists on a narrow terminal so names stay readable", async () => {
