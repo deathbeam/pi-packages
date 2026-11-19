@@ -185,10 +185,7 @@ describe("collectUsage", () => {
             usage: messageUsage({ cost: 0.25 }),
             message: { role: "assistant", provider: "inferhub", model: "glm-5.3", content: [] },
         });
-        const tree = sessionTree([
-            artifact,
-            JSON.stringify({ role: "assistant", usage: messageUsage({ cost: 0.5 }) }),
-        ]);
+        const tree = sessionTree([artifact, JSON.stringify({ role: "assistant", usage: messageUsage({ cost: 0.5 }) })]);
         const parsed = await collectUsage(tree.sessions);
         assert.deepEqual(
             parsed.map((record) => [record.provider, record.model]),
@@ -197,8 +194,7 @@ describe("collectUsage", () => {
                 ["(summaries)", "unknown"],
             ],
         );
-        for (const name of buildRows(parsed, 0, "model").map((row) => row.name))
-            assert.equal(typeof name, "string");
+        for (const name of buildRows(parsed, 0, "model").map((row) => row.name)) assert.equal(typeof name, "string");
     });
 
     it("returns nothing for a directory that does not exist", async () => {
