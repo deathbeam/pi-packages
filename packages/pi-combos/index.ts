@@ -90,6 +90,26 @@ function pendingModel(name: string): ProviderModelConfig {
     };
 }
 
+/** For a member that throws instead of streaming an error. */
+function failedEvent(model: Model<Api>, error: unknown, reason: "error" | "aborted"): ErrorEvent {
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+    return {
+        type: "error",
+        reason,
+        error: {
+            role: "assistant",
+            content: [],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: { ...usage, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: reason,
+            errorMessage: error instanceof Error ? error.message : String(error),
+            timestamp: Date.now(),
+        },
+    };
+}
+
 /**
  * Tries members in order; a member that fails before any output hands over to the next one and
  * moves to the back of the list, for twice as long on each failure in a row.
@@ -103,34 +123,48 @@ async function pipe(
     options: SimpleStreamOptions,
 ): Promise<void> {
     const cooling = (model: Model<Api>) => (cooldowns.get(memberKey(model))?.until ?? 0) > Date.now();
-    const ordered = [...members.filter((member) => !cooling(member)), ...members.filter(cooling)];
+    const failed = (model: Model<Api>) => {
+        const failures = (cooldowns.get(memberKey(model))?.failures ?? 0) + 1;
+        cooldowns.set(memberKey(model), {
+            failures,
+            until: Date.now() + Math.min(COOLDOWN_MS * 2 ** (failures - 1), MAX_COOLDOWN_MS),
+        });
+    };
     let failure: ErrorEvent | undefined;
+    const ordered = [...members.filter((member) => !cooling(member)), ...members.filter(cooling)];
     for (const member of ordered) {
         let start: AssistantMessageEvent | undefined;
         let started = false;
-        for await (const event of registry.streamSimple(member, context, options)) {
-            if (!started) {
-                if (event.type === "start") {
-                    start = event;
-                    continue;
+        try {
+            for await (const event of registry.streamSimple(member, context, options)) {
+                if (!started) {
+                    if (event.type === "start") {
+                        start = event;
+                        continue;
+                    }
+                    if (event.type === "error" && event.reason !== "aborted") {
+                        failure = event;
+                        failed(member);
+                        break;
+                    }
+                    started = true;
+                    cooldowns.delete(memberKey(member));
+                    // pi ignores updates that arrive before start.
+                    if (start) out.push(start);
                 }
-                if (event.type === "error" && event.reason !== "aborted") {
-                    failure = event;
-                    const failures = (cooldowns.get(memberKey(member))?.failures ?? 0) + 1;
-                    cooldowns.set(memberKey(member), {
-                        failures,
-                        until: Date.now() + Math.min(COOLDOWN_MS * 2 ** (failures - 1), MAX_COOLDOWN_MS),
-                    });
-                    break;
-                }
-                started = true;
-                cooldowns.delete(memberKey(member));
-                // pi ignores updates that arrive before start.
-                if (start) out.push(start);
+                out.push(event);
+                if (event.type === "done") return out.end(event.message);
+                if (event.type === "error") return out.end(event.error);
             }
-            out.push(event);
-            if (event.type === "done") return out.end(event.message);
-            if (event.type === "error") return out.end(event.error);
+        } catch (error) {
+            const event = failedEvent(member, error, options.signal?.aborted ? "aborted" : "error");
+            // Output already reached pi, or the user aborted: nothing to fall back from.
+            if (started || event.reason === "aborted") {
+                out.push(event);
+                return out.end(event.error);
+            }
+            failure = event;
+            failed(member);
         }
     }
     // shortcut: every member stream ends with done or error, so a silent one ends this stream without a result.
@@ -139,7 +173,7 @@ async function pipe(
 }
 
 export default function (pi: ExtensionAPI) {
-    let combos = new Map<string, Model<Api>[]>();
+    let combos = new Map<string, string[]>();
     const cooldowns = new Map<string, Cooldown>();
     let registry: ModelRegistry | undefined;
 
@@ -152,8 +186,9 @@ export default function (pi: ExtensionAPI) {
             apiKey: PROVIDER,
             models,
             streamSimple: (model, context, options) => {
-                const members = combos.get(model.id);
-                if (!registry || !members) throw new Error(`Combo ${model.id} has no known models`);
+                // Resolved per request: pi-inferhub and similar providers register their models after session_start.
+                const members = combos.get(model.id)?.flatMap((ref) => (registry && findModel(ref, registry)) || []);
+                if (!registry || !members?.length) throw new Error(`Combo ${model.id} has no known models`);
                 // Drop the combo's own credentials so each member resolves its own.
                 const { apiKey: _apiKey, headers: _headers, env: _env, ...rest } = options ?? {};
                 const out = createAssistantMessageEventStream();
@@ -172,6 +207,7 @@ export default function (pi: ExtensionAPI) {
         registry = current;
         combos = new Map();
         const unknown: string[] = [];
+        const known: ProviderModelConfig[] = [];
         const { combos: configured, invalid } = readCombos(ctx.cwd, ctx.isProjectTrusted());
         for (const [name, refs] of configured) {
             const members = refs.flatMap((ref) => {
@@ -179,13 +215,15 @@ export default function (pi: ExtensionAPI) {
                 if (!model) unknown.push(ref);
                 return model ? [model] : [];
             });
-            if (members.length > 0) combos.set(name, members);
+            if (members.length === 0) continue;
+            combos.set(name, refs);
+            known.push(comboModel(name, members));
         }
 
-        if (combos.size > 0) register([...combos].map(([name, members]) => comboModel(name, members)));
+        if (combos.size > 0) register(known);
         else pi.unregisterProvider(PROVIDER);
         if (unknown.length > 0 && ctx.hasUI)
-            ctx.ui.notify(`Combos skip unknown models: ${unknown.join(", ")}`, "warning");
+            ctx.ui.notify(`Combos cannot find models yet: ${unknown.join(", ")}`, "warning");
         if (invalid && ctx.hasUI) ctx.ui.notify(`Combos ignore invalid JSON in ${invalid}`, "warning");
     });
 }

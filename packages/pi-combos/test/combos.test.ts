@@ -82,11 +82,39 @@ const failed = (reason: "error" | "aborted" = "error"): AssistantMessageEvent =>
     error: message(reason, reason),
 });
 
+/** Exactly what pi-ai's anthropic provider pushes for a 429: one error event, no start. */
+const rateLimited = (): AssistantMessageEvent => ({
+    type: "error",
+    reason: "error",
+    error: {
+        ...message("claude-opus-5-5", "error"),
+        api: "anthropic-messages",
+        provider: "anthropic",
+        content: [],
+        usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        errorMessage:
+            '429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+    },
+});
+
+const replied = (id: string): AssistantMessageEvent[] => [
+    { type: "start", partial: message(id) },
+    { type: "text_start", contentIndex: 0, partial: message(id) },
+    { type: "done", reason: "stop", message: message(id) },
+];
+
 /** Writes project combos into a fresh cwd and runs session_start against a fake registry. */
 function start(
     combos: Record<string, string[]>,
     models: Model<any>[],
-    replies: Record<string, AssistantMessageEvent[]>,
+    replies: Record<string, AssistantMessageEvent[] | Error>,
     options: { trusted?: boolean; hasUI?: boolean; settings?: string } = {},
 ) {
     const cwd = mkdtempSync(join(tmpdir(), "pi-combos-cwd-"));
@@ -107,7 +135,9 @@ function start(
         find: (provider: string, id: string) => models.find((entry) => entry.provider === provider && entry.id === id),
         streamSimple: (member: Model<any>, _context: unknown, options: SimpleStreamOptions | undefined) => {
             calls.push({ member, options });
-            return scripted(replies[member.id] ?? [failed()]);
+            const reply = replies[member.id] ?? [failed()];
+            if (reply instanceof Error) throw reply;
+            return scripted(reply);
         },
     };
 
@@ -125,7 +155,7 @@ function start(
             },
         );
     }
-    return { provider: providers.get("combo"), calls, notifications };
+    return { provider: providers.get("combo"), calls, notifications, models };
 }
 
 const PROVIDER = "combo";
@@ -290,6 +320,44 @@ describe("pi-combos", () => {
         assert.deepEqual(
             calls.map((call) => call.member.id),
             ["flaky"],
+        );
+    });
+
+    it("falls back to a member whose model registers after session_start", async () => {
+        // pi-inferhub publishes its catalog asynchronously, so the model can miss session_start.
+        const { provider, calls, models } = start(
+            { smart: ["anthropic/flaky", "inferhub/late"] },
+            [model("anthropic", "flaky")],
+            { flaky: [rateLimited()], late: replied("late") },
+        );
+        assert.ok(provider, "combo provider registered");
+        models.push(model("inferhub", "late"));
+
+        const { result } = await send(provider, {});
+        assert.equal(result.model, "late");
+        assert.deepEqual(
+            calls.map((call) => call.member.id),
+            ["flaky", "late"],
+        );
+    });
+
+    it("falls back when a member stream throws before output", async () => {
+        const { provider, calls } = start(
+            { smart: ["anthropic/flaky", "openai/ok"] },
+            [model("anthropic", "flaky"), model("openai", "ok")],
+            { flaky: new Error("socket hang up"), ok: replied("ok") },
+        );
+        assert.ok(provider, "combo provider registered");
+
+        const { events, result } = await send(provider, {});
+        assert.equal(result.model, "ok");
+        assert.deepEqual(
+            events.map((event) => event.type),
+            ["start", "text_start", "done"],
+        );
+        assert.deepEqual(
+            calls.map((call) => call.member.id),
+            ["flaky", "ok"],
         );
     });
 
