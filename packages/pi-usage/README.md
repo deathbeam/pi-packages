@@ -2,7 +2,7 @@
 
 Use the `/usage` command for a fullscreen dashboard of token usage and cost. It opens on a Summary and has per-day, per-provider, per-model and per-project views.
 
-The Summary covers totals, trends with a month projection, the delegate share of the cost, activity and the top models, providers, projects and sessions.
+The Summary covers totals, trends with a month projection, the delegate share of the cost, activity and the top models, providers, projects, sessions, tools and skills.
 
 ## Installation
 

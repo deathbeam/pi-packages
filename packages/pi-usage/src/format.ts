@@ -53,14 +53,20 @@ export function shareBar(cost: number, totalCost: number, theme: Theme): string 
     );
 }
 
-/** One top list row: name, share bar and cost. */
-export function topLine(row: GroupRow, totalCost: number, nameWidth: number, theme: Theme): string {
-    return [
-        padWidth(fitLabel(row.name, nameWidth), nameWidth),
-        shareBar(row.stats.cost, totalCost, theme),
-        formatCost(row.stats.cost).padStart(9),
-    ].join(" ");
+/** One top list row: name, share bar and a right-aligned value. */
+function listLine(name: string, share: number, total: number, value: string, nameWidth: number, theme: Theme): string {
+    return [padWidth(fitLabel(name, nameWidth), nameWidth), shareBar(share, total, theme), value.padStart(9)].join(" ");
 }
+
+export function topLine(row: GroupRow, totalCost: number, nameWidth: number, theme: Theme): string {
+    return listLine(row.name, row.stats.cost, totalCost, formatCost(row.stats.cost), nameWidth, theme);
+}
+
+/** A top list row by call count instead of cost: the bar shows the share of calls. */
+export function callLine(row: GroupRow, totalCalls: number, nameWidth: number, theme: Theme): string {
+    return listLine(row.name, row.requests, totalCalls, formatTokens(row.requests), nameWidth, theme);
+}
+
 /** `theme` marks a weekend day; the breadcrumb and list callers leave the weekday suffix plain. */
 export function displayName(mode: GroupMode, name: string, theme?: Theme): string {
     if (mode === "day") {

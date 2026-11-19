@@ -30,6 +30,9 @@ function sessionHeader(id: string, cwd: string): string {
     return JSON.stringify({ type: "session", version: 3, id, cwd });
 }
 
+/** Every message calls `bash` and reads one skill, so the tool and skill lists have data. */
+const skillPath = "/home/deathbeam/.agents/skills/codebase-design/SKILL.md";
+
 function messageLine(provider: string, model: string, ts: number, cost: number, tokens: number): string {
     return JSON.stringify({
         type: "message",
@@ -38,6 +41,10 @@ function messageLine(provider: string, model: string, ts: number, cost: number, 
             provider,
             model,
             timestamp: ts,
+            content: [
+                { type: "toolCall", id: `call-${ts}`, name: "bash", arguments: { command: "ls" } },
+                { type: "toolCall", id: `read-${ts}`, name: "read", arguments: { path: skillPath } },
+            ],
             usage: {
                 input: tokens,
                 output: Math.round(tokens / 10),
@@ -160,6 +167,8 @@ describe("usage dashboard render", () => {
                 "Providers",
                 "Projects",
                 "Sessions",
+                "Tools",
+                "Skills",
             ])
                 assert.ok(text.includes(part), `width ${width}: missing ${part}`);
         }
@@ -286,6 +295,8 @@ describe("summary layout", () => {
             cwd: "/home/deathbeam/git/pi-packages",
             sessionId: "01a05b",
             requests: 1,
+            tools: {},
+            skills: {},
         };
     }
     // Four days, so the heatmap has one cell per level and 2025-05-21 is the busiest.
@@ -383,6 +394,46 @@ describe("summary layout", () => {
                 narrow.some((line) => line.trim() === title),
                 `narrow keeps ${title} on its own row`,
             );
+    });
+
+    it("ranks tools and skills by call count next to each other", () => {
+        const called = records.map((record, index) => ({
+            ...record,
+            tools: { bash: 100 - index * 10, read: 20, edit: 5 },
+            skills: { "codebase-design": 3, ponytail: 1 },
+        }));
+        const model = summaryModel(called, false, now);
+        assert.deepEqual(
+            model.top.tools.map((row) => [row.name, row.requests]),
+            [
+                ["bash", 340],
+                ["read", 80],
+                ["edit", 20],
+            ],
+        );
+        assert.equal(model.top.toolCalls, 440);
+        assert.deepEqual(
+            model.top.skills.map((row) => [row.name, row.requests]),
+            [
+                ["codebase-design", 12],
+                ["ponytail", 4],
+            ],
+        );
+        for (const width of [40, 60, 100]) {
+            const lines = summaryLines(model, width, theme);
+            for (const [i, line] of lines.entries())
+                assert.ok(visibleWidth(line) <= width, `width ${width}: line ${i} is ${visibleWidth(line)} wide`);
+            const text = lines.join("\n");
+            for (const part of ["Tools", "Skills", "bash", "codebase"])
+                assert.ok(text.includes(part), `width ${width}: missing ${part}`);
+        }
+        const wide = summaryLines(model, 120, theme);
+        assert.ok(
+            wide.some((line) => line.includes("Tools") && line.includes("Skills")),
+            wide.join("\n"),
+        );
+        const bash = wide.find((line) => line.includes("bash"))!;
+        assert.ok(bash.includes("77%") && bash.includes(" 340 "), `share of calls and count: ${bash}`);
     });
 
     it("puts the period total before the per-day average", () => {

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export type UsageRecord = {
     provider: string;
@@ -21,6 +21,10 @@ export type UsageRecord = {
     sessionId: string;
     /** Assistant messages this record stands for. */
     requests: number;
+    /** Tool calls this record stands for, by tool name. */
+    tools: Record<string, number>;
+    /** Skill uses this record stands for, by skill name. */
+    skills: Record<string, number>;
 };
 
 export type Stats = {
@@ -59,7 +63,7 @@ export type TimeWindow = { since: number; until: number };
 
 type Tally = { stats: Stats; requests: number; models?: Map<string, Tally> };
 
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 6;
 
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -88,6 +92,8 @@ function aggregate(records: UsageRecord[]): UsageRecord[] {
         addStats(bucket, record);
         bucket.ts = Math.max(bucket.ts, record.ts);
         bucket.requests += record.requests;
+        addCalls(bucket.tools, record.tools);
+        addCalls(bucket.skills, record.skills);
     }
     return [...buckets.values()];
 }
@@ -98,6 +104,10 @@ function addStats(stats: Stats, record: UsageRecord): void {
     stats.output += record.output;
     stats.cacheRead += record.cacheRead;
     stats.cacheWrite += record.cacheWrite;
+}
+
+function addCalls(into: Record<string, number>, from: Record<string, number>): void {
+    for (const [name, calls] of Object.entries(from)) into[name] = (into[name] ?? 0) + calls;
 }
 
 function recordKey(record: UsageRecord, mode: GroupMode): string {
@@ -150,6 +160,22 @@ async function writeCache(file: string, files: Record<string, CacheEntry>): Prom
     } catch {
         await unlink(temp).catch(() => undefined);
     }
+}
+
+/** Tool calls in one assistant message; a `read` of a `<skill dir>/SKILL.md` is a use of that skill. */
+function toolCalls(content: unknown): { tools: Record<string, number>; skills: Record<string, number> } {
+    const tools: Record<string, number> = {};
+    const skills: Record<string, number> = {};
+    if (!Array.isArray(content)) return { tools, skills };
+    for (const part of content) {
+        if (part?.type !== "toolCall" || typeof part.name !== "string") continue;
+        tools[part.name] = (tools[part.name] ?? 0) + 1;
+        const path = typeof part.arguments?.path === "string" ? part.arguments.path : "";
+        if (part.name !== "read" || basename(path) !== "SKILL.md") continue;
+        const skill = basename(dirname(path));
+        skills[skill] = (skills[skill] ?? 0) + 1;
+    }
+    return { tools, skills };
 }
 
 /** Throws only on read errors, so a partial parse is never cached. */
@@ -212,6 +238,7 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
         // An aborted request (delegate children report one) carries no usage; counting it adds a phantom row.
         if (cost === 0 && input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) continue;
         const stamp = entry.type === "message" ? message.timestamp : entry.timestamp;
+        const { tools, skills } = toolCalls(entry.type === "message" ? message.content : undefined);
         records.push({
             provider,
             model,
@@ -222,6 +249,8 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             cacheRead,
             cacheWrite,
             requests: 1,
+            tools,
+            skills,
             cwd,
             sessionId,
         });

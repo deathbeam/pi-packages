@@ -54,10 +54,10 @@ function messageUsage(over: Record<string, unknown> = {}) {
     };
 }
 
-function messageLine(provider: string, model: string, ts: number, usage: unknown): string {
+function messageLine(provider: string, model: string, ts: number, usage: unknown, content: unknown[] = []): string {
     return JSON.stringify({
         type: "message",
-        message: { role: "assistant", provider, model, timestamp: ts, usage },
+        message: { role: "assistant", provider, model, timestamp: ts, content, usage },
     });
 }
 
@@ -76,6 +76,8 @@ function usageRecord(over: Partial<UsageRecord> = {}): UsageRecord {
         cwd: "/tmp",
         sessionId: "s1",
         requests: 1,
+        tools: {},
+        skills: {},
         ...over,
     };
 }
@@ -189,6 +191,32 @@ describe("collectUsage", () => {
             [["(summaries)", "unknown"]],
         );
         for (const name of buildRows(parsed, 0, "model").map((row) => row.name)) assert.equal(typeof name, "string");
+    });
+
+    it("counts tool calls and skill reads, merged per day", async () => {
+        const tree = tempDir("pi-usage-tools-");
+        function toolCall(name: string, args: Record<string, unknown>) {
+            return { type: "toolCall", id: `call-${name}`, name, arguments: args };
+        }
+        writeFileSync(
+            join(tree, "session.jsonl"),
+            [
+                sessionHeader("s1", "/tmp"),
+                messageLine("anthropic", "claude-x", daysAgo(0), messageUsage(), [
+                    toolCall("read", { path: "/home/x/.agents/skills/prepare-plan/SKILL.md" }),
+                    toolCall("bash", { command: "ls" }),
+                ]),
+                messageLine("anthropic", "claude-x", daysAgo(0) + 1000, messageUsage(), [
+                    toolCall("bash", { command: "ls" }),
+                    toolCall("read", { path: "/tmp/notes.md" }),
+                    toolCall("edit", { path: "/tmp/notes.md", oldText: "a", newText: "b" }),
+                ]),
+            ].join("\n"),
+        );
+        const [record, ...rest] = await collectUsage(tree);
+        assert.equal(rest.length, 0, "both messages count into one day record");
+        assert.deepEqual(record!.tools, { read: 2, bash: 2, edit: 1 });
+        assert.deepEqual(record!.skills, { "prepare-plan": 1 }, "only a SKILL.md read names a skill");
     });
 
     it("returns nothing for a directory that does not exist", async () => {
@@ -668,7 +696,16 @@ describe("summaryModel", () => {
         assert.deepEqual(empty.streak, { current: 0, longest: 0 });
         assert.equal(empty.busiest, undefined);
         assert.deepEqual(empty.daily, []);
-        assert.deepEqual(empty.top, { models: [], providers: [], projects: [], sessions: [] });
+        assert.deepEqual(empty.top, {
+            models: [],
+            providers: [],
+            projects: [],
+            sessions: [],
+            tools: [],
+            skills: [],
+            toolCalls: 0,
+            skillCalls: 0,
+        });
         assert.deepEqual(empty.delegates, { cost: 0, share: 0 });
     });
 });

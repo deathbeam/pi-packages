@@ -3,7 +3,7 @@
 import { basename } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { deltaText, displayName, formatCost, formatTokens, hitPct, padWidth, topLine } from "./format.ts";
+import { callLine, deltaText, displayName, formatCost, formatTokens, hitPct, padWidth, topLine } from "./format.ts";
 import {
     buildRows,
     comparison,
@@ -46,6 +46,11 @@ export type TopLists = {
     providers: GroupRow[];
     projects: GroupRow[];
     sessions: GroupRow[];
+    tools: GroupRow[];
+    skills: GroupRow[];
+    /** Calls behind the tool and skill lists, the denominator of their share bars. */
+    toolCalls: number;
+    skillCalls: number;
 };
 
 /** Delegate child sessions and their share of the total cost, as a fraction. */
@@ -54,7 +59,8 @@ export type Delegates = { cost: number; share: number };
 type Cell = { label: string; value: string };
 type GridColumn = { label: number; width: number };
 type TrendRow = { label: string; total: string; perDay?: string; delta?: string; suffix?: string; accent?: boolean };
-type List = { title: string; mode?: GroupMode; rows: GroupRow[] };
+/** `calls` switches a list from cost to call counts: the bar and value then show `requests`. */
+type List = { title: string; mode?: GroupMode; rows: GroupRow[]; calls?: number };
 type Section = { title: string; maxColumns: number; cells: (width: number) => Cell[] };
 
 export type SummaryModel = {
@@ -344,13 +350,16 @@ function listName(list: List, row: GroupRow): string {
 function listBlock(list: List, totalCost: number, width: number, theme: Theme): string[] {
     const bodyWidth = Math.max(1, width - INDENT.length);
     const nameWidth = Math.max(6, Math.min(MAX_NAME_WIDTH, bodyWidth - LIST_OVERHEAD));
-    return [
-        heading(theme, list.title),
-        ...indent(list.rows.map((row) => topLine({ ...row, name: listName(list, row) }, totalCost, nameWidth, theme))),
-    ];
+    const rows = list.rows.map((row) => {
+        const named = { ...row, name: listName(list, row) };
+        return list.calls === undefined
+            ? topLine(named, totalCost, nameWidth, theme)
+            : callLine(named, list.calls, nameWidth, theme);
+    });
+    return [heading(theme, list.title), ...indent(rows)];
 }
 
-/** A list's width when its longest name keeps its space next to the bar and the cost. */
+/** A list's width when its longest name keeps its space next to the bar and the value. */
 function listWidth(list: List, width: number): number {
     const longest = Math.max(0, ...list.rows.map((row) => visibleWidth(listName(list, row))));
     return Math.min(width, INDENT.length + Math.min(MAX_NAME_WIDTH, longest) + LIST_OVERHEAD);
@@ -543,6 +552,21 @@ export function topSessions(records: UsageRecord[], since: number, until: number
         .slice(0, count);
 }
 
+/** Top tool or skill names by call count: the row's `requests` is the count and its `stats` stays empty. */
+function countRows(records: UsageRecord[], field: "tools" | "skills", count = 5): { rows: GroupRow[]; total: number } {
+    const totals = new Map<string, number>();
+    for (const record of records) {
+        for (const [name, calls] of Object.entries(record[field])) totals.set(name, (totals.get(name) ?? 0) + calls);
+    }
+    return {
+        total: [...totals.values()].reduce((sum, calls) => sum + calls, 0),
+        rows: [...totals]
+            .map(([name, calls]): GroupRow => ({ key: name, name, stats: emptyStats(), requests: calls }))
+            .sort((a, b) => b.requests - a.requests || a.name.localeCompare(b.name))
+            .slice(0, count),
+    };
+}
+
 /**
  * The whole Summary view as data. `records` is the active set: drill-down filters already applied and
  * `window` is the day or history it covers, so a single day in context yields a one-day calendar.
@@ -556,6 +580,8 @@ export function summaryModel(
     const summary = summarize(records);
     const daily = dailyTotals(records, window, now);
     const activeDays = daily.filter((day) => day.cost > 0).length;
+    const tools = countRows(records, "tools");
+    const skills = countRows(records, "skills");
     return {
         stats: summary.stats,
         requests: summary.requests,
@@ -572,6 +598,10 @@ export function summaryModel(
             providers: topGroups(records, 0, Infinity, "provider"),
             projects: topGroups(records, 0, Infinity, "project"),
             sessions: topSessions(records, 0, Infinity),
+            tools: tools.rows,
+            skills: skills.rows,
+            toolCalls: tools.total,
+            skillCalls: skills.total,
         },
         delegates: delegateSplit(records),
     };
@@ -593,6 +623,8 @@ export function summaryLines(model: SummaryModel, width: number, theme: Theme): 
             { title: "Providers", mode: "provider", rows: model.top.providers },
             { title: "Projects", mode: "project", rows: model.top.projects },
             { title: "Sessions", rows: model.top.sessions },
+            { title: "Tools", rows: model.top.tools, calls: model.top.toolCalls },
+            { title: "Skills", rows: model.top.skills, calls: model.top.skillCalls },
         ] satisfies List[]
     ).filter((list) => list.rows.length > 0);
     // A list column is as wide as the widest list that lands in it, so the pairs line up down the rows and
