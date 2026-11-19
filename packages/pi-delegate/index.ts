@@ -70,6 +70,7 @@ const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powers
 const FIRST_REMINDER_AT = 5;
 const DELEGATE_SESSION_DIR = join(getAgentDir(), "sessions", "delegates");
 const INTERRUPTED_MESSAGE = "delegate-interrupted";
+const SKILL_PROMPT = "If your task names a skill, read its SKILL.md before starting and follow it.";
 
 function argText(value: unknown): string {
     return typeof value === "string" ? value : "";
@@ -319,6 +320,7 @@ export default function (pi: ExtensionAPI) {
         ];
         if (thinking) args.push("--thinking", thinking);
         if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
+        args.push("--append-system-prompt", SKILL_PROMPT);
         const cwd = isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd;
         if (isolation)
             args.push(
@@ -490,7 +492,7 @@ export default function (pi: ExtensionAPI) {
             "Available agents:",
             ...agentList,
             "",
-            "A delegate gets the project instructions but not this conversation. Write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence).",
+            'A delegate gets the project instructions but not this conversation. Write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence). When a listed skill fits the work, name it in the brief ("load the <name> skill first"); the delegate sees the same skill list but not the request that matched it.',
             "",
             "With isolated: true, the delegate runs in a git clone at .pi/worktrees/<job id>, starting from the main tree as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
             "",
