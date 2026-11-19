@@ -55,10 +55,11 @@ export type Summary = {
 };
 
 export type DailyCost = { label: string; cost: number };
+export type TimeWindow = { since: number; until: number };
 
-type Tally = { stats: Stats; requests: number; models?: Map<string, Tally>; providers?: Set<string> };
+type Tally = { stats: Stats; requests: number; models?: Map<string, Tally> };
 
-const CACHE_VERSION = 4;
+const CACHE_VERSION = 5;
 
 function emptyStats(): Stats {
     return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -125,8 +126,9 @@ async function sessionFiles(dir: string, out: string[]): Promise<void> {
     }
     for (const entry of entries) {
         const path = join(dir, entry.name);
-        if (entry.isDirectory()) await sessionFiles(path, out);
-        else if (entry.name.endsWith(".jsonl")) out.push(path);
+        if (entry.isDirectory()) {
+            await sessionFiles(path, out);
+        } else if (entry.name.endsWith(".jsonl")) out.push(path);
     }
 }
 
@@ -198,10 +200,9 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             provider = String(entry.provider);
             model = String(entry.model);
         } else {
-            // Compaction and branch-summary calls carry no model, so their cost gets its own row. Subagent
-            // artifact transcripts carry no type at all and keep provider/model on the nested message.
-            provider = String(message?.provider || entry.provider || "(summaries)");
-            model = String(message?.model || entry.model || entry.type || "unknown");
+            // Compaction and branch-summary calls carry no model, so their cost gets its own row.
+            provider = "(summaries)";
+            model = String(entry.type || "unknown");
         }
         const cost = typeof usage.cost === "number" ? usage.cost : num(usage.cost?.total);
         const input = num(usage.input);
@@ -234,9 +235,8 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
  * Files are streamed line by line: the corpus is gigabytes, and reading whole files stalls the event
  * loop and spikes RSS. The recursive scan includes `sessions/delegates`, where pi-delegate children
  * write their own transcripts, so subagent usage is counted with full provider/model attribution and
- * its own cwd. Parent sessions never embed the delegate child's usage (the delegate tool result
- * carries only text), so there is nothing to double-count. toolResult usage from other tools is
- * ignored for the same reason: those children also persist their own session files inside the scan.
+ * its own cwd. toolResult usage is ignored: those children persist their own session files inside
+ * the scan, so counting it would double their cost.
  *
  * shortcut: a file rewritten with the same size and mtime is not re-parsed.
  * shortcut: usage reported by tools whose child sessions live outside this dir is not counted.
@@ -286,8 +286,9 @@ export async function collectUsage(
 
 export function cacheView<T>(derive: () => T) {
     let cached: { key: string; value: T } | undefined;
-    return (mode: GroupMode, filters: UsageFilter[], now = Date.now()): T => {
-        const key = JSON.stringify([mode, filters, dayKey(now)]);
+    // `scope` is a grouping mode or the name of a non-grouping view.
+    return (scope: string, filters: UsageFilter[], now = Date.now()): T => {
+        const key = JSON.stringify([scope, filters, dayKey(now)]);
         if (!cached || cached.key !== key) cached = { key, value: derive() };
         return cached.value;
     };
@@ -304,7 +305,7 @@ export function startOfDay(ts: number): number {
     return date.getTime();
 }
 
-export function dayWindow(key: string, offset = 0): { since: number; until: number } {
+export function dayWindow(key: string, offset = 0): TimeWindow {
     const date = new Date(`${key}T00:00`);
     date.setDate(date.getDate() + offset);
     const since = startOfDay(date.getTime());
@@ -330,7 +331,7 @@ export function matchesFilter(record: UsageRecord, filter: UsageFilter): boolean
     return recordKey(record, filter.mode) === filter.key;
 }
 
-export function usageWindow(records: UsageRecord[], day?: string, now = Date.now()) {
+export function usageWindow(records: UsageRecord[], day?: string, now = Date.now()): TimeWindow {
     if (day) return dayWindow(day);
     const until = dayWindow(dayKey(now)).until;
     let first = Infinity;
@@ -387,12 +388,10 @@ export function buildRows(
         if (!group) {
             group = newTally();
             if (mode === "provider") group.models = new Map();
-            if (mode === "model") group.providers = new Set();
             groups.set(key, group);
         }
         addStats(group.stats, record);
         group.requests += record.requests;
-        if (mode === "model") group.providers!.add(record.provider);
         if (mode === "provider") {
             let model = group.models!.get(record.model);
             if (!model) group.models!.set(record.model, (model = newTally()));
@@ -419,7 +418,7 @@ export function buildRows(
     function toRow([name, group]: [string, Tally]): GroupRow {
         return {
             key: name,
-            name: mode === "model" && group.providers!.size > 1 ? `${name} (${group.providers!.size})` : name,
+            name,
             stats: group.stats,
             requests: group.requests,
             children: group.models && [...group.models].map(toRow).sort(byCost),
@@ -442,46 +441,22 @@ export function summarize(records: UsageRecord[], sinceMs = 0, untilMs = Infinit
     return { stats, requests, sessions: sessions.size };
 }
 
-export function seriesKey(key: string, parent?: string): string {
-    return JSON.stringify([key, parent ?? null]);
-}
-
-export function buildDailySeries(
-    records: UsageRecord[],
-    since: number,
-    until: number,
-    mode: GroupMode,
-): { total: DailyCost[]; rows: Map<string, Map<number, number>> } {
-    const days = windowDays(since, until);
-    const total: DailyCost[] = [];
+/** Total cost per local calendar day in `window`; without one, from the first recorded day through today. */
+export function dailyTotals(records: UsageRecord[], window?: TimeWindow, now = Date.now()): DailyCost[] {
+    const { since, until } = window ?? usageWindow(records, undefined, now);
     const positions = new Map<string, number>();
+    const total: DailyCost[] = [];
     let cursor = since;
-    for (let i = 0; i < days; i++) {
+    for (let day = windowDays(since, until); day > 0; day--) {
         const key = dayKey(cursor);
-        positions.set(key, i);
-        total.push({ label: key.slice(5), cost: 0 });
+        positions.set(key, total.length);
+        total.push({ label: key, cost: 0 });
         cursor = dayWindow(key).until;
-    }
-    const costs = new Map<string, Map<number, number>>();
-    function add(key: string, index: number, cost: number): void {
-        let values = costs.get(key);
-        if (!values) costs.set(key, (values = new Map()));
-        values.set(index, (values.get(index) ?? 0) + cost);
     }
     for (const record of records) {
         if (record.ts < since || record.ts >= until) continue;
         const index = positions.get(dayKey(record.ts));
-        if (index === undefined) continue;
-        total[index]!.cost += record.cost;
-        const key = recordKey(record, mode);
-        add(seriesKey(key), index, record.cost);
-        if (mode === "provider") add(seriesKey(record.model, record.provider), index, record.cost);
+        if (index !== undefined) total[index]!.cost += record.cost;
     }
-    return { total, rows: costs };
-}
-
-/** Total cost per local calendar day from the first recorded day through today. */
-export function dailyTotals(records: UsageRecord[], now = Date.now()): DailyCost[] {
-    const { since, until } = usageWindow(records, undefined, now);
-    return buildDailySeries(records, since, until, "day").total;
+    return total;
 }

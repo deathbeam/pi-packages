@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import {
-    buildDailySeries,
     buildRows,
     cacheView,
     collectUsage,
@@ -14,14 +13,15 @@ import {
     dayWindow,
     matchesFilter,
     percentChange,
-    seriesKey,
     startOfDay,
     summarize,
     usageWindow,
     windowDays,
+    type DailyCost,
     type UsageFilter,
     type UsageRecord,
 } from "../src/usage.ts";
+import { busiestDay, heatmap, streaks, summaryModel, topGroups, topSessions } from "../src/summary.ts";
 
 const now = Date.now();
 const tempDirs: string[] = [];
@@ -174,25 +174,19 @@ describe("collectUsage", () => {
         ]);
     });
 
-    // Regression: subagent artifact transcripts carry no entry `type` and keep provider/model on the nested
-    // message, so the row name came out undefined and crashed the table renderer.
-    it("names rows from the nested message of subagent artifact transcripts", async () => {
-        const artifact = JSON.stringify({
-            recordType: "message",
-            role: "assistant",
-            model: "glm-5.3",
-            timestamp: daysAgo(0),
-            usage: messageUsage({ cost: 0.25 }),
-            message: { role: "assistant", provider: "inferhub", model: "glm-5.3", content: [] },
-        });
-        const tree = sessionTree([artifact, JSON.stringify({ role: "assistant", usage: messageUsage({ cost: 0.5 }) })]);
-        const parsed = await collectUsage(tree.sessions);
+    it("names a typeless assistant line instead of leaving its row unnamed", async () => {
+        const tree = tempDir("pi-usage-typeless-");
+        writeFileSync(
+            join(tree, "session.jsonl"),
+            [
+                sessionHeader("s1", "/tmp"),
+                JSON.stringify({ role: "assistant", usage: messageUsage({ cost: 0.5 }) }),
+            ].join("\n"),
+        );
+        const parsed = await collectUsage(tree);
         assert.deepEqual(
             parsed.map((record) => [record.provider, record.model]),
-            [
-                ["inferhub", "glm-5.3"],
-                ["(summaries)", "unknown"],
-            ],
+            [["(summaries)", "unknown"]],
         );
         for (const name of buildRows(parsed, 0, "model").map((row) => row.name)) assert.equal(typeof name, "string");
     });
@@ -223,13 +217,13 @@ describe("buildRows", () => {
         );
     });
 
-    it("merges one model across providers and appends the provider count", () => {
+    it("merges one model across providers", () => {
         const models = buildRows(records, 0, "model");
         assert.deepEqual(
             models.map((row) => [row.name, row.requests, row.stats.input]),
             [
                 ["claude-x", 2, 101],
-                ["glm-5.3 (2)", 2, 60],
+                ["glm-5.3", 2, 60],
             ],
         );
         assert.equal(models[0].stats.cost, 0.7);
@@ -347,15 +341,15 @@ describe("dayWindow", () => {
             lastMonth: 0,
         });
         assert.deepEqual(
-            buildDailySeries(dstRecords, midnight("2025-09-06"), midnight("2025-09-10"), "day").total.map((d) => [
-                d.label,
-                d.cost,
+            dailyTotals(dstRecords, { since: midnight("2025-09-06"), until: midnight("2025-09-10") }).map((day) => [
+                day.label,
+                day.cost,
             ]),
             [
-                ["09-06", 7],
-                ["09-07", 5],
-                ["09-08", 9],
-                ["09-09", 0],
+                ["2025-09-06", 7],
+                ["2025-09-07", 5],
+                ["2025-09-08", 9],
+                ["2025-09-09", 0],
             ],
         );
     });
@@ -453,57 +447,187 @@ describe("usageWindow", () => {
     });
 });
 
-describe("buildDailySeries", () => {
-    const seriesRecords = [
-        usageRecord({ provider: "a", model: "shared", ts: at("2025-05-19"), cost: 2 }),
-        usageRecord({ provider: "b", model: "shared", ts: at("2025-05-20"), cost: 3 }),
-        usageRecord({ provider: "a", model: "other", ts: at("2025-05-21"), cost: 4 }),
-        usageRecord({ provider: "a", model: "shared", ts: at("2025-05-18"), cost: 100 }),
-    ];
-    const costsOf = (result: ReturnType<typeof buildDailySeries>, key: string, parentKey?: string) =>
-        result.total.map((_, index) => result.rows.get(seriesKey(key, parentKey))?.get(index) ?? 0);
-
-    it("fills one column per bucket for the total and per provider and model", () => {
-        const series = buildDailySeries(seriesRecords, midnight("2025-05-19"), midnight("2025-05-22"), "provider");
-        assert.deepEqual(
-            series.total.map((day) => day.cost),
-            [2, 3, 4],
-        );
-        assert.deepEqual(costsOf(series, "a"), [2, 0, 4]);
-        assert.deepEqual(costsOf(series, "shared", "a"), [2, 0, 0]);
-        assert.deepEqual(costsOf(series, "b"), [0, 3, 0]);
-    });
-
-    it("buckets by day and excludes records outside the window", () => {
-        const daySeries = buildDailySeries(seriesRecords, midnight("2025-05-19"), midnight("2025-05-22"), "day");
-        assert.deepEqual(costsOf(daySeries, "2025-05-20"), [0, 3, 0]);
-    });
-
-    it("covers the last three local days from the record corpus", () => {
-        const costs = buildDailySeries(
-            records,
-            dayWindow(dayKey(now), -2).since,
-            dayWindow(dayKey(now)).until,
-            "provider",
-        ).total;
-        assert.equal(costs.length, 3);
-        assert.equal(costs[0].cost, 0); // day before yesterday
-        assert.ok(Math.abs(costs[1].cost - 0.15) < 1e-12); // yesterday
-        assert.equal(costs[2].cost, 0.5); // today
-        const total = costs.reduce((sum, day) => sum + day.cost, 0);
-        assert.equal(total, 0.65); // the 40-day-old record is excluded
-    });
-});
-
 describe("dailyTotals", () => {
     it("spans the first recorded day through today", () => {
-        const totals = dailyTotals(records, now);
+        const totals = dailyTotals(records, undefined, now);
         assert.equal(totals.length, 41); // daysAgo(40) through today
-        assert.deepEqual([totals[0].label, totals.at(-1)!.label], [dayKey(daysAgo(40)).slice(5), dayKey(now).slice(5)]);
+        assert.deepEqual([totals[0]!.label, totals.at(-1)!.label], [dayKey(daysAgo(40)), dayKey(now)]);
         assert.equal(totals.at(-1)!.cost, 0.5); // today
         assert.ok(Math.abs(totals.at(-2)!.cost - 0.15) < 1e-12); // yesterday
         assert.ok(Math.abs(totals.reduce((sum, day) => sum + day.cost, 0) - 0.85) < 1e-12);
-        assert.deepEqual(dailyTotals([], now), []);
+        assert.deepEqual(dailyTotals([], undefined, now), []);
+    });
+
+    it("covers exactly the days of the given window", () => {
+        const window = { since: dayWindow(dayKey(now), -2).since, until: dayWindow(dayKey(now)).until };
+        const costs = dailyTotals(records, window);
+        assert.equal(costs.length, 3);
+        assert.equal(costs[0]!.cost, 0); // day before yesterday
+        assert.ok(Math.abs(costs[1]!.cost - 0.15) < 1e-12); // yesterday
+        assert.equal(costs[2]!.cost, 0.5); // today
+        assert.equal(
+            costs.reduce((sum, day) => sum + day.cost, 0),
+            0.65,
+        ); // the 40-day-old record is excluded
+    });
+});
+
+describe("summary aggregation", () => {
+    /** Contiguous days starting at `start`, the shape dailyTotals() produces. */
+    function series(start: string, costs: number[]): DailyCost[] {
+        const first = at(start);
+        return costs.map((cost, i) => ({ label: dayKey(first + i * 86_400_000).slice(5), cost }));
+    }
+
+    it("counts the current and the longest run of active days", () => {
+        assert.deepEqual(streaks([]), { current: 0, longest: 0 });
+        assert.deepEqual(streaks(series("2025-05-01", [1, 0, 1, 1, 0, 1, 1, 1])), { current: 3, longest: 3 });
+        assert.deepEqual(streaks(series("2025-05-01", [1, 1, 1, 1, 0])), { current: 0, longest: 4 });
+        assert.deepEqual(streaks(series("2025-05-01", [2, 2])), { current: 2, longest: 2 });
+    });
+
+    it("finds the busiest day and ignores free days", () => {
+        assert.deepEqual(busiestDay(series("2025-05-01", [1, 5, 3])), { label: "05-02", cost: 5 });
+        assert.equal(busiestDay(series("2025-05-01", [0, 0])), undefined);
+        assert.equal(busiestDay([]), undefined);
+    });
+
+    it("buckets days into a Monday-first grid ending on the current week", () => {
+        // 2025-05-21 is a Wednesday, so a 2-week grid starts Mon 2025-05-12.
+        const costs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 9];
+        const heat = heatmap(series("2025-05-08", costs), 2, at("2025-05-21"));
+        assert.equal(heat.header, "    May");
+        // Log scale over a max of 9: cost 1 lands on level 2, 3 on level 3 and the max on level 4.
+        assert.deepEqual(heat.rows[0]![0], { cost: 1, level: 2 });
+        assert.deepEqual(heat.rows[1]![1], { cost: 3, level: 3 });
+        assert.deepEqual(heat.rows[2]![1], { cost: 9, level: 4 });
+        assert.deepEqual(heat.rows[3]![1], undefined); // Thursday is still in the future
+    });
+
+    it("leaves the grid empty before the first recorded day and shrinks to the history", () => {
+        const daily = series("2025-05-14", [0, 0, 1, 0, 0, 2, 0, 4]); // 05-14 .. 05-21
+        const heat = heatmap(daily, 2, at("2025-05-21"));
+        assert.deepEqual(heat.rows[0]![0], undefined); // the week before the history starts
+        assert.deepEqual(heat.rows[2]![0], { cost: 0, level: 0 });
+        assert.deepEqual(heat.rows[4]![0], { cost: 1, level: 2 });
+        assert.deepEqual(heat.rows[0]![1], { cost: 2, level: 3 });
+        assert.deepEqual(heat.rows[2]![1], { cost: 4, level: 4 });
+        assert.deepEqual(heat.rows[3]![1], undefined);
+        // A wide terminal must not pad the grid with blank weeks.
+        assert.equal(heatmap(daily, 40, at("2025-05-21")).rows[0]!.length, 2);
+    });
+
+    it("puts a mid-range day and the busiest day on different levels", () => {
+        const levels = heatmap(series("2025-05-19", [1, 5, 100]), 1, at("2025-05-21"))
+            .rows.flat()
+            .map((cell) => cell?.level);
+        assert.deepEqual(
+            levels.filter((level) => level !== undefined),
+            [1, 2, 4],
+        );
+    });
+
+    it("labels a one-day calendar with that day's month", () => {
+        const heat = heatmap(series("2025-05-21", [4]), 1, at("2025-05-21"));
+        assert.equal(heat.header, "    May");
+        assert.deepEqual(heat.rows[2]![0], { cost: 4, level: 4 });
+        assert.equal(heat.rows.filter((row) => row.some((cell) => cell !== undefined)).length, 1);
+    });
+
+    const ranking = [
+        usageRecord({ sessionId: "aaa", cwd: "/home/deathbeam/git/x", ts: at("2025-05-10"), cost: 2 }),
+        usageRecord({ sessionId: "aaa", cwd: "/home/deathbeam/git/x", ts: at("2025-05-11"), cost: 1 }),
+        usageRecord({ sessionId: "bbb", cwd: "/tmp", ts: at("2025-05-12"), cost: 5, model: "other-model" }),
+        usageRecord({ sessionId: "ccc", cwd: "", ts: at("2025-05-12"), cost: 0.5 }),
+        usageRecord({ sessionId: "ddd", cwd: "/tmp", ts: at("2025-06-01"), cost: 100 }),
+    ];
+
+    it("ranks sessions by cost inside the window", () => {
+        const top = topSessions(ranking, midnight("2025-05-01"), midnight("2025-05-21"), 2);
+        assert.deepEqual(
+            top.map((row) => [row.key, row.name, row.stats.cost, row.requests]),
+            [
+                ["bbb", "05-12 bbb tmp", 5, 1],
+                ["aaa", "05-10 aaa x", 3, 2],
+            ],
+        );
+    });
+
+    it("ranks groups by cost and keeps the requested count", () => {
+        const since = midnight("2025-05-01");
+        const until = midnight("2025-05-21");
+        assert.deepEqual(
+            topGroups(ranking, since, until, "model", 1).map((row) => [row.name, row.stats.cost]),
+            [["other-model", 5]],
+        );
+        assert.deepEqual(
+            topGroups(ranking, since, until, "project").map((row) => [row.key, row.stats.cost]),
+            [
+                ["/tmp", 5],
+                ["/home/deathbeam/git/x", 3],
+                ["", 0.5],
+            ],
+        );
+    });
+});
+
+describe("summaryModel", () => {
+    const records = [
+        usageRecord({ sessionId: "a", cwd: "/tmp/x", ts: at("2025-05-19"), cost: 2, requests: 2, cacheRead: 300 }),
+        usageRecord({ sessionId: "a", cwd: "/tmp/x", ts: at("2025-05-20"), cost: 3, requests: 4 }),
+        usageRecord({ sessionId: "b", cwd: "/tmp/x", ts: at("2025-05-21"), cost: 5 }),
+    ];
+    const model = summaryModel(records, true, at("2025-05-21"));
+
+    it("totals the active records and averages per active day and session", () => {
+        assert.deepEqual([model.stats.cost, model.requests, model.sessions], [10, 7, 2]);
+        assert.deepEqual([model.activeDays, model.perDay, model.perSession], [3, 10 / 3, 5]);
+        assert.deepEqual(model.streak, { current: 3, longest: 3 });
+        assert.deepEqual(model.busiest, { label: "2025-05-21", cost: 5 });
+        assert.equal(model.daily.length, 3);
+    });
+
+    it("builds the calendar over the given window instead of through today", () => {
+        const window = dayWindow("2025-05-20");
+        const scoped = records.filter((record) => record.ts >= window.since && record.ts < window.until);
+        const day = summaryModel(scoped, false, at("2025-05-21"), window);
+        assert.deepEqual(day.daily, [{ label: "2025-05-20", cost: 3 }]);
+        assert.deepEqual([day.activeDays, day.perDay, day.busiest?.label], [1, 3, "2025-05-20"]);
+    });
+
+    it("compares the week and month so far with the previous ones", () => {
+        assert.equal(model.trends?.today, 5);
+        assert.equal(model.trends?.week, 10 / 3);
+        assert.equal(model.trends?.weekDelta, Infinity); // last week had no spend
+        assert.equal(summaryModel(records, false, at("2025-05-21")).trends, undefined);
+    });
+
+    it("ranks the top models, projects and sessions by cost", () => {
+        assert.deepEqual(
+            model.top.models.map((row) => [row.name, row.stats.cost]),
+            [["claude-x", 10]],
+        );
+        assert.deepEqual(
+            model.top.projects.map((row) => [row.key, row.stats.cost]),
+            [["/tmp/x", 10]],
+        );
+        // Equal cost breaks the tie on requests, so the busier session comes first.
+        assert.deepEqual(
+            model.top.sessions.map((row) => [row.key, row.stats.cost]),
+            [
+                ["a", 5],
+                ["b", 5],
+            ],
+        );
+    });
+
+    it("degrades to zeros on an empty record set", () => {
+        const empty = summaryModel([], true, at("2025-05-21"));
+        assert.deepEqual([empty.stats.cost, empty.activeDays, empty.perDay, empty.perSession], [0, 0, 0, 0]);
+        assert.deepEqual(empty.streak, { current: 0, longest: 0 });
+        assert.equal(empty.busiest, undefined);
+        assert.deepEqual(empty.daily, []);
+        assert.deepEqual(empty.top, { models: [], projects: [], sessions: [] });
     });
 });
 

@@ -1,26 +1,36 @@
 /** /usage — fullscreen token usage and cost dashboard. */
 
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+    clip,
+    deltaText,
+    displayName,
+    fitLabel,
+    formatCost,
+    formatTokens,
+    hitPct,
+    padWidth,
+    shareBar,
+} from "./src/format.ts";
+import { summaryLines, summaryModel, type SummaryModel } from "./src/summary.ts";
 import {
     buildRows,
     cacheView,
     collectUsage,
-    comparison,
     dailyTotals,
     dayKey,
     dayWindow,
     matchesFilter,
-    percentChange,
     summarize,
     usageWindow,
     type DailyCost,
     type GroupMode,
     type GroupRow,
     type Stats,
+    type Summary,
     type UsageFilter,
     type UsageRecord,
 } from "./src/usage.ts";
@@ -28,19 +38,25 @@ import {
 type Column = {
     label: string;
     width: number;
-    cell: (stats: Stats, requests: number, totalCost: number, row?: GroupRow) => string;
+    cell: (stats: Stats, requests: number, totalCost: number, row: GroupRow | undefined, theme: Theme) => string;
 };
 type BodyRow = GroupRow & { parent?: string };
 type Frame = { filters: UsageFilter[]; group: number; cursor: number; top: number };
 type SparkBar = { label: string; char: string };
+type ViewMode = "summary" | GroupMode;
+type TableView = { mode: GroupMode; summary: Summary; body: BodyRow[] };
+type SummaryView = { mode: "summary"; model: SummaryModel };
 
 const GROUPS = ["day", "provider", "model", "project"] as const satisfies readonly GroupMode[];
+/** Tab order; Summary is a view, not a grouping, so it has no rows to open. */
+const VIEWS: readonly ViewMode[] = ["summary", ...GROUPS];
 const GROUP_LABELS: Record<GroupMode, string> = {
     day: "Day",
     provider: "Provider",
     model: "Model",
     project: "Project",
 };
+const VIEW_LABELS: Record<ViewMode, string> = { summary: "Summary", ...GROUP_LABELS };
 
 const COLUMNS: Column[] = [
     {
@@ -51,42 +67,20 @@ const COLUMNS: Column[] = [
     {
         label: "Share",
         width: 13,
-        cell: (s, _r, totalCost) => {
-            const share = totalCost > 0 ? s.cost / totalCost : 0;
-            const filled = Math.round(8 * share);
-            return "█".repeat(filled) + "·".repeat(8 - filled) + " " + `${Math.round(100 * share)}%`.padStart(4);
-        },
+        cell: (s, _r, totalCost, _row, theme) => shareBar(s.cost, totalCost, theme),
     },
     { label: "Reqs", width: 6, cell: (_s, requests) => formatTokens(requests) },
     { label: "In", width: 7, cell: (s) => formatTokens(s.input) },
     { label: "Out", width: 7, cell: (s) => formatTokens(s.output) },
     // Cost already prices read/write differently; one combined token column is enough.
     { label: "Cache", width: 7, cell: (s) => formatTokens(s.cacheRead + s.cacheWrite) },
-    { label: "Hit%", width: 5, cell: (s) => hitPct(s) },
+    { label: "Hit%", width: 5, cell: (s, _r, _t, _row, theme) => hitPct(s, theme) },
 ];
 
 const SPARK_BARS = "▁▂▃▄▅▆▇█";
 const MIN_NAME_WIDTH = 12;
-
-function formatCost(cost: number): string {
-    if (cost === 0) return "$0.00";
-    if (cost < 0.01) return `$${cost.toFixed(4)}`;
-    if (cost < 100) return `$${cost.toFixed(2)}`;
-    return `$${Math.round(cost).toLocaleString("en-US")}`;
-}
-
-function formatTokens(count: number): string {
-    if (count === 0) return "-";
-    if (count < 1000) return String(count);
-    if (count < 1_000_000) return `${(count / 1000).toFixed(count < 10_000 ? 1 : 0)}k`;
-    if (count < 1_000_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-    return `${(count / 1_000_000_000).toFixed(1)}B`;
-}
-
-function hitPct(stats: Stats): string {
-    const total = stats.input + stats.cacheRead + stats.cacheWrite;
-    return total > 0 ? `${Math.round((100 * stats.cacheRead) / total)}%` : "-";
-}
+/** Columns the title keeps beside the tab bar; the rest goes to the tabs around the active one. */
+const TITLE_WIDTH = 8;
 
 function layout(width: number, allColumns: Column[]): { nameWidth: number; columns: Column[] } {
     function used(cols: Column[]): number {
@@ -100,28 +94,13 @@ function layout(width: number, allColumns: Column[]): { nameWidth: number; colum
     return { nameWidth: Math.max(4, width - used(columns)), columns };
 }
 
-function padWidth(s: string, w: number): string {
-    return s + " ".repeat(Math.max(0, w - visibleWidth(s)));
-}
-
-function displayName(mode: GroupMode, name: string): string {
-    if (mode === "day") return `${name} ${new Date(`${name}T00:00`).toLocaleDateString("en-US", { weekday: "short" })}`;
-    if (mode !== "project") return name;
-    if (!name) return "(no cwd)";
-    const home = homedir();
-    return name === home || name.startsWith(home + "/") ? "~" + name.slice(home.length) : name;
-}
-
-/** Truncate a name to its column so ANSI codes and padding stay width-correct. */
-function fitLabel(name: string, nameWidth: number): string {
-    return visibleWidth(name) > nameWidth ? truncateToWidth(name, nameWidth, "…") : name;
-}
-
-function tableLine(nameWidth: number, columns: Column[], row: GroupRow, totalCost: number): string {
+function tableLine(nameWidth: number, columns: Column[], row: GroupRow, totalCost: number, theme: Theme): string {
     const label = fitLabel(row.name, nameWidth);
     return [
         padWidth(label, nameWidth),
-        ...columns.map((c) => padWidth(fitLabel(c.cell(row.stats, row.requests, totalCost, row), c.width), c.width)),
+        ...columns.map((c) =>
+            padWidth(fitLabel(c.cell(row.stats, row.requests, totalCost, row, theme), c.width), c.width),
+        ),
     ]
         .join(" ")
         .trimEnd();
@@ -142,10 +121,10 @@ function sparkline(daily: DailyCost[], width: number): { first: string; last: st
     };
 }
 
-function flatten(rows: GroupRow[], mode: GroupMode): BodyRow[] {
+function flatten(rows: GroupRow[], mode: GroupMode, theme: Theme): BodyRow[] {
     const body: BodyRow[] = [];
     for (const row of rows) {
-        body.push({ ...row, name: displayName(mode, row.name) });
+        body.push({ ...row, name: displayName(mode, row.name, theme) });
         for (const child of row.children ?? []) body.push({ ...child, name: `  ${child.name}`, parent: row.key });
     }
     return body;
@@ -153,7 +132,7 @@ function flatten(rows: GroupRow[], mode: GroupMode): BodyRow[] {
 
 export default function (pi: ExtensionAPI) {
     pi.registerCommand("usage", {
-        description: "Show token usage and cost per provider, model, or project",
+        description: "Show token usage and cost: summary, day, provider, model and project views",
         handler: async (_args, ctx) => {
             if (ctx.mode !== "tui") return;
             const state: { records?: UsageRecord[]; done: number; total: number } = {
@@ -197,17 +176,23 @@ export default function (pi: ExtensionAPI) {
                 function dayFilter() {
                     return filters().findLast((f) => f.mode === "day");
                 }
-                function derive(source: UsageRecord[]) {
+                function derive(source: UsageRecord[]): TableView | SummaryView {
                     const active = filters();
                     const records = source.filter((record) =>
                         active.every((f) => f.mode === "day" || matchesFilter(record, f)),
                     );
                     const day = active.findLast((f) => f.mode === "day")?.key;
                     const window = usageWindow(records, day);
-                    const mode = GROUPS[group]!;
+                    const mode = VIEWS[group]!;
+                    if (mode === "summary") {
+                        const scoped = records.filter(
+                            (record) => record.ts >= window.since && record.ts < window.until,
+                        );
+                        return { mode, model: summaryModel(scoped, day === undefined, Date.now(), window) };
+                    }
                     const summary = summarize(records, window.since, window.until);
-                    const body = flatten(buildRows(records, window.since, mode, window.until), mode);
-                    return { mode, summary, body, compare: day ? undefined : comparison(records) };
+                    const body = flatten(buildRows(records, window.since, mode, window.until), mode, theme);
+                    return { mode, summary, body };
                 }
                 const getView = cacheView(() => derive(state.records!));
                 let allDays: DailyCost[] | undefined;
@@ -222,15 +207,33 @@ export default function (pi: ExtensionAPI) {
                     abort.abort();
                     done(undefined);
                 }
-                function colorDelta(delta: number | undefined): string {
-                    if (delta === undefined) return "-";
-                    if (delta === 0) return "0%";
-                    const text = Number.isFinite(delta)
-                        ? `${delta > 0 ? "▲" : "▼"}${Math.round(Math.abs(delta))}%`
-                        : "▲new";
-                    return theme.fg(delta > 0 ? "error" : "success", text);
+                const deltaColumn: Column = {
+                    label: "Δ",
+                    width: 9,
+                    cell: (_s, _r, _t, row, _theme) => deltaText(row?.delta, theme),
+                };
+                /** Tabs around the active one that fit `budget`; the active tab is never dropped. */
+                function windowTabs(tabs: { text: string; active: boolean }[], budget: number): string[] {
+                    const active = Math.max(
+                        0,
+                        tabs.findIndex((entry) => entry.active),
+                    );
+                    let lo = active;
+                    let hi = active;
+                    let used = visibleWidth(tabs[active]!.text);
+                    while (true) {
+                        const next = tabs[hi + 1];
+                        const prev = tabs[lo - 1];
+                        if (next !== undefined && used + 1 + visibleWidth(next.text) <= budget) {
+                            hi += 1;
+                            used += 1 + visibleWidth(next.text);
+                        } else if (prev !== undefined && used + 1 + visibleWidth(prev.text) <= budget) {
+                            lo -= 1;
+                            used += 1 + visibleWidth(prev.text);
+                        } else break;
+                    }
+                    return tabs.slice(lo, hi + 1).map((entry) => entry.text);
                 }
-                const deltaColumn: Column = { label: "Δ", width: 9, cell: (_s, _r, _t, row) => colorDelta(row?.delta) };
                 function title(width: number): string {
                     function tab(label: string, active: boolean): string {
                         return active ? theme.fg("accent", `[${label}]`) : theme.fg("muted", ` ${label} `);
@@ -240,12 +243,16 @@ export default function (pi: ExtensionAPI) {
                         filters()
                             .map((f) => ` › ${displayName(f.mode, f.key)}`)
                             .join("");
-                    const tabs = GROUPS.map((g, i) => (i === 0 && dayFilter() ? "" : tab(GROUP_LABELS[g], i === group)))
-                        .filter(Boolean)
-                        .join(" ");
+                    const tabs = VIEWS.map((g, i) => ({
+                        text: g === "day" && dayFilter() ? "" : tab(VIEW_LABELS[g], i === group),
+                        active: i === group,
+                    })).filter((entry) => entry.text !== "");
+                    const budget = Math.max(1, width - Math.min(visibleWidth(left), TITLE_WIDTH) - 1);
+                    const shown = windowTabs(tabs, budget).join(" ");
                     const hint = theme.fg("dim", " (tab/←→)");
                     const right =
-                        tabs + (visibleWidth(left) + visibleWidth(tabs) + visibleWidth(hint) + 1 <= width ? hint : "");
+                        shown +
+                        (visibleWidth(left) + visibleWidth(shown) + visibleWidth(hint) + 1 <= width ? hint : "");
                     const leftWidth = Math.max(0, width - visibleWidth(right) - 1);
                     return truncateToWidth(
                         truncateToWidth(left, leftWidth, "…") +
@@ -256,11 +263,16 @@ export default function (pi: ExtensionAPI) {
                         width,
                     );
                 }
-                function footer(width: number): string {
-                    return truncateToWidth(
-                        theme.fg("dim", "enter open · esc back · tab/←→ group · [ ] day · q close · ↑↓ scroll"),
-                        width,
-                    );
+                function footer(width: number, mode?: ViewMode): string {
+                    const parts = [
+                        ...(mode !== undefined && mode !== "summary" ? ["enter open"] : []),
+                        "esc back",
+                        "tab/←→ view",
+                        ...(dayFilter() ? ["[ ] day"] : []),
+                        "q close",
+                        "↑↓ scroll",
+                    ];
+                    return truncateToWidth(theme.fg("dim", parts.join(" · ")), width);
                 }
                 return {
                     render(width: number) {
@@ -279,15 +291,22 @@ export default function (pi: ExtensionAPI) {
                             lines.push(rule, footer(width));
                             return lines.slice(0, rows);
                         }
-                        const view = getView(GROUPS[group]!, filters());
-                        const { mode, summary, compare } = view;
-                        const first = compare
-                            ? `Today ${formatCost(compare.today)} · This week ${formatCost(compare.week)}/day ${colorDelta(percentChange(compare.week, compare.lastWeek))} vs last week · This month ${formatCost(compare.month)}/day ${colorDelta(percentChange(compare.month, compare.lastMonth))} vs last month`
-                            : `Cost ${formatCost(summary.stats.cost)}`;
+                        const view = getView(VIEWS[group]!, filters());
+                        if (view.mode === "summary") {
+                            const content = summaryLines(view.model, width, theme);
+                            body = [];
+                            rowCount = content.length;
+                            viewHeight = Math.max(1, rows - lines.length - 2);
+                            // The summary has no cursor: its position is the scroll offset.
+                            cursor = Math.max(0, Math.min(cursor, Math.max(0, rowCount - viewHeight)));
+                            top = cursor;
+                            lines.push(...content.slice(top, top + viewHeight), rule, footer(width, view.mode));
+                            return clip(lines, width, rows);
+                        }
+                        const { mode, summary } = view;
                         lines.push(
-                            truncateToWidth(first, width),
                             truncateToWidth(
-                                `In ${formatTokens(summary.stats.input)} · Out ${formatTokens(summary.stats.output)} · Cache ${formatTokens(summary.stats.cacheRead + summary.stats.cacheWrite)} · Hit ${hitPct(summary.stats)} · Reqs ${formatTokens(summary.requests)} · Sessions ${formatTokens(summary.sessions)}`,
+                                `Cost ${formatCost(summary.stats.cost)} · Reqs ${formatTokens(summary.requests)} · Sessions ${formatTokens(summary.sessions)} · Hit ${hitPct(summary.stats, theme)}`,
                                 width,
                             ),
                         );
@@ -296,23 +315,22 @@ export default function (pi: ExtensionAPI) {
                         cursor = Math.min(cursor, Math.max(0, rowCount - 1));
                         const selected = body[cursor];
                         const contextDay = dayFilter()?.key ?? (mode === "day" ? selected?.key : undefined);
-                        const contextLabel = contextDay?.slice(5);
                         const spark = sparkline(allDaily(), width);
                         if (spark)
                             lines.push(
                                 truncateToWidth(
-                                    theme.fg("dim", `${spark.first} `) +
+                                    theme.fg("dim", `${spark.first.slice(5)} `) +
                                         spark.bars
                                             .map((bar) =>
                                                 theme.fg(
-                                                    contextLabel === undefined || bar.label === contextLabel
+                                                    contextDay === undefined || bar.label === contextDay
                                                         ? "accent"
                                                         : "borderMuted",
                                                     bar.char,
                                                 ),
                                             )
                                             .join("") +
-                                        theme.fg("dim", ` ${spark.last}`),
+                                        theme.fg("dim", ` ${spark.last.slice(5)}`),
                                     width,
                                 ),
                             );
@@ -340,20 +358,18 @@ export default function (pi: ExtensionAPI) {
                         const visible = body.slice(top, top + viewHeight);
                         if (rowCount === 0) lines.push(theme.fg("dim", "  No usage"));
                         for (const [i, row] of visible.entries()) {
-                            let line = tableLine(nameWidth, columns, row, summary.stats.cost);
+                            let line = tableLine(nameWidth, columns, row, summary.stats.cost, theme);
                             if (top + i === cursor) line = theme.bg("selectedBg", line);
                             else if (row.parent !== undefined) line = theme.fg("dim", line);
                             lines.push(line);
                         }
                         const total = { key: "", name: "Total", stats: summary.stats, requests: summary.requests };
                         lines.push(
-                            theme.bold(tableLine(nameWidth, columns, total, summary.stats.cost)),
+                            theme.bold(tableLine(nameWidth, columns, total, summary.stats.cost, theme)),
                             rule,
-                            footer(width),
+                            footer(width, mode),
                         );
-                        return lines
-                            .slice(0, rows)
-                            .map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width) : line));
+                        return clip(lines, width, rows);
                     },
                     invalidate() {},
                     handleInput(data: string) {
@@ -371,15 +387,16 @@ export default function (pi: ExtensionAPI) {
                             return;
                         } else if (keys.matches(data, "tui.select.confirm") && body[cursor]) {
                             const row = body[cursor]!;
-                            const rowMode = row.parent === undefined ? GROUPS[group]! : "model";
+                            const mode = VIEWS[group]!;
+                            const rowMode = row.parent === undefined && mode !== "summary" ? mode : "model";
                             const selected: UsageFilter[] =
                                 row.parent === undefined ? [] : [{ mode: "provider", key: row.parent }];
                             selected.push({ mode: rowMode, key: row.key });
                             stack.push({ filters: selected, group, cursor, top });
                             // Land on the first grouping that is not already filtered.
                             const used = new Set(filters().map((f) => f.mode));
-                            group = GROUPS.findIndex((g) => !used.has(g));
-                            if (group < 0) group = dayFilter() ? 1 : 0;
+                            group = VIEWS.findIndex((g) => g !== "summary" && !used.has(g));
+                            if (group < 0) group = VIEWS.indexOf(dayFilter() ? "provider" : "day");
                             cursor = top = 0;
                         } else if ((data === "[" || data === "]") && filters().at(-1)?.mode === "day") {
                             const filter = filters().at(-1)!;
@@ -392,8 +409,8 @@ export default function (pi: ExtensionAPI) {
                             matchesKey(data, "left")
                         ) {
                             const offset = matchesKey(data, "tab") || matchesKey(data, "right") ? 1 : -1;
-                            do group = (group + offset + GROUPS.length) % GROUPS.length;
-                            while (group === 0 && dayFilter());
+                            do group = (group + offset + VIEWS.length) % VIEWS.length;
+                            while (VIEWS[group] === "day" && dayFilter());
                             cursor = top = 0;
                         } else if (keys.matches(data, "tui.select.up") || data === "k") cursor -= 1;
                         else if (keys.matches(data, "tui.select.down") || data === "j") cursor += 1;
