@@ -159,9 +159,8 @@ export function toolCallDetail(toolName: string, args: unknown): string {
 }
 
 /** Caps a preview at `maxLines`; callers report the hidden count their own way. */
-export function capLines<T>(lines: T[], maxLines: number): { shown: T[]; hidden: number } {
-    if (lines.length <= maxLines) return { shown: lines, hidden: 0 };
-    return { shown: lines.slice(0, maxLines), hidden: lines.length - maxLines };
+export function capLines<T>(lines: readonly T[], maxLines: number): { shown: T[]; hidden: number } {
+    return { shown: lines.slice(0, maxLines), hidden: Math.max(0, lines.length - maxLines) };
 }
 
 /** Close dangling Markdown fences so collapsed previews render correctly. */

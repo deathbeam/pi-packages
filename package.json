@@ -30,15 +30,15 @@
     "format": "prettier --write ."
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.5.2",
-    "@earendil-works/pi-coding-agent": "1.5.2",
-    "@earendil-works/pi-tui": "1.5.2",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@earendil-works/pi-tui": "1.6.0",
     "@types/node": "^26.6.6",
     "@types/xxhashjs": "^0.2.4",
     "prettier": "^3.10.1",
     "typebox": "^1.4.7",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }
