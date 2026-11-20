@@ -43,15 +43,14 @@ export function registerCompaction(pi: ExtensionAPI): void {
         try {
             const compaction = await compact(
                 event.preparation,
-                auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
-                auth.apiKey,
-                auth.headers as Record<string, string> | undefined, // null entries unset headers; pi forwards them as-is
+                model,
+                undefined,
+                undefined,
                 event.customInstructions,
                 event.signal,
                 (ref.thinking ?? pi.getThinkingLevel()) as Parameters<typeof compact>[6],
+                (m, c, o) => ctx.modelRegistry.streamSimple(m, c, o),
                 undefined,
-                auth.env,
-                // pi's own resolved retry policy: same defaults and settings as its compaction path.
                 SettingsManager.inMemory(pi.getSettings()).getRetrySettings(),
             );
             return { compaction };
