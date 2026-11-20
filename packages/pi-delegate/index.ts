@@ -70,7 +70,8 @@ const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powers
 const FIRST_REMINDER_AT = 5;
 const DELEGATE_SESSION_DIR = join(getAgentDir(), "sessions", "delegates");
 const INTERRUPTED_MESSAGE = "delegate-interrupted";
-const SKILL_PROMPT = "If your task names a skill, read its SKILL.md before starting and follow it.";
+const DELEGATE_PROMPT =
+    "You are a subagent. The orchestrator, another agent, wrote your task as a brief; you cannot see its conversation or ask it questions, so treat the brief as the user's whole request. Before starting, read the SKILL.md of every skill the brief names and follow it. Stay within the brief's scope and fill its gaps with your tools; if you are still blocked, stop and report what you tried and the exact blocker. The orchestrator sees none of your tool calls, only your final message: make that report stand alone and end it with statements.";
 
 function argText(value: unknown): string {
     return typeof value === "string" ? value : "";
@@ -319,8 +320,8 @@ export default function (pi: ExtensionAPI) {
             tools.join(","),
         ];
         if (thinking) args.push("--thinking", thinking);
+        args.push("--append-system-prompt", DELEGATE_PROMPT);
         if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
-        args.push("--append-system-prompt", SKILL_PROMPT);
         const cwd = isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd;
         if (isolation)
             args.push(
@@ -492,7 +493,9 @@ export default function (pi: ExtensionAPI) {
             "Available agents:",
             ...agentList,
             "",
-            'A delegate gets the project instructions but not this conversation. Write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence). When a listed skill fits the work, name it in the brief ("load the <name> skill first"); the delegate sees the same skill list but not the request that matched it.',
+            "A delegate starts with the project instructions and the skill list but none of this conversation, so write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence).",
+            "",
+            'The delegate matches skills against the brief alone, so the brief names them: for every part of the work, side tasks included, name each listed skill that fits ("load the <name> skill first").',
             "",
             "With isolated: true, the delegate runs in a git clone at .pi/worktrees/<job id>, starting from the main tree as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
             "",

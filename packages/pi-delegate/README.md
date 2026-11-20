@@ -31,7 +31,7 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
 - `agentDirs` adds directories to search for agents. The bundled agents and `~/.agents/agents` are always loaded.
 - `models` maps the `cheap`, `balanced`, and `strong` tiers to a `provider/model-id` with an optional `:<thinking>` suffix. A tier without an entry uses the session model.
 
-Agents are Markdown files with frontmatter. The body becomes the delegate's system prompt.
+Agents are Markdown files with frontmatter. The body is appended to the delegate's system prompt.
 
 ```markdown
 ---
