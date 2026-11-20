@@ -71,7 +71,7 @@ const FIRST_REMINDER_AT = 5;
 const DELEGATE_SESSION_DIR = join(getAgentDir(), "sessions", "delegates");
 const INTERRUPTED_MESSAGE = "delegate-interrupted";
 const DELEGATE_PROMPT =
-    "You are a subagent. The orchestrator, another agent, wrote your task as a brief; you cannot see its conversation or ask it questions, so treat the brief as the user's whole request. Before starting, read the SKILL.md of every skill the brief names and follow it. Stay within the brief's scope and fill its gaps with your tools; if you are still blocked, stop and report what you tried and the exact blocker. The orchestrator sees none of your tool calls, only your final message: make that report stand alone and end it with statements.";
+    "The orchestrator, another agent, wrote your task as a brief; you cannot see its conversation or ask it questions, so treat the brief as the user's whole request. Before starting, read the SKILL.md of every skill the brief names and follow it. Stay within the brief's scope and fill its gaps with your tools; if you are still blocked, stop and report what you tried and the exact blocker. The orchestrator sees none of your tool calls, only your final message: make that report stand alone and end it with statements.";
 
 function argText(value: unknown): string {
     return typeof value === "string" ? value : "";
