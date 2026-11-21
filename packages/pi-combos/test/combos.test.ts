@@ -149,6 +149,7 @@ function start(
             {
                 cwd,
                 modelRegistry: registry,
+                sessionManager: { getBranch: () => [] },
                 hasUI: options.hasUI ?? false,
                 isProjectTrusted: () => options.trusted ?? true,
                 ui: { notify: (text: string) => notifications.push(text) },
@@ -191,8 +192,8 @@ function reasoning(provider: string, id: string, levels: Record<string, string |
     return model(provider, id, { reasoning: true, thinkingLevelMap: levels });
 }
 
-/** Runs the real pi startup on the combo and checks the level survives session_start. */
-async function assertThinkingLevel(dir: string): Promise<void> {
+/** Runs the real pi startup with this package's extension on top of `sessionManager`. */
+async function realSession(dir: string, sessionManager: SessionManager, reason: "startup" | "resume" = "startup") {
     const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
     const extensionPath = fileURLToPath(new URL("../index.ts", import.meta.url));
     const services = await createAgentSessionServices({
@@ -203,16 +204,52 @@ async function assertThinkingLevel(dir: string): Promise<void> {
     });
     const { session } = await createAgentSessionFromServices({
         services,
-        sessionManager: SessionManager.create(dir, join(dir, "sessions")),
+        sessionManager,
+        sessionStartEvent: { type: "session_start", reason },
         thinkingLevel: "high",
         noTools: "all",
     });
+    return session;
+}
+
+/** Runs the real pi startup on the combo and checks the level survives session_start. */
+async function assertThinkingLevel(dir: string): Promise<void> {
+    const session = await realSession(dir, SessionManager.create(dir, join(dir, "sessions")));
     assert.equal(session.model?.provider, PROVIDER);
     assert.equal(session.thinkingLevel, "high", "before session_start");
 
     await session.bindExtensions({});
     assert.equal(session.thinkingLevel, "high", "after session_start");
     session.dispose();
+}
+
+/** A trusted project whose only combo is `smart`, started with a fake Anthropic key. */
+async function comboProject(run: (dir: string) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), "pi-combos-session-"));
+    cwds.push(dir);
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    mkdirSync(join(dir, ".pi"));
+    writeFileSync(
+        join(dir, ".pi", "settings.json"),
+        JSON.stringify({
+            defaultProvider: "combo",
+            defaultModel: "smart",
+            defaultThinkingLevel: "high",
+            combos: { smart: ["anthropic/claude-opus-4-7"] },
+        }),
+    );
+    const previousKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    // The load-time registration of the extension reads the process cwd.
+    const previousCwd = process.cwd();
+    process.chdir(dir);
+    try {
+        await run(dir);
+    } finally {
+        process.chdir(previousCwd);
+        if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+        else process.env.ANTHROPIC_API_KEY = previousKey;
+    }
 }
 
 async function send(
@@ -465,31 +502,53 @@ describe("pi-combos", () => {
     });
 
     it("starts a real session on the combo at the configured thinking level", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "pi-combos-session-"));
-        cwds.push(dir);
-        mkdirSync(join(dir, "sessions"), { recursive: true });
-        mkdirSync(join(dir, ".pi"));
-        writeFileSync(
-            join(dir, ".pi", "settings.json"),
-            JSON.stringify({
-                defaultProvider: "combo",
-                defaultModel: "smart",
-                defaultThinkingLevel: "high",
-                combos: { smart: ["anthropic/claude-opus-4-7"] },
-            }),
-        );
-        const previousKey = process.env.ANTHROPIC_API_KEY;
-        process.env.ANTHROPIC_API_KEY = "test-key";
-        // The load-time registration of the extension reads the process cwd.
-        const previousCwd = process.cwd();
-        process.chdir(dir);
-        try {
-            await assertThinkingLevel(dir);
-        } finally {
-            process.chdir(previousCwd);
-            if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-            else process.env.ANTHROPIC_API_KEY = previousKey;
-        }
+        await comboProject(assertThinkingLevel);
+    });
+
+    it("restores the combo a resumed session selected, not the member that answered", async () => {
+        await comboProject(async (dir) => {
+            const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
+            sessionManager.appendModelChange(PROVIDER, "smart");
+            // The combo forwards the member's events, so the response names the member.
+            sessionManager.appendMessage(message("claude-opus-4-7"));
+
+            const session = await realSession(dir, sessionManager, "resume");
+            await session.bindExtensions({});
+            assert.equal(session.model?.provider, PROVIDER);
+            assert.equal(session.model?.id, "smart");
+            session.dispose();
+        });
+    });
+
+    it("keeps a model the user picked after the combo", async () => {
+        await comboProject(async (dir) => {
+            const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
+            sessionManager.appendModelChange(PROVIDER, "smart");
+            sessionManager.appendMessage(message("claude-opus-4-7"));
+            sessionManager.appendModelChange("anthropic", "claude-opus-4-7");
+
+            const session = await realSession(dir, sessionManager, "resume");
+            await session.bindExtensions({});
+            assert.equal(session.model?.provider, "anthropic");
+            session.dispose();
+        });
+    });
+
+    it("leaves a session that already restores the combo without a new model_change", async () => {
+        await comboProject(async (dir) => {
+            const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
+            sessionManager.appendMessage(message("claude-opus-4-7"));
+            // The combo change last: pi restores it without help, so nothing is recorded again.
+            sessionManager.appendModelChange(PROVIDER, "smart");
+            const changes = () => sessionManager.getBranch().filter((entry) => entry.type === "model_change").length;
+            const recorded = changes();
+
+            const session = await realSession(dir, sessionManager, "resume");
+            await session.bindExtensions({});
+            assert.equal(session.model?.provider, PROVIDER);
+            assert.equal(changes(), recorded);
+            session.dispose();
+        });
     });
 
     it("ignores project combos when the project is not trusted", () => {

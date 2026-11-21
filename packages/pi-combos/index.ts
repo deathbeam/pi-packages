@@ -202,7 +202,7 @@ export default function (pi: ExtensionAPI) {
     const names = [...readCombos(process.cwd(), true).combos.keys()];
     if (names.length > 0) register(names.map(pendingModel));
 
-    pi.on("session_start", (_event, ctx) => {
+    pi.on("session_start", async (_event, ctx) => {
         const current = ctx.modelRegistry;
         registry = current;
         combos = new Map();
@@ -222,6 +222,11 @@ export default function (pi: ExtensionAPI) {
 
         if (combos.size > 0) register(known);
         else pi.unregisterProvider(PROVIDER);
+        // A resumed session restores the model of the last response, which names the member that
+        // answered; the combo the branch selected is only in its last model_change.
+        const change = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "model_change");
+        const selected = change?.provider === PROVIDER ? current.find(PROVIDER, change.modelId) : undefined;
+        if (selected && (ctx.model?.provider !== PROVIDER || ctx.model.id !== selected.id)) await pi.setModel(selected);
         if (unknown.length > 0 && ctx.hasUI)
             ctx.ui.notify(`Combos cannot find models yet: ${unknown.join(", ")}`, "warning");
         if (invalid && ctx.hasUI) ctx.ui.notify(`Combos ignore invalid JSON in ${invalid}`, "warning");
