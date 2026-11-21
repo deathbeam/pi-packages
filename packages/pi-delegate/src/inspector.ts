@@ -220,6 +220,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                     let lastWindow = { height: 0, total: 0 };
                     let expanded = false;
                     let lastSidebar = 0;
+                    let lastPill: { x: number; y: number; width: number } | undefined;
                     let lastJobsStart = 0;
                     const transcripts = new Map<string, Transcript>();
                     const loaded = new Set<string>();
@@ -376,13 +377,10 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                         if (top !== undefined && shown.length && window.total > height) {
                             const pill = truncateToWidth(jumpPill(), width, "");
                             const row = rows.length - 2 - (job.detail ? 1 : 0);
-                            rows[row] = compositeTuiLine(
-                                rows[row] ?? "",
-                                pill,
-                                Math.floor((width - visibleWidth(pill)) / 2),
-                                visibleWidth(pill),
-                                width,
-                            );
+                            const x = Math.floor((width - visibleWidth(pill)) / 2);
+                            rows[row] = compositeTuiLine(rows[row] ?? "", pill, x, visibleWidth(pill), width);
+                            // Screen coordinates: title and rule sit above the panes, the sidebar and a gap to the left.
+                            lastPill = { x: lastSidebar + 1 + x, y: row + 2, width: visibleWidth(pill) };
                         }
                         return rows;
                     }
@@ -437,6 +435,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                             );
                             const historyWidth = Math.max(1, width - sidebarWidth - 1);
                             lastSidebar = sidebarWidth;
+                            lastPill = undefined;
                             // HStack measures a child at the full width first, so composing the panes here keeps one render per frame.
                             const left = renderJobs(sidebarWidth, items, selectedIndex);
                             const right = renderHistory(historyWidth, selected);
@@ -477,6 +476,15 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                                 selectJob(event.wheelDelta < 0 ? -1 : 1);
                             } else if (event.type === "wheel" && event.wheelDelta) {
                                 scroll(event.wheelDelta);
+                            } else if (
+                                event.type === "click" &&
+                                event.button === "left" &&
+                                lastPill &&
+                                event.y === lastPill.y &&
+                                event.x >= lastPill.x &&
+                                event.x < lastPill.x + lastPill.width
+                            ) {
+                                top = undefined;
                             } else if (event.type === "click" && event.button === "left" && event.x < lastSidebar) {
                                 const items = jobs();
                                 const target = items[lastJobsStart + Math.floor((event.y - 2) / 3)];

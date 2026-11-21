@@ -390,6 +390,28 @@ describe("inspector", () => {
         assert.match(rows().join("\n"), /Jump to latest message · Ctrl\+End/);
         wheel(60, 1000);
         assert.doesNotMatch(rows().join("\n"), /Jump to latest message/, "the pill stayed at the bottom");
+        // A click on the pill jumps to the bottom, like pi's own.
+        wheel(60, -3);
+        const pillY = rows().findIndex((row: string) => row.includes("Jump to latest message"));
+        const pillX = rows()[pillY].indexOf("Jump to latest message");
+        view.handleMouse({
+            type: "click",
+            button: "left",
+            x: pillX,
+            y: pillY,
+            screenX: pillX,
+            screenY: pillY,
+            width: 80,
+            height: 24,
+            shift: false,
+            alt: false,
+            ctrl: false,
+        });
+        assert.doesNotMatch(
+            rows().join("\n"),
+            /Jump to latest message/,
+            "a click on the pill did not jump to the bottom",
+        );
         wheel(5, 1);
         assert.match(rows()[2].split("│")[1] ?? "", /first run/, "the wheel over the sidebar did not move");
         assert.doesNotMatch(rows().join("\n"), /↳/, "a transcript built after expanding must render expanded");
