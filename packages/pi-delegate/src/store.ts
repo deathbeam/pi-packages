@@ -1,5 +1,5 @@
 import type { ChildMessage, ChildUpdate } from "./child.ts";
-import { resultPreview, toolCallDetail } from "./format.ts";
+import { type JobUsage, resultPreview, toolCallDetail, usageFromMessages } from "./format.ts";
 import type { IsolationState } from "./isolation.ts";
 
 export type JobStatus = "running" | "done" | "failed" | "cancelled" | "interrupted";
@@ -21,6 +21,8 @@ export type InspectJob = {
     /** The failure detail shown under a finished job's transcript. */
     detail?: string;
     isolation?: IsolationState;
+    /** Usage totals captured at finish: a restored transcript can drop pre-compaction messages. */
+    usage?: JobUsage;
     /** Set once an isolated job's clone was applied or discarded, so a steer revive refuses instead of rerunning in the main tree. */
     cloneClosed?: boolean;
 };
@@ -30,6 +32,8 @@ export type DelegateJob = InspectJob & {
     steer?: (message: string) => Promise<void>;
     swapModel?: (provider: string, modelId: string, level?: string, onModelSet?: () => void) => Promise<void>;
 };
+
+export type JobStore = ReturnType<typeof createJobStore>;
 
 const JOB_ENTRY = "delegate-job";
 
@@ -125,6 +129,7 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
             running.delete(job.id);
             job.status = status;
             if (detail) job.detail = detail;
+            job.usage = usageFromMessages(job.messages, job.contextTokens);
             commit({ ...plain(job), messages: [], endedAt: Date.now() });
             return true;
         },
@@ -164,8 +169,6 @@ export function createJobStore(append: (customType: string, data: InspectJob) =>
         notify,
     };
 }
-
-export type JobStore = ReturnType<typeof createJobStore>;
 
 /** The job's latest tool call and its result, once the result arrives. */
 export function lastToolCall(job: InspectJob): {

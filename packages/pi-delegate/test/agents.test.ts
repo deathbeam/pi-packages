@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, it } from "vitest";
-import { resolveModel } from "../src/agents.ts";
-import { cleanup, packageRoot } from "./helpers.ts";
+import { afterAll, afterEach, describe, it } from "vitest";
+import { agentsFor, resolveModel } from "../src/agents.ts";
+import { agentDir, cleanup, packageRoot } from "./helpers.ts";
 
 const agentFiles = readdirSync(join(packageRoot, "agents"))
     .filter((file) => file.endsWith(".md"))
@@ -29,6 +30,74 @@ describe("bundled agents", () => {
                 );
             const isolated = text.match(/^isolated:\s*(\S+)/m)?.[1];
             if (isolated) assert.match(isolated, /^(true|false)$/, `${file} isolated "${isolated}"`);
+        }
+    });
+});
+
+describe("agent discovery", () => {
+    const agentFile = (layer: string) => `---\nname: probe\ndescription: ${layer}\n---\n${layer} prompt\n`;
+    const home = process.env.HOME;
+
+    afterEach(() => {
+        process.env.HOME = home;
+    });
+
+    it("lets each later layer shadow the same agent name", () => {
+        const root = mkdtempSync(join(tmpdir(), "pi-delegate-discovery-"));
+        const project = join(root, "project");
+        const cwd = join(project, "sub");
+        const configured = join(root, "configured");
+        const user = join(agentDir, "agents");
+        const layers = [
+            [join(project, ".agents", "agents"), "project-agents"],
+            [join(cwd, ".pi", "agents"), "project-pi"],
+            [user, "user-pi"],
+        ] as const;
+        try {
+            for (const dir of [project + "/.git", cwd, ...layers.map(([dir]) => dir), configured])
+                mkdirSync(dir, { recursive: true });
+            for (const [dir, layer] of layers) writeFileSync(join(dir, "probe.md"), agentFile(layer));
+            writeFileSync(join(configured, "probe.md"), agentFile("configured"));
+            writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ delegate: { agentDirs: [configured] } }));
+            const winner = (trusted?: boolean) =>
+                agentsFor(cwd, trusted ?? true).find((agent) => agent.name === "probe")?.description;
+
+            assert.equal(winner(), "configured");
+            rmSync(configured, { recursive: true, force: true });
+            assert.equal(winner(), "project-pi");
+            assert.equal(winner(false), "user-pi");
+            rmSync(join(cwd, ".pi", "agents"), { recursive: true, force: true });
+            assert.equal(winner(), "project-agents");
+            rmSync(join(project, ".agents"), { recursive: true, force: true });
+            // The walk stops at the project's .git, so .agents/ above it is not a project layer.
+            assert.equal(winner(), "user-pi");
+            assert.ok(
+                agentsFor(cwd, true).some((agent) => agent.name === "explore"),
+                "bundled agents still load",
+            );
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(user, { recursive: true, force: true });
+        }
+    });
+
+    it("prefers the pi agent dir over ~/.agents", () => {
+        const root = mkdtempSync(join(tmpdir(), "pi-delegate-home-"));
+        const user = join(agentDir, "agents");
+        try {
+            process.env.HOME = root;
+            mkdirSync(join(root, ".agents", "agents"), { recursive: true });
+            mkdirSync(user, { recursive: true });
+            writeFileSync(join(root, ".agents", "agents", "probe.md"), agentFile("home-agents"));
+            writeFileSync(join(user, "probe.md"), agentFile("pi-agent-dir"));
+            const winner = () => agentsFor(root, true).find((agent) => agent.name === "probe")?.description;
+
+            assert.equal(winner(), "pi-agent-dir");
+            rmSync(join(user, "probe.md"));
+            assert.equal(winner(), "home-agents");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(user, { recursive: true, force: true });
         }
     });
 });

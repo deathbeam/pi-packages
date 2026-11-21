@@ -24,6 +24,7 @@ export const keyHint = (_keybinding: string, description: string) => `«key»${d
 export const baseCtx: any = {
     cwd: packageRoot,
     hasUI: false,
+    isProjectTrusted: () => true,
     model: { provider: "anthropic", id: "m" },
     modelRegistry: { find: () => ({ contextWindow: 1000000 }) },
     thinkingLevel: "off",

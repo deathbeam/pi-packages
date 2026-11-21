@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager, type MessageEndEvent } from "@earendil-works/pi-coding-agent";
-import { limitOutput, textParts } from "./format.ts";
+import { answerTokens, limitOutput, textParts, usageTokens } from "./format.ts";
 
 type Child = ChildProcessWithoutNullStreams;
 
@@ -21,12 +21,6 @@ type ChildRun = {
     steer: (message: string) => Promise<void>;
     swapModel: (provider: string, modelId: string, level?: string, onModelSet?: () => void) => Promise<void>;
 };
-
-function usageTokens(usage: any): number | undefined {
-    if (!usage) return undefined;
-    const tokens = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-    return tokens > 0 ? tokens : undefined;
-}
 
 /** Run one RPC child, keeping its writer serialized so backpressure and EPIPE reach the caller. */
 export function runChild(
@@ -139,7 +133,7 @@ export function runChild(
                             childError = message.errorMessage;
                             const text = textParts(message.content).join("");
                             if (text) liveText = text;
-                            contextTokens = usageTokens(message.usage);
+                            contextTokens = answerTokens(message);
                         }
                         onUpdate?.({ contextTokens, message });
                         return;

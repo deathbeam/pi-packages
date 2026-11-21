@@ -67,3 +67,33 @@ describe("lastToolCall", () => {
         assert.deepEqual(lastToolCall({ messages: [] } as any), {});
     });
 });
+
+describe("job finish", () => {
+    it("captures usage totals and context tokens", () => {
+        const saved: any[] = [];
+        const store = createJobStore((_type, data) => saved.push(data));
+        const job: any = {
+            ...jobEntry("a", "running"),
+            contextTokens: 12,
+            controller: new AbortController(),
+            messages: [
+                {
+                    role: "assistant",
+                    usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12, cost: { total: 0.5 } },
+                },
+            ],
+        };
+        store.launch(job);
+        assert.equal(store.finish(job, "done"), true);
+        assert.deepEqual(job.usage, {
+            input: 10,
+            output: 2,
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: 0.5,
+            cacheHit: 0,
+            contextTokens: 12,
+        });
+        assert.deepEqual(saved.at(-1)?.usage, job.usage);
+    });
+});

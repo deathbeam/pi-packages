@@ -13,19 +13,21 @@ import {
     STATUS_COLORS,
     statusText,
     toolCallDetail,
+    usageFromMessages,
+    usageLine,
     usageStats,
     widgetJobs,
 } from "../src/format.ts";
-import { cleanup } from "./helpers.ts";
+import { cleanup, themeStub } from "./helpers.ts";
 
 afterAll(cleanup);
+
+const bare = { fg: (_color: string, text: string) => text } as any;
 
 describe("statusText", () => {
     it("knows exactly the five job statuses", () => {
         assert.deepEqual(Object.keys(STATUS_COLORS).sort(), ["cancelled", "done", "failed", "interrupted", "running"]);
     });
-
-    const bare = { fg: (_color: string, text: string) => text } as any;
 
     // One vocabulary: every status renders through statusText; only running spins with the clock.
     it("spins only the running status", () => {
@@ -121,6 +123,81 @@ describe("usageStats", () => {
         );
         assert.equal(usageStats({}, 65000), "1m 05s");
         assert.equal(usageStats({}, 3720000), "1h 02m");
+    });
+});
+
+describe("usageFromMessages", () => {
+    it("totals a job's usage the way pi's footer does", () => {
+        const messages = [
+            { role: "user", content: "hi" },
+            { role: "assistant", usage: { input: 1000, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 1 } } },
+            {
+                role: "assistant",
+                usage: {
+                    input: 16,
+                    output: 4300,
+                    cacheRead: 73000,
+                    cacheWrite: 26000,
+                    totalTokens: 99016,
+                    cost: { total: 0.231 },
+                },
+            },
+            {
+                role: "toolResult",
+                usage: { input: 4000, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+            },
+        ] as any;
+        assert.deepEqual(usageFromMessages(messages), {
+            input: 5016,
+            output: 4300,
+            cacheRead: 73000,
+            cacheWrite: 26000,
+            cost: 1.241,
+            cacheHit: (73000 / 99016) * 100,
+            contextTokens: 99016,
+        });
+    });
+
+    it("ignores aborted answers for context and falls back to the live sample", () => {
+        const aborted = { role: "assistant", stopReason: "aborted", usage: { input: 5, output: 5, totalTokens: 10 } };
+        assert.equal(usageFromMessages([aborted] as any, 37).contextTokens, 37);
+        assert.equal(usageFromMessages([aborted] as any).contextTokens, undefined);
+    });
+});
+
+describe("usageLine", () => {
+    const usage = {
+        input: 16,
+        output: 4300,
+        cacheRead: 73000,
+        cacheWrite: 26000,
+        cost: 0.231,
+        cacheHit: 73.7257,
+        contextTokens: 946000,
+    };
+
+    it("formats the totals like pi's footer", () => {
+        assert.equal(usageLine(bare, usage, 1000000), "↑16 ↓4.3k R73k W26k CH73.7% $0.231 94.6%/1.0M");
+    });
+
+    it("colors the context percent past pi's thresholds", () => {
+        const { theme, colored } = themeStub();
+        const job = (contextTokens: number) => usageLine(theme, { ...usage, contextTokens }, 1000000);
+
+        assert.equal(job(500000), "↑16 ↓4.3k R73k W26k CH73.7% $0.231 50.0%/1.0M");
+        assert.equal(colored.length, 0);
+        assert.equal(job(800000), "↑16 ↓4.3k R73k W26k CH73.7% $0.231 80.0%/1.0M");
+        assert.deepEqual(colored.at(-1), ["warning", "80.0%/1.0M"]);
+        assert.equal(job(950000), "↑16 ↓4.3k R73k W26k CH73.7% $0.231 95.0%/1.0M");
+        assert.deepEqual(colored.at(-1), ["error", "95.0%/1.0M"]);
+    });
+
+    it("shows an unknown percent as ? like pi", () => {
+        assert.equal(
+            usageLine(bare, { ...usage, contextTokens: undefined }, 1000000),
+            "↑16 ↓4.3k R73k W26k CH73.7% $0.231 ?/1.0M",
+        );
+        assert.equal(usageLine(bare, { ...usage, contextTokens: 5 }), "↑16 ↓4.3k R73k W26k CH73.7% $0.231 ?/0");
     });
 });
 

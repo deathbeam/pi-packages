@@ -18,7 +18,7 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
 ```json
 {
     "delegate": {
-        "agentDirs": ["./.pi/agents"],
+        "agentDirs": ["../shared/agents"],
         "models": {
             "cheap": "anthropic/claude-haiku-5-5:low",
             "balanced": "anthropic/claude-sonnet-5-5:high",
@@ -28,7 +28,7 @@ Optional `delegate` settings live in `~/.pi/agent/settings.json` or `.pi/setting
 }
 ```
 
-- `agentDirs` adds directories to search for agents. The bundled agents and `~/.agents/agents` are always loaded.
+- `agentDirs` adds agent directories on top of the defaults: bundled, `~/.agents/agents`, `~/.pi/agent/agents`, `.agents/agents` from the working directory up to the git root, then `.pi/agents`. Later wins on a name clash. Project dirs and `.pi/settings.json` load only in a trusted project.
 - `models` maps the `cheap`, `balanced`, and `strong` tiers to a `provider/model-id` with an optional `:<thinking>` suffix. A tier without an entry uses the session model.
 
 Agents are Markdown files with frontmatter. The body is appended to the delegate's system prompt.

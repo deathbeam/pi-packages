@@ -1,4 +1,9 @@
-import { getMarkdownTheme, type KeybindingHints, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+    calculateContextTokens,
+    getMarkdownTheme,
+    type KeybindingHints,
+    type Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
     type Component,
     Container,
@@ -9,7 +14,7 @@ import {
     truncateToWidth,
 } from "@earendil-works/pi-tui";
 import type { IsolationState } from "./isolation.ts";
-import type { DelegateJob, JobStatus } from "./store.ts";
+import type { DelegateJob, InspectJob, JobStatus } from "./store.ts";
 
 type UsageInfo = {
     contextTokens?: number;
@@ -39,6 +44,16 @@ type IsolationStateFields = {
 
 export type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "model" | "tools" | "isolation"> & {
     background: boolean;
+};
+
+export type JobUsage = {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cost: number;
+    cacheHit?: number;
+    contextTokens?: number;
 };
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -101,7 +116,7 @@ function formatTokens(count: number): string {
     return `${Math.round(count / 1000000)}M`;
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
     const seconds = Math.max(0, Math.floor(ms / 1000));
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
@@ -116,6 +131,60 @@ export function usageStats(usage: UsageInfo, elapsedMs: number): string {
             : formatTokens(usage.contextTokens)
         : "";
     return [tokens, formatDuration(elapsedMs)].filter(Boolean).join(" · ");
+}
+
+export function usageTokens(usage: any): number | undefined {
+    if (!usage) return undefined;
+    const tokens = calculateContextTokens(usage);
+    return tokens > 0 ? tokens : undefined;
+}
+
+/** Context tokens of an answer pi counts: aborted and failed ones carry no usable usage. */
+export function answerTokens(message: { stopReason?: string; usage?: any }): number | undefined {
+    if (message.stopReason === "aborted" || message.stopReason === "error") return undefined;
+    return usageTokens(message.usage);
+}
+
+/** Same totals pi's footer builds. */
+export function usageFromMessages(
+    messages: readonly { role?: string; usage?: any }[],
+    contextTokens?: number,
+): JobUsage {
+    const totals: JobUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    for (const message of messages) {
+        const usage = message.usage;
+        if (!usage) continue;
+        totals.input += usage.input ?? 0;
+        totals.output += usage.output ?? 0;
+        totals.cacheRead += usage.cacheRead ?? 0;
+        totals.cacheWrite += usage.cacheWrite ?? 0;
+        totals.cost += usage.cost?.total ?? 0;
+        if (message.role !== "assistant") continue;
+        const prompt = usage.input + usage.cacheRead + usage.cacheWrite;
+        totals.cacheHit = prompt > 0 ? (usage.cacheRead / prompt) * 100 : undefined;
+        const total = answerTokens(message);
+        if (total) totals.contextTokens = total;
+    }
+    return { ...totals, contextTokens: totals.contextTokens ?? contextTokens };
+}
+
+/** pi's footer stats line. */
+export function usageLine(theme: Theme, usage: JobUsage, contextWindow?: number): string {
+    const parts: string[] = [];
+    if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
+    if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+    if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
+    if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
+    if ((usage.cacheRead > 0 || usage.cacheWrite > 0) && usage.cacheHit !== undefined)
+        parts.push(`CH${usage.cacheHit.toFixed(1)}%`);
+    if (usage.cost) parts.push(`$${usage.cost.toFixed(3)}`);
+    const window = contextWindow ?? 0;
+    const percent = window && usage.contextTokens !== undefined ? (usage.contextTokens / window) * 100 : undefined;
+    const context =
+        percent === undefined ? `?/${formatTokens(window)}` : `${percent.toFixed(1)}%/${formatTokens(window)}`;
+    const color = percent === undefined ? undefined : percent > 90 ? "error" : percent > 70 ? "warning" : undefined;
+    parts.push(color ? theme.fg(color, context) : context);
+    return parts.join(" ");
 }
 
 export function elapsedMs(job: { startedAt: number; endedAt?: number }, now = Date.now()): number {

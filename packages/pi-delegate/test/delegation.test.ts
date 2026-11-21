@@ -372,9 +372,11 @@ describe("inspector", () => {
         assert.match(liveRows[guidanceRow + 2], /Keep both paragraphs\./);
         assert.match(
             liveRows.at(-3)?.split("│")[1] ?? "",
-            /\b(\d+)\/\1\b/,
-            "history stopped following the latest activity",
+            /3\.7%\/1\.0M  \d+(–\d+)?\/\d+\b/,
+            "the pane's footer line lost the usage totals or the scroll counter",
         );
+        assert.doesNotMatch(liveRows[0] ?? "", /3\.7%\/1\.0M/, "the footer owns context, not the header");
+        assert.match(liveRows[0] ?? "", / · \d+s\s*$/, "the header keeps the elapsed time");
         assert.match(view.render(80)[4].split("│")[0], /    37k\/1\.0M · \d+s/);
         assert.doesNotMatch(view.render(80).join("\n"), /\b\d+ tool calls?\b/);
         view.handleInput("\x1b");
@@ -427,6 +429,7 @@ describe("inspector", () => {
         assert.match(text, /Keep both paragraphs\./);
         assert.match(text, /Final parent guidance/);
         assert.match(text, /Count/);
+        assert.match(stripVTControlCharacters(reopened.render(80).at(-3) ?? ""), /3\.7%\/1\.0M/);
         reopened.handleInput("\x1b");
         await reopening;
         assert.equal(app.state.screens, 2);

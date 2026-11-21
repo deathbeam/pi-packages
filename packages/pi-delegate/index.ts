@@ -43,7 +43,15 @@ import {
     type IsolationState,
 } from "./src/isolation.ts";
 import { registerInspector } from "./src/inspector.ts";
-import { agentByName, agentsFor, configFor, contextWindowFor, resolveModel, type AgentFile } from "./src/agents.ts";
+import {
+    agentByName,
+    agentsFor,
+    configFor,
+    contextWindowFor,
+    projectTrusted,
+    resolveModel,
+    type AgentFile,
+} from "./src/agents.ts";
 
 type SteerDetails = Pick<
     DelegateJob,
@@ -274,7 +282,11 @@ export default function (pi: ExtensionAPI) {
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const requested = fields.model ?? agent.model;
-        const { model, thinking } = resolveModel(requested, configFor(ctx.cwd).models ?? {}, ctx);
+        const { model, thinking } = resolveModel(
+            requested,
+            configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {},
+            ctx,
+        );
         if (!model) throw new Error(`No model found for "${requested}".`);
         const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
             (tool) => !DELEGATION_TOOLS.has(tool),
@@ -392,7 +404,11 @@ export default function (pi: ExtensionAPI) {
     /** Swaps a running child's model over the RPC; the child confirms or rejects it, and never restarts. */
     async function swapModel(job: DelegateJob, request: string, ctx: ExtensionContext) {
         if (!job.swapModel) throw new Error(`Delegate job "${job.id}" cannot switch models.`);
-        const { model, explicit: level } = resolveModel(request, configFor(ctx.cwd).models ?? {}, ctx);
+        const { model, explicit: level } = resolveModel(
+            request,
+            configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {},
+            ctx,
+        );
         if (!model) throw new Error(`No model found for "${request}".`);
         const [provider, ...rest] = model.split("/");
         if (!rest.length) throw new Error(`Model "${model}" has no provider prefix.`);
@@ -479,7 +495,7 @@ export default function (pi: ExtensionAPI) {
 
     registerInspector(pi, store, DELEGATE_SESSION_DIR);
 
-    const agentList = agentsFor(process.cwd()).map((agent) => {
+    const agentList = agentsFor(process.cwd(), projectTrusted(process.cwd())).map((agent) => {
         const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
         return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
     });
@@ -542,7 +558,7 @@ export default function (pi: ExtensionAPI) {
             const cloneId = jobId(optional(rawParams.clone));
             if (cloneId && isolated === false) throw new Error("clone always runs isolated; omit isolated: false.");
             const clone = cloneId ? clonedJob(cloneId).isolation : undefined;
-            const agent = agentByName(ctx.cwd, agentName);
+            const agent = agentByName(ctx.cwd, agentName, ctx.isProjectTrusted());
             const effective = clone ? true : (isolated ?? agent.isolated);
             return runDelegate(ctx, agent, undefined, { description, model, isolated: effective, clone }, task, signal);
         },
@@ -643,7 +659,7 @@ export default function (pi: ExtensionAPI) {
                 throw new Error(
                     `The isolated clone of delegate job "${id}" was already applied or discarded; delegate_steer cannot continue it. Start a fresh delegate with a condensed brief instead.`,
                 );
-            const agent = agentByName(ctx.cwd, prior.agent);
+            const agent = agentByName(ctx.cwd, prior.agent, ctx.isProjectTrusted());
             return runDelegate(
                 ctx,
                 agent,

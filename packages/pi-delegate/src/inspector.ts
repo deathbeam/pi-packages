@@ -13,11 +13,13 @@ import {
     Spacer,
     Text,
     truncateToWidth,
+    visibleWidth,
     wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { type ChildMessage, sessionMessages } from "./child.ts";
 import {
     elapsedMs,
+    formatDuration,
     formatTools,
     jobIdentity,
     resultPreview,
@@ -27,6 +29,8 @@ import {
     textParts,
     toolCallDetail,
     toolLines,
+    usageFromMessages,
+    usageLine,
     usageStats,
 } from "./format.ts";
 import type { InspectJob, JobStore } from "./store.ts";
@@ -257,10 +261,20 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                     }
                     function renderHistory(width: number, job: InspectJob): string[] {
                         const tools = toolsLines(job, width);
-                        // Fixed rows: header, model, description, rule, counter, plus the failure detail.
+                        // Fixed rows: header, model, description, rule, footer, plus the failure detail.
                         const height = Math.max(0, bodyHeight() - 5 - tools.length - (job.detail ? 1 : 0));
                         const view = transcript(job);
-                        view.sync(messagesOf(job));
+                        const messages = messagesOf(job);
+                        view.sync(messages);
+                        // A finished job keeps the totals captured at finish; a restored one recounts its transcript.
+                        const usage = theme.fg(
+                            "dim",
+                            usageLine(
+                                theme,
+                                job.usage ?? usageFromMessages(messages, job.contextTokens),
+                                job.contextWindow,
+                            ),
+                        );
                         const window = view.window(width, top, height);
                         lastWindow = { height, total: window.total };
                         const shown = window.lines.length
@@ -275,13 +289,13 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                                     ),
                                 ]
                               : [];
-                        const counter = window.lines.length
-                            ? `${window.start + 1}–${window.start + window.lines.length}`
-                            : "0";
+                        const counterText = window.lines.length
+                            ? `${window.start + 1}–${window.start + window.lines.length}/${window.total}`
+                            : `0/${window.total}`;
                         return (
                             [
                                 truncateToWidth(
-                                    `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", usageStats(job, elapsedMs(job)))}`,
+                                    `${statusText(theme, job.status)} ${jobIdentity(theme, job)} ${theme.fg("muted", formatDuration(elapsedMs(job)))}`,
                                     width,
                                 ),
                                 truncateToWidth(theme.fg("dim", job.model), width),
@@ -293,7 +307,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                                 ...(job.detail
                                     ? [truncateToWidth(theme.fg(STATUS_COLORS.failed, job.detail), width)]
                                     : []),
-                                truncateToWidth(theme.fg("dim", `${counter}/${window.total}`), width),
+                                `${truncateToWidth(usage, Math.max(0, width - visibleWidth(counterText) - 2), "…")}  ${theme.fg("dim", counterText)}`,
                             ]
                                 .slice(0, bodyHeight())
                                 // Pad every row so the pane's right edge holds still while the transcript scrolls.

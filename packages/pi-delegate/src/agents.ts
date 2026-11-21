@@ -1,9 +1,15 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import {
+    CONFIG_DIR_NAME,
+    getAgentDir,
+    hasTrustRequiringProjectResources,
+    parseFrontmatter,
+    ProjectTrustStore,
+} from "@earendil-works/pi-coding-agent";
 
 export type AgentFile = {
     name: string;
@@ -19,7 +25,6 @@ type DelegateConfig = {
     models?: Record<string, unknown>;
 };
 
-const DEFAULT_AGENT_DIR = "~/.agents/agents";
 const BUNDLED_AGENT_DIR = fileURLToPath(new URL("../agents", import.meta.url));
 const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 
@@ -71,10 +76,31 @@ function loadAgents(dir: string): AgentFile[] {
     return agents;
 }
 
-function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[] {
-    const dirs = [BUNDLED_AGENT_DIR, DEFAULT_AGENT_DIR, ...stringList(configuredDirs)].map((dir) =>
-        expandPath(dir, cwd),
-    );
+/** pi's user skill dirs (`<agentDir>/skills` then `~/.agents/skills`) with `agents` for `skills`. */
+function userAgentDirs(): string[] {
+    // Reversed: pi loads `<agentDir>` first, so it wins.
+    return [join(homedir(), ".agents", "agents"), join(getAgentDir(), "agents")];
+}
+
+/** pi's project skill dirs: `<cwd>/.pi/skills` plus `.agents/skills` from cwd up to the git root. */
+function projectAgentDirs(cwd: string): string[] {
+    const agentsDirs: string[] = [];
+    for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+        agentsDirs.unshift(join(dir, ".agents", "agents"));
+        if (existsSync(join(dir, ".git")) || dirname(dir) === dir) break;
+    }
+    // Same reversal: pi loads .pi first.
+    return [...agentsDirs, join(cwd, CONFIG_DIR_NAME, "agents")];
+}
+
+// Later dirs win; same order as pi's skill discovery.
+function discoverAgents(cwd: string, configuredDirs: unknown, trusted: boolean): AgentFile[] {
+    const dirs = [
+        BUNDLED_AGENT_DIR,
+        ...userAgentDirs(),
+        ...(trusted ? projectAgentDirs(cwd) : []),
+        ...stringList(configuredDirs),
+    ].map((dir) => expandPath(dir, cwd));
     const agents = new Map<string, AgentFile>();
     for (const dir of [...new Set(dirs)]) {
         for (const agent of loadAgents(dir)) agents.set(agent.name, agent);
@@ -82,12 +108,12 @@ function discoverAgents(cwd: string, configuredDirs: unknown): AgentFile[] {
     return [...agents.values()];
 }
 
-export function agentsFor(cwd: string): AgentFile[] {
-    return discoverAgents(cwd, configFor(cwd).agentDirs);
+export function agentsFor(cwd: string, trusted: boolean): AgentFile[] {
+    return discoverAgents(cwd, configFor(cwd, trusted).agentDirs, trusted);
 }
 
-export function agentByName(cwd: string, name: string): AgentFile {
-    const agents = agentsFor(cwd);
+export function agentByName(cwd: string, name: string, trusted: boolean): AgentFile {
+    const agents = agentsFor(cwd, trusted);
     const agent = agents.find((candidate) => candidate.name === name);
     if (!agent) {
         const names = agents.map((candidate) => candidate.name).join(", ") || "(none)";
@@ -96,9 +122,15 @@ export function agentByName(cwd: string, name: string): AgentFile {
     return agent;
 }
 
-export function configFor(cwd: string): DelegateConfig {
+/** pi's rule without a ctx: a stored decision, else trusted unless project resources need gating. */
+export function projectTrusted(cwd: string): boolean {
+    return new ProjectTrustStore(getAgentDir()).get(cwd) ?? !hasTrustRequiringProjectResources(cwd);
+}
+
+export function configFor(cwd: string, trusted: boolean): DelegateConfig {
     const global = readConfig(join(getAgentDir(), "settings.json"));
-    const project = readConfig(join(cwd, CONFIG_DIR_NAME, "settings.json"));
+    // pi ignores project settings in an untrusted project.
+    const project = trusted ? readConfig(join(cwd, CONFIG_DIR_NAME, "settings.json")) : {};
     return {
         agentDirs: [...stringList(global.agentDirs), ...stringList(project.agentDirs)],
         models: { ...(global.models ?? {}), ...(project.models ?? {}) },
