@@ -175,6 +175,11 @@ const inspectorKeys: Record<string, string> = {
     "tui.select.cancel": "\x1b",
     "tui.select.up": "up",
     "tui.select.down": "down",
+    "tui.altScreen.pageUp": "pageUp",
+    "tui.altScreen.pageDown": "pageDown",
+    "tui.altScreen.top": "ctrl+home",
+    "tui.altScreen.bottom": "ctrl+end",
+    "app.tools.expand": "ctrl+o",
 };
 
 /** A TUI stub that opens the inspector overlay and records widget repaints and frame measurements. */

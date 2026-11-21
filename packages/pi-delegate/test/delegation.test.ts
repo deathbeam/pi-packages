@@ -267,8 +267,8 @@ describe("inspector", () => {
         const toolsRow = rows.findIndex((row: string) => row.includes("read, grep, find, ls"));
         const titleRow = rows.findIndex((row: string) => row.split("│")[1]?.includes("second run"));
         assert.ok(rows.findIndex((row: string) => row.includes(second.details.model)) < toolsRow);
-        assert.match(rows[toolsRow + 2].split("│")[1], /─{20}/);
-        assert.equal(titleRow, toolsRow + 1);
+        assert.match(rows[toolsRow + 1].split("│")[1], /─{20}/);
+        assert.equal(titleRow, 2);
         assert.ok(titleRow < rows.findIndex((row: string) => row.includes("Trace delegates")));
         assert.doesNotMatch(rows[toolsRow].split("│")[1], /Tools:/);
         const narrow = view.render(32).join("\n");
@@ -332,6 +332,87 @@ describe("inspector", () => {
         }
         view.handleInput("up");
         assert.match(view.render(80).join("\n"), /second run/);
+        view.handleInput("\x1b");
+        await observing;
+        await cancelJob(app, second);
+    });
+    it("pages, jumps and expands the activity pane from its keybindings", async () => {
+        const app = tuiSession();
+        await finishJob(app, await startJob(app, "first run"));
+        const second = await startJob(app, "second run", longTask);
+        const observing = app.inspect.handler("", { mode: "tui", ui: app.ui });
+        const view = await withTimeout(app.viewerReady);
+        await steerJob(app, second, guidance);
+        view.handleInput("\x1b[C");
+        assert.match(view.render(80)[0], /\[Activity\]/);
+        const rows = () => view.render(80).map((row: string) => stripVTControlCharacters(row));
+        // The pane's counter reports the visible window: first–last/total.
+        const counter = () => {
+            const match = rows()[21]
+                ?.split("│")[1]
+                ?.match(/(\d+)–(\d+)\/(\d+)/);
+            assert.ok(match, "the activity pane lost its scroll counter");
+            return { start: Number(match[1]), end: Number(match[2]), total: Number(match[3]) };
+        };
+        const follow = counter();
+        assert.ok(follow.start > 1, "the transcript must be taller than the pane to page it");
+
+        view.handleInput("pageUp");
+        assert.equal(counter().start, follow.start - 11, "page up did not move the window back by a page");
+        view.handleInput("ctrl+home");
+        assert.equal(counter().start, 1);
+        view.handleInput("ctrl+end");
+        assert.deepEqual(counter(), follow);
+
+        // Expanded tool rows drop the one-line ↳ preview and print the result in full.
+        assert.match(rows().join("\n"), /↳/);
+        view.handleInput("ctrl+o");
+        assert.doesNotMatch(rows().join("\n"), /↳/, "expand did not show the full tool output");
+
+        // The wheel scrolls the pane under the pointer; over the sidebar it moves the selection.
+        view.handleInput("ctrl+home");
+        const wheel = (x: number, wheelDelta: number) =>
+            view.handleMouse({
+                type: "wheel",
+                button: "none",
+                x,
+                y: 5,
+                screenX: x,
+                screenY: 5,
+                width: 80,
+                height: 24,
+                shift: false,
+                alt: false,
+                ctrl: false,
+                wheelDelta,
+            });
+        assert.ok(wheel(60, -3));
+        assert.match(rows().join("\n"), /Jump to latest message · Ctrl\+End/);
+        wheel(60, 1000);
+        assert.doesNotMatch(rows().join("\n"), /Jump to latest message/, "the pill stayed at the bottom");
+        wheel(5, 1);
+        assert.match(rows()[2].split("│")[1] ?? "", /first run/, "the wheel over the sidebar did not move");
+        assert.doesNotMatch(rows().join("\n"), /↳/, "a transcript built after expanding must render expanded");
+
+        // A click on a job row selects it, like pi's select list.
+        view.handleMouse({
+            type: "click",
+            button: "left",
+            x: 5,
+            y: 2,
+            screenX: 5,
+            screenY: 2,
+            width: 80,
+            height: 24,
+            shift: false,
+            alt: false,
+            ctrl: false,
+        });
+        assert.match(rows()[2].split("│")[1] ?? "", /second run/, "a click on a job row did not select it");
+
+        view.handleInput("ctrl+o");
+        assert.match(rows().join("\n"), /↳/, "collapse did not restore the preview");
+
         view.handleInput("\x1b");
         await observing;
         await cancelJob(app, second);
