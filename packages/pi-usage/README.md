@@ -4,7 +4,7 @@ Use the `/usage` command for a fullscreen dashboard of token usage and cost. It 
 
 The Summary covers totals, trends with a month projection, the delegate share of the cost, activity and the top models, providers, projects, sessions, tools and skills.
 
-<img width="1134" height="709" alt="image" src="https://github.com/user-attachments/assets/0fb6c549-2f40-4111-83ca-6d02873e13a3" />
+![/usage report](media/screenshot.png)
 
 ## Installation
 

@@ -3,7 +3,7 @@
 Run subagents in the background with `delegate`, and manage them with `delegate_list`, `delegate_steer`, `delegate_cancel`, `delegate_apply`, and `delegate_discard`.
 `/delegate` opens a fullscreen inspector for live and recent jobs.
 
-<img width="2557" height="1549" alt="image" src="https://github.com/user-attachments/assets/e6c2f8dd-1228-4e78-bfe4-18bffe0ebf00" />
+![/delegate inspector](media/screenshot.png)
 
 ## Installation
 

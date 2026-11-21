@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-usage",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "description": "Minimal extension for token usage and cost per provider, model and project.",
   "type": "module",
   "license": "MIT",
@@ -19,13 +19,15 @@
   "files": [
     "index.ts",
     "src",
+    "media",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "image": "https://cdn.jsdelivr.net/npm/@deathbeam/pi-usage/media/screenshot.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
