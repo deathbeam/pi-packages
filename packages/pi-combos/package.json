@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-combos",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Minimal extension for model combos that fall back to the next model when one fails.",
   "type": "module",
   "license": "MIT",

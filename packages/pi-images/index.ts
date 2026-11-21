@@ -58,11 +58,12 @@ function describeImage(ctx: ExtensionContext, model: Model<Api>, block: ImageCon
     let description = descriptions.get(key);
     if (!description) {
         description = ctx.modelRegistry
-            .complete(
+            .streamSimple(
                 model,
                 { systemPrompt: VISION_PROMPT, messages: [{ role: "user", content: [block], timestamp: Date.now() }] },
                 { signal: ctx.signal },
             )
+            .result()
             .then((result) => {
                 const text = result.content
                     .flatMap((block) => (block.type === "text" ? [block.text] : []))

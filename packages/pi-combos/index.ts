@@ -76,7 +76,7 @@ function comboModel(name: string, members: Model<Api>[]): ProviderModelConfig {
     };
 }
 
-/** Stands in until session_start; anything stricter would clamp a restored thinking level. */
+/** Stands in while no member resolves; anything stricter would clamp a restored thinking level. */
 function pendingModel(name: string): ProviderModelConfig {
     return {
         id: name,
@@ -148,7 +148,8 @@ async function pipe(
                         break;
                     }
                     started = true;
-                    cooldowns.delete(memberKey(member));
+                    // An abort is not output, so a cooling member keeps its backoff.
+                    if (event.type !== "error") cooldowns.delete(memberKey(member));
                     // pi ignores updates that arrive before start.
                     if (start) out.push(start);
                 }
@@ -210,23 +211,29 @@ export default function (pi: ExtensionAPI) {
         const known: ProviderModelConfig[] = [];
         const { combos: configured, invalid } = readCombos(ctx.cwd, ctx.isProjectTrusted());
         for (const [name, refs] of configured) {
+            combos.set(name, refs);
             const members = refs.flatMap((ref) => {
                 const model = findModel(ref, current);
                 if (!model) unknown.push(ref);
                 return model ? [model] : [];
             });
-            if (members.length === 0) continue;
-            combos.set(name, refs);
-            known.push(comboModel(name, members));
+            known.push(members.length > 0 ? comboModel(name, members) : pendingModel(name));
         }
 
-        if (combos.size > 0) register(known);
-        else pi.unregisterProvider(PROVIDER);
+        if (known.length > 0) register(known);
         // A resumed session restores the model of the last response, which names the member that
         // answered; the combo the branch selected is only in its last model_change.
-        const change = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "model_change");
-        const selected = change?.provider === PROVIDER ? current.find(PROVIDER, change.modelId) : undefined;
-        if (selected && (ctx.model?.provider !== PROVIDER || ctx.model.id !== selected.id)) await pi.setModel(selected);
+        const branch = ctx.sessionManager.getBranch();
+        const change = branch.findLast((entry) => entry.type === "model_change");
+        const answered = branch.findLast((entry) => entry.type === "message" && entry.message.role === "assistant");
+        const restored =
+            answered?.type === "message" &&
+            answered.message.role === "assistant" &&
+            answered.message.provider === ctx.model?.provider &&
+            answered.message.model === ctx.model.id;
+        // --model is applied before session_start too, so only a restored transcript names the member.
+        const selected = restored && change?.provider === PROVIDER ? current.find(PROVIDER, change.modelId) : undefined;
+        if (selected) await pi.setModel(selected);
         if (unknown.length > 0 && ctx.hasUI)
             ctx.ui.notify(`Combos cannot find models yet: ${unknown.join(", ")}`, "warning");
         if (invalid && ctx.hasUI) ctx.ui.notify(`Combos ignore invalid JSON in ${invalid}`, "warning");

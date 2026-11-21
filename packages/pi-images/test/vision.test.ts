@@ -37,10 +37,10 @@ function transcript(data = "aGk=") {
 type VisionOptions = {
     input?: string[];
     find?: (provider: string, id: string) => any;
-    complete?: (model: any, request: any) => Promise<any>;
+    reply?: (model: any, request: any) => Promise<any>;
 };
 
-function visionCtx({ input = ["text"], find, complete }: VisionOptions = {}) {
+function visionCtx({ input = ["text"], find, reply }: VisionOptions = {}) {
     return {
         cwd: project,
         model: { id: "current", input },
@@ -48,12 +48,17 @@ function visionCtx({ input = ["text"], find, complete }: VisionOptions = {}) {
         ui: { notify: (message: string, type?: string) => notifications.push({ message, type }) },
         modelRegistry: {
             find: find ?? ((provider: string, id: string) => ({ provider, id, input: ["text", "image"] })),
-            complete:
-                complete ??
-                (async (model: any, request: any) => {
-                    described.push({ model, context: request });
-                    return { content: [{ type: "text", text: `desc-${request.messages[0].content[0].data}` }] };
-                }),
+            // The extension streams simply so that a virtual model such as combo/cheap gets routed.
+            streamSimple: (model: any, request: any) => ({
+                result: async () =>
+                    (
+                        reply ??
+                        (async (answered: any, asked: any) => {
+                            described.push({ model: answered, context: asked });
+                            return { content: [{ type: "text", text: `desc-${asked.messages[0].content[0].data}` }] };
+                        })
+                    )(model, request),
+            }),
         },
     };
 }
@@ -64,7 +69,7 @@ function blindVision() {
 
 function failingVision() {
     return visionCtx({
-        complete: async () => {
+        reply: async () => {
             throw new Error("boom");
         },
     });
@@ -197,7 +202,7 @@ describe("vision handoff", () => {
         let release = () => {};
         const blocked = new Promise<void>((resolve) => (release = resolve));
         const ctx = visionCtx({
-            complete: async (_model, request) => {
+            reply: async (_model, request) => {
                 const data = request.messages[0].content[0].data;
                 started.push(data);
                 await blocked;
@@ -221,7 +226,7 @@ describe("vision handoff", () => {
 
     it("reports an empty description as a failure", async () => {
         writeSettings(project, { vision: "anthropic/v" });
-        const emptyVision = visionCtx({ complete: async () => ({ content: [{ type: "text", text: "   " }] }) });
+        const emptyVision = visionCtx({ reply: async () => ({ content: [{ type: "text", text: "   " }] }) });
         const result = await context({ messages: [{ role: "user", content: [image("ZW1wdHk=")] }] }, emptyVision);
         assert.deepEqual(result.messages[0].content, [{ type: "text", text: "[Image description: unavailable]" }]);
         assert.deepEqual(notifications, [

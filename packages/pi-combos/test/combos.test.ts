@@ -115,7 +115,7 @@ function start(
     combos: Record<string, string[]>,
     models: Model<any>[],
     replies: Record<string, AssistantMessageEvent[] | Error>,
-    options: { trusted?: boolean; hasUI?: boolean; settings?: string } = {},
+    options: { trusted?: boolean; hasUI?: boolean; settings?: string; branch?: any[]; model?: Model<any> } = {},
 ) {
     const cwd = mkdtempSync(join(tmpdir(), "pi-combos-cwd-"));
     cwds.push(cwd);
@@ -124,15 +124,19 @@ function start(
 
     const providers = new Map<string, any>();
     const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+    const selected: Model<any>[] = [];
     const pi: any = {
         on: (event: string, handler: (event: any, ctx: any) => any) =>
             handlers.set(event, [...(handlers.get(event) ?? []), handler]),
         registerProvider: (name: string, config: any) => providers.set(name, config),
-        unregisterProvider: (name: string) => providers.delete(name),
+        setModel: async (entry: Model<any>) => void selected.push(entry),
     };
     const calls: Array<{ member: Model<any>; options: SimpleStreamOptions | undefined }> = [];
     const registry = {
-        find: (provider: string, id: string) => models.find((entry) => entry.provider === provider && entry.id === id),
+        find: (provider: string, id: string) =>
+            models.find((entry) => entry.provider === provider && entry.id === id) ??
+            // A registered combo model is not in `models`, but session_start looks it up by id.
+            (provider === PROVIDER ? { ...model(PROVIDER, id) } : undefined),
         streamSimple: (member: Model<any>, _context: unknown, options: SimpleStreamOptions | undefined) => {
             calls.push({ member, options });
             const reply = replies[member.id] ?? [failed()];
@@ -142,21 +146,29 @@ function start(
     };
 
     const notifications: string[] = [];
-    extension(pi);
+    // The load-time registration reads the process cwd, as pi starts in the project.
+    const previousCwd = process.cwd();
+    process.chdir(cwd);
+    try {
+        extension(pi);
+    } finally {
+        process.chdir(previousCwd);
+    }
     for (const handler of handlers.get("session_start") ?? []) {
         handler(
             {},
             {
                 cwd,
                 modelRegistry: registry,
-                sessionManager: { getBranch: () => [] },
+                sessionManager: { getBranch: () => options.branch ?? [] },
+                model: options.model,
                 hasUI: options.hasUI ?? false,
                 isProjectTrusted: () => options.trusted ?? true,
                 ui: { notify: (text: string) => notifications.push(text) },
             },
         );
     }
-    return { provider: providers.get("combo"), calls, notifications, models };
+    return { provider: providers.get("combo"), calls, notifications, models, selected };
 }
 
 const PROVIDER = "combo";
@@ -174,7 +186,6 @@ function loadOnly(combos: Record<string, string[]>): any {
     const pi: any = {
         on: () => {},
         registerProvider: (name: string, config: any) => providers.set(name, config),
-        unregisterProvider: (name: string) => providers.delete(name),
     };
     const previousCwd = process.cwd();
     process.chdir(cwd);
@@ -378,6 +389,72 @@ describe("pi-combos", () => {
         );
     });
 
+    it("keeps a combo registered when none of its members have registered yet", async () => {
+        const { provider, calls, models } = start({ smart: ["inferhub/late"] }, [], { late: replied("late") });
+        assert.deepEqual(
+            provider.models.map((entry: { id: string }) => entry.id),
+            ["smart"],
+        );
+        models.push(model("inferhub", "late"));
+
+        const { result } = await send(provider, {});
+        assert.equal(result.model, "late");
+        assert.deepEqual(
+            calls.map((call) => call.member.id),
+            ["late"],
+        );
+    });
+
+    it("falls back when a member streams a start and then an error", async () => {
+        const { provider, calls } = start(
+            { smart: ["anthropic/flaky", "openai/ok"] },
+            [model("anthropic", "flaky"), model("openai", "ok")],
+            { flaky: [{ type: "start", partial: message("flaky") }, failed()], ok: replied("ok") },
+        );
+        const { events, result } = await send(provider, {});
+        // The failed member's start never reaches pi.
+        assert.deepEqual(
+            events.map((event) => event.type),
+            ["start", "text_start", "done"],
+        );
+        assert.equal(result.model, "ok");
+        assert.deepEqual(
+            calls.map((call) => call.member.id),
+            ["flaky", "ok"],
+        );
+    });
+
+    it("keeps the cooldown of a member whose request is aborted", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        const replies: Record<string, AssistantMessageEvent[]> = { flaky: [failed()], ok: replied("ok") };
+        const { provider, calls } = start(
+            { smart: ["anthropic/flaky", "openai/ok"] },
+            [model("anthropic", "flaky"), model("openai", "ok")],
+            replies,
+        );
+        const firstTried = async () => {
+            calls.length = 0;
+            await send(provider, {});
+            return calls[0].member.id;
+        };
+
+        assert.equal(await firstTried(), "flaky"); // fails: 1 minute
+        vi.advanceTimersByTime(61_000);
+        // Esc during flaky's retry must not reset its backoff.
+        replies.flaky = [failed("aborted")];
+        assert.equal(await firstTried(), "flaky");
+        vi.advanceTimersByTime(1_000);
+        replies.flaky = [failed()];
+        await send(provider, {}); // fails again: 2 minutes
+        vi.advanceTimersByTime(61_000);
+        assert.equal(await firstTried(), "ok");
+    });
+
+    it("warns about members that have not registered yet", () => {
+        const { notifications } = start({ smart: ["inferhub/late"] }, [], {}, { hasUI: true });
+        assert.deepEqual(notifications, ["Combos cannot find models yet: inferhub/late"]);
+    });
+
     it("falls back when a member stream throws before output", async () => {
         const { provider, calls } = start(
             { smart: ["anthropic/flaky", "openai/ok"] },
@@ -520,6 +597,24 @@ describe("pi-combos", () => {
         });
     });
 
+    it("keeps an explicitly chosen model over the combo a resumed transcript selected", () => {
+        const branch = [
+            { type: "model_change", provider: PROVIDER, modelId: "smart" },
+            { type: "message", message: message("claude-opus-4-7") },
+        ];
+        const models = [model("anthropic", "claude-opus-4-7")];
+        const run = (current: Model<any>) =>
+            start({ smart: ["anthropic/claude-opus-4-7"] }, models, {}, { branch, model: current }).selected;
+
+        // pi applies --model before session_start, so the combo must not replace it.
+        assert.deepEqual(run(model("anthropic", "claude-sonnet-4-5")), []);
+        // The response names the member, so restoring the transcript still selects the combo.
+        assert.deepEqual(
+            run(model("anthropic", "claude-opus-4-7")).map((entry) => entry.id),
+            ["smart"],
+        );
+    });
+
     it("keeps a model the user picked after the combo", async () => {
         await comboProject(async (dir) => {
             const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
@@ -551,9 +646,20 @@ describe("pi-combos", () => {
         });
     });
 
-    it("ignores project combos when the project is not trusted", () => {
-        const { provider } = start({ smart: ["anthropic/a"] }, [model("anthropic", "a")], {}, { trusted: false });
-        assert.equal(provider, undefined);
+    it("keeps a combo of an untrusted project without its members", () => {
+        const { provider, calls } = start(
+            { smart: ["anthropic/a"] },
+            [model("anthropic", "a")],
+            {},
+            { trusted: false },
+        );
+        assert.deepEqual(
+            provider.models.map((entry: { id: string }) => entry.id),
+            ["smart"],
+        );
+        // The refs are ignored, so the request fails on the combo.
+        assert.throws(() => provider.streamSimple(combo("smart"), {}), /no known models/);
+        assert.equal(calls.length, 0);
     });
 
     it("warns about a settings file that does not parse", () => {
