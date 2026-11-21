@@ -100,8 +100,12 @@ function resultText(result: { content: unknown }): string {
 }
 
 /** Isolated jobs append the clone location and a change stat so the orchestrator can apply the work. */
-function withIsolation(output: string, isolation: IsolationState | undefined): string {
-    return isolation ? [output, isolationSummary(isolation)].filter(Boolean).join("\n\n") : output;
+async function withIsolation(
+    output: string,
+    isolation: IsolationState | undefined,
+    signal?: AbortSignal,
+): Promise<string> {
+    return isolation ? [output, await isolationSummary(isolation, signal)].filter(Boolean).join("\n\n") : output;
 }
 
 /** Status icon, identity, and the muted detail line: the row the widget and delegate_list both show. */
@@ -174,8 +178,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     /** Closing a clone is a clone-wide operation: every job id that ran in it stops pointing at it. */
-    function closeClone(isolation: IsolationState) {
-        removeClone(isolation);
+    async function closeClone(isolation: IsolationState) {
+        await removeClone(isolation);
         for (const shared of jobsInClone(isolation.clone)) {
             shared.isolation = undefined;
             shared.cloneClosed = true;
@@ -192,12 +196,19 @@ export default function (pi: ExtensionAPI) {
         for (const job of jobsInClone(isolation.clone)) await waitForExit(job.id);
     }
 
+    /** The refusal for a clone an apply or discard owns. */
+    function closingError(clone: string) {
+        return new Error(`The clone at ${clone} is being applied or discarded; wait for it to finish.`);
+    }
+
     /** Claims the clone before waiting; on success the mark stays as the tombstone a waiting revive checks. */
-    async function claimClone<T>(isolation: IsolationState, run: () => T): Promise<T> {
+    async function claimClone<T>(isolation: IsolationState, run: () => Promise<T>): Promise<T> {
+        // The claim must be exclusive, or a second apply or discard runs git in a clone the first is rewriting.
+        if (closing.has(isolation.clone)) throw closingError(isolation.clone);
         closing.add(isolation.clone);
         try {
             await requireIdleClone(isolation);
-            return run();
+            return await run();
         } catch (error) {
             // A failed operation keeps the clone, so children may still spawn in it.
             closing.delete(isolation.clone);
@@ -245,7 +256,7 @@ export default function (pi: ExtensionAPI) {
         }
     }
 
-    function finishJob(ctx: ExtensionContext, job: DelegateJob, output?: string, error?: string) {
+    async function finishJob(ctx: ExtensionContext, job: DelegateJob, output?: string, error?: string) {
         if (!store.finish(job, error ? "failed" : "done", error ? `Error: ${error}` : undefined)) return;
         syncTicker(ctx);
         refreshWidget(ctx);
@@ -257,7 +268,7 @@ export default function (pi: ExtensionAPI) {
             contextTokens: job.contextTokens,
             contextWindow: job.contextWindow,
             elapsedMs: elapsedMs(job),
-            output: withIsolation(output ?? "", job.isolation),
+            output: await withIsolation(output ?? "", job.isolation),
             error,
             isolation: job.isolation,
         };
@@ -294,7 +305,9 @@ export default function (pi: ExtensionAPI) {
         const displayModel = thinking ? `${model}:${thinking}` : model;
         const id = prior?.id ?? randomUUID().slice(0, 8);
         const isolation =
-            prior?.isolation ?? fields.clone ?? (fields.isolated ? createIsolation(ctx.cwd, id) : undefined);
+            prior?.isolation ??
+            fields.clone ??
+            (fields.isolated ? await createIsolation(ctx.cwd, id, signal) : undefined);
         if (isolation) await requireIdleClone(isolation);
 
         const job: DelegateJob = {
@@ -341,8 +354,10 @@ export default function (pi: ExtensionAPI) {
                 `You are working in an isolated git clone at ${isolation.clone}. Your working directory is ${cwd}; run every command from it with relative paths. Any path under ${ctx.cwd} means the same file under ${cwd}. Your edits stay in this clone until the orchestrator applies them.${tools.includes("bash") ? " Git commands that write, such as commit and rebase, work here and change only this clone. `git diff main-snapshot` shows every change made in it." : ""}`,
             );
         // Same tick as the spawn: a claim that landed while we waited would delete the clone under a fresh child.
-        if (isolation && closing.has(isolation.clone))
-            throw new Error(`The clone at ${isolation.clone} is being applied or discarded; wait for it to finish.`);
+        if (isolation && closing.has(isolation.clone)) throw closingError(isolation.clone);
+        // Two revives of one finished job both pass requireIdleClone, so only the first may spawn on that id.
+        if (store.liveJob(id))
+            throw new Error(`Delegate job "${id}" is already running; wait for it or cancel it first.`);
         const child = spawn(process.execPath, [entrypoint, "--mode", "rpc", ...args], {
             cwd,
             shell: false,
@@ -369,7 +384,7 @@ export default function (pi: ExtensionAPI) {
                 const output = await run.done;
                 store.finish(job, "done");
                 return {
-                    content: [{ type: "text" as const, text: withIsolation(output, job.isolation) }],
+                    content: [{ type: "text" as const, text: await withIsolation(output, job.isolation, signal) }],
                     details,
                 };
             } catch (error) {
@@ -745,7 +760,7 @@ export default function (pi: ExtensionAPI) {
             }
             const stat = result.kind === "applied" ? `\n${result.stat}` : "";
             const capped = result.kind === "applied" ? capDiff(result.diff) : { diff: undefined, note: undefined };
-            closeClone(isolation);
+            await closeClone(isolation);
             return {
                 content: [
                     {

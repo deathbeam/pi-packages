@@ -94,6 +94,29 @@ describe("background revive", () => {
         assert.equal(revivedReport.message.details.id, cancelled.details.id);
         assert.equal(revivedReport.message.details.error, undefined);
     });
+
+    // Both revives pass the idle-clone checks, so only the first may spawn on the finished job's id.
+    it("refuses a second revive of the same job", async () => {
+        const app = delegateSession();
+        const job = await launch(app, app.tuiCtx, { description: "twin revive" });
+        await cancelJob(app, app.tuiCtx, job);
+        const first = app.steer.execute(
+            "call",
+            { id: job.details.id, message: "revive: first" },
+            undefined,
+            () => {},
+            app.tuiCtx,
+        );
+        const second = app.steer.execute(
+            "call",
+            { id: job.details.id, message: "revive: second" },
+            undefined,
+            () => {},
+            app.tuiCtx,
+        );
+        await assert.rejects(second, /is already running/);
+        assert.match((await first).content[0].text, /^Revived delegate/);
+    });
 });
 
 describe("cancel and revive race", () => {
@@ -247,15 +270,40 @@ describe("shared clone", () => {
                 isolated: true,
             });
             await cancelJob(app, isoCtx, closing);
-            const reviving = app.steer.execute(
-                "call",
-                { id: closing.details.id, message: "revive: finish it" },
-                undefined,
-                () => {},
-                isoCtx,
+            // The refusal can land while the discard is still removing the clone, so attach the check before starting it.
+            const reviving = assert.rejects(
+                app.steer.execute(
+                    "call",
+                    { id: closing.details.id, message: "revive: finish it" },
+                    undefined,
+                    () => {},
+                    isoCtx,
+                ),
+                /applied or discarded/,
             );
             await app.discard.execute("call", { id: closing.details.id }, undefined, () => {});
-            await assert.rejects(reviving, /applied or discarded/);
+            await reviving;
+        } finally {
+            repo.remove();
+        }
+    });
+
+    // Git now runs off the event loop, so a second apply or discard can arrive while the first still owns the clone.
+    it("refuses an operation on a clone another one is applying", async () => {
+        const repo = tempGitRepo({ "seed.txt": "seed\n" });
+        try {
+            const app = delegateSession();
+            const isoCtx = { ...app.tuiCtx, cwd: repo.dir };
+            const job = await launch(app, isoCtx, {
+                description: "double claim",
+                task: "double claim",
+                isolated: true,
+            });
+            await cancelJob(app, isoCtx, job);
+            const applied = app.apply.execute("call", { id: job.details.id }, undefined, () => {});
+            const discarded = app.discard.execute("call", { id: job.details.id }, undefined, () => {});
+            await assert.rejects(discarded, /being applied or discarded/);
+            assert.match((await applied).content[0].text, /clone was removed/);
         } finally {
             repo.remove();
         }
