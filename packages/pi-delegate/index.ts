@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, renderDiff } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
     appendOutput,
     capDiff,
@@ -878,16 +878,29 @@ export default function (pi: ExtensionAPI) {
                 details: { jobs: jobs.map(store.snapshot) },
             };
         },
-        renderResult(result, _options, theme, context) {
+        renderResult(result, { expanded }, theme, context) {
             const jobs = (result.details as { jobs?: InspectJob[] } | undefined)?.jobs;
             if (!jobs?.length || context.isError) return resultFallback(resultText(result), theme, context.isError);
             const now = Date.now();
             const rows = jobs.map((job) => jobRow(theme, job, now)).join("\n");
-            return new Text(
+            const body = new Text(
                 `\n${statusText(theme, "done")} ${theme.fg("muted", `${jobs.length} delegates`)}\n${rows}`,
                 0,
                 0,
             );
+            return {
+                render: (width: number) => {
+                    // +1 keeps the leading blank row from eating into the cap.
+                    const { shown, hidden } = capLines(
+                        body.render(width),
+                        expanded ? Infinity : COLLAPSED_OUTPUT_LINES + 1,
+                    );
+                    return hidden
+                        ? [...shown, truncateToWidth(moreLines(theme, hidden, context.keyHint), width)]
+                        : shown;
+                },
+                invalidate: () => body.invalidate(),
+            };
         },
     });
 }
