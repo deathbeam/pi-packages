@@ -26,7 +26,6 @@ type DelegateConfig = {
 };
 
 const BUNDLED_AGENT_DIR = fileURLToPath(new URL("../agents", import.meta.url));
-const MODEL_TIERS = new Set(["cheap", "balanced", "strong"]);
 
 function expandPath(value: string, cwd: string): string {
     return resolve(cwd, value.replace(/^~(?=\/|$)/, homedir()));
@@ -143,7 +142,13 @@ function splitThinking(value: string): { model: string; thinking?: string } {
     return match ? { model: match[1], thinking: match[2] } : { model: value };
 }
 
-// Precedence: requested `:<thinking>` suffix, then the tier suffix, then the session level.
+/** The configured provider/model for an alias name; an id with a provider prefix is never an alias. */
+function configuredAlias(name: string, models: Record<string, unknown>): string | undefined {
+    const value = name.includes("/") ? undefined : models[name];
+    return typeof value === "string" && value ? value : undefined;
+}
+
+// Precedence: requested `:<thinking>` suffix, then the alias suffix, then the session level.
 // `explicit` is the level the request names outright; undefined means it only inherits the session level.
 export function resolveModel(
     value: string | undefined,
@@ -152,18 +157,25 @@ export function resolveModel(
 ): { model?: string; thinking?: string; explicit?: string } {
     const split = splitThinking(value ?? "");
     const thinking = split.thinking ?? ctx.thinkingLevel;
-    if (split.model && !MODEL_TIERS.has(split.model)) return { model: split.model, thinking, explicit: split.thinking };
-    const configured = models[split.model];
-    if (typeof configured === "string" && configured) {
-        const tier = splitThinking(configured);
-        const explicit = split.thinking ?? tier.thinking;
-        return { model: tier.model, thinking: explicit ?? ctx.thinkingLevel, explicit };
+    const configured = configuredAlias(split.model, models);
+    if (configured) {
+        const alias = splitThinking(configured);
+        const explicit = split.thinking ?? alias.thinking;
+        return { model: alias.model, thinking: explicit ?? ctx.thinkingLevel, explicit };
     }
+    // A provider/model id is literal; an unset alias falls back to the session model.
+    if (split.model.includes("/")) return { model: split.model, thinking, explicit: split.thinking };
     return {
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         thinking,
         explicit: split.thinking,
     };
+}
+
+/** An alias name the config leaves unset; resolution then falls back to the session model. */
+export function unresolvedAlias(value: string | undefined, models: Record<string, unknown>): string | undefined {
+    const name = splitThinking(value ?? "").model;
+    return name && !name.includes("/") && !configuredAlias(name, models) ? name : undefined;
 }
 
 export function contextWindowFor(ctx: ExtensionContext, model: string | undefined): number | undefined {

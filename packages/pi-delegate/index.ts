@@ -50,6 +50,7 @@ import {
     contextWindowFor,
     projectTrusted,
     resolveModel,
+    unresolvedAlias,
     type AgentFile,
 } from "./src/agents.ts";
 
@@ -119,6 +120,19 @@ export default function (pi: ExtensionAPI) {
     const exiting = new Map<string, Promise<void>>();
     // A clone an apply or discard owns: a revive that waited on the same exiting child must not spawn into it.
     const closing = new Set<string>();
+
+    // One warning per alias per session: an unset alias must not nag on every delegate call.
+    const warnedAliases = new Set<string>();
+
+    /** An unset alias silently uses the session model, so name it and where it came from. */
+    function warnAlias(alias: string | undefined, source: string, ctx: ExtensionContext) {
+        if (!alias || !ctx.hasUI || warnedAliases.has(alias)) return;
+        warnedAliases.add(alias);
+        ctx.ui.notify(
+            `Delegate model alias "${alias}" from ${source} is not set in delegate.models, so it uses the session model.`,
+            "warning",
+        );
+    }
 
     /** Waits for a cancelled child to exit; a child that never closes must not block its successor forever. */
     async function waitForExit(id: string) {
@@ -293,9 +307,11 @@ export default function (pi: ExtensionAPI) {
         const entrypoint = process.argv[1];
         if (!entrypoint) throw new Error("Pi CLI entrypoint missing; start Pi from its CLI to delegate.");
         const requested = fields.model ?? agent.model;
-        const { model, thinking } = resolveModel(
-            requested,
-            configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {},
+        const models = configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {};
+        const { model, thinking } = resolveModel(requested, models, ctx);
+        warnAlias(
+            unresolvedAlias(requested, models),
+            fields.model ? "the delegate request" : `the ${agent.name} agent`,
             ctx,
         );
         if (!model) throw new Error(`No model found for "${requested}".`);
@@ -419,15 +435,13 @@ export default function (pi: ExtensionAPI) {
     /** Swaps a running child's model over the RPC; the child confirms or rejects it, and never restarts. */
     async function swapModel(job: DelegateJob, request: string, ctx: ExtensionContext) {
         if (!job.swapModel) throw new Error(`Delegate job "${job.id}" cannot switch models.`);
-        const { model, explicit: level } = resolveModel(
-            request,
-            configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {},
-            ctx,
-        );
+        const models = configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {};
+        const { model, explicit: level } = resolveModel(request, models, ctx);
+        warnAlias(unresolvedAlias(request, models), "the delegate_steer request", ctx);
         if (!model) throw new Error(`No model found for "${request}".`);
         const [provider, ...rest] = model.split("/");
         if (!rest.length) throw new Error(`Model "${model}" has no provider prefix.`);
-        // Only an explicit :thinking suffix, on the request or its tier, changes the level; an inherited one must not silently reset it.
+        // Only an explicit :thinking suffix, on the request or its alias, changes the level; an inherited one must not silently reset it.
         // The display lands on the set_model ack, so a thinking-level failure cannot leave it stale.
         await job.swapModel(provider, rest.join("/"), level, () => {
             job.model = model;
@@ -462,7 +476,14 @@ export default function (pi: ExtensionAPI) {
             );
     }
 
-    pi.on("session_start", (_event, ctx) => restoreSession(ctx));
+    pi.on("session_start", (_event, ctx) => {
+        warnedAliases.clear();
+        restoreSession(ctx);
+        // Agents name an alias up front, so an unset one warns now instead of at the first delegate call.
+        const models = configFor(ctx.cwd, ctx.isProjectTrusted()).models ?? {};
+        for (const agent of agentsFor(ctx.cwd, ctx.isProjectTrusted()))
+            warnAlias(unresolvedAlias(agent.model, models), `the ${agent.name} agent`, ctx);
+    });
     pi.on("session_tree", (_event, ctx) => restoreSession(ctx));
 
     pi.on("before_agent_start", (event) => {
@@ -510,10 +531,21 @@ export default function (pi: ExtensionAPI) {
 
     registerInspector(pi, store, DELEGATE_SESSION_DIR);
 
-    const agentList = agentsFor(process.cwd(), projectTrusted(process.cwd())).map((agent) => {
+    const project = process.cwd();
+    const trusted = projectTrusted(project);
+    const agents = agentsFor(project, trusted);
+    const agentList = agents.map((agent) => {
         const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
         return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
     });
+    // Config keys plus the names loaded agents reference; a new alias needs a restart to show up here.
+    const modelAliases = [
+        ...new Set([
+            ...Object.keys(configFor(project, trusted).models ?? {}),
+            ...agents.flatMap((agent) => (agent.model && !/[/:]/.test(agent.model) ? [agent.model] : [])),
+        ]),
+    ];
+    const modelParam = `Model alias${modelAliases.length ? ` (${modelAliases.join(", ")})` : ""} or an explicit provider/model id, with an optional :<thinking> suffix.`;
 
     pi.registerTool({
         name: "delegate",
@@ -552,8 +584,7 @@ export default function (pi: ExtensionAPI) {
             task: Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
             model: Type.Optional(
                 Type.String({
-                    description:
-                        "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix.",
+                    description: modelParam,
                 }),
             ),
             isolated: Type.Optional(
@@ -624,8 +655,7 @@ export default function (pi: ExtensionAPI) {
             }),
             model: Type.Optional(
                 Type.String({
-                    description:
-                        "Model tier (cheap, balanced, strong) or an explicit provider/model, with an optional :<thinking> suffix. A running job switches live.",
+                    description: `${modelParam} A running job switches live.`,
                 }),
             ),
         }),

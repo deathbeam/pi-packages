@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, it } from "vitest";
-import { agentsFor, resolveModel } from "../src/agents.ts";
+import { agentsFor, resolveModel, unresolvedAlias } from "../src/agents.ts";
 import { agentDir, cleanup, packageRoot } from "./helpers.ts";
 
 const agentFiles = readdirSync(join(packageRoot, "agents"))
@@ -18,8 +18,8 @@ describe("bundled agents", () => {
         assert.deepEqual(names, ["explore", "general", "researcher", "reviewer"]);
     });
 
-    // A typo like `cheap:hgh` would not split and fail every delegate of that agent at child launch.
-    it("uses a model tier and isolation flag the resolver understands", () => {
+    // A typo like `cheap:hgh` would not split and would leave the alias unset.
+    it("uses a model alias and isolation flag the resolver understands", () => {
         for (const { file, text } of agentFiles) {
             const model = text.match(/^model:\s*(\S+)/m)?.[1];
             if (model)
@@ -105,8 +105,8 @@ describe("agent discovery", () => {
 describe("resolveModel", () => {
     const session = { model: { provider: "anthropic", id: "m" }, thinkingLevel: "medium" } as any;
 
-    // A `:<thinking>` suffix on the agent/param beats the tier suffix, which beats the session level.
-    it("prefers the requested suffix over the tier and the session", () => {
+    // A `:<thinking>` suffix on the agent/param beats the alias suffix, which beats the session level.
+    it("prefers the requested suffix over the alias and the session", () => {
         assert.deepEqual(resolveModel("anthropic/x", {}, session), {
             model: "anthropic/x",
             thinking: "medium",
@@ -125,25 +125,35 @@ describe("resolveModel", () => {
         });
     });
 
-    it("takes the tier model but keeps a requested thinking level", () => {
-        assert.deepEqual(resolveModel("cheap", { cheap: "anthropic/h" }, session), {
+    // Any key in `models` is an alias; no name is special.
+    it("resolves a configured alias of any name, keeping a requested thinking level", () => {
+        assert.deepEqual(resolveModel("fast", { fast: "anthropic/h" }, session), {
             model: "anthropic/h",
             thinking: "medium",
             explicit: undefined,
         });
-        assert.deepEqual(resolveModel("cheap", { cheap: "google/flash:low" }, session), {
+        assert.deepEqual(resolveModel("fast", { fast: "google/flash:low" }, session), {
             model: "google/flash",
             thinking: "low",
             explicit: "low",
         });
-        assert.deepEqual(resolveModel("cheap:high", { cheap: "google/flash:low" }, session), {
+        assert.deepEqual(resolveModel("fast:high", { fast: "google/flash:low" }, session), {
             model: "google/flash",
             thinking: "high",
             explicit: "high",
         });
     });
 
-    it("falls back to the session model for a missing or malformed tier", () => {
+    // A provider prefix always means a literal id, even when a config key spells the same.
+    it("passes a provider/model id through", () => {
+        assert.deepEqual(resolveModel("anthropic/x", { "anthropic/x": "google/flash" }, session), {
+            model: "anthropic/x",
+            thinking: "medium",
+            explicit: undefined,
+        });
+    });
+
+    it("falls back to the session model for an unset or malformed alias", () => {
         assert.deepEqual(resolveModel("cheap:low", {}, session), {
             model: "anthropic/m",
             thinking: "low",
@@ -159,5 +169,12 @@ describe("resolveModel", () => {
             thinking: undefined,
             explicit: undefined,
         });
+    });
+
+    it("names the alias an unset value falls back from", () => {
+        assert.equal(unresolvedAlias("cheap", {}), "cheap");
+        assert.equal(unresolvedAlias("cheap:low", { cheap: "anthropic/h" }), undefined);
+        assert.equal(unresolvedAlias("anthropic/x", {}), undefined);
+        assert.equal(unresolvedAlias(undefined, {}), undefined);
     });
 });

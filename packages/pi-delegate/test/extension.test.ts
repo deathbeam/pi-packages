@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterAll, describe, it } from "vitest";
 import { COLLAPSED_OUTPUT_LINES } from "../src/format.ts";
-import { baseCtx, cleanup, keyHint, registerExtension, tempGitRepo, themeStub } from "./helpers.ts";
+import { agentDir, baseCtx, cleanup, keyHint, registerExtension, tempGitRepo, themeStub } from "./helpers.ts";
 
 const { theme, colored } = themeStub();
 const argv = process.argv;
@@ -33,10 +33,44 @@ describe("registration", () => {
         assert.match(notice!, /No delegates/);
     });
 
-    it("describes the available agents with their model tier", () => {
+    it("describes the available agents with their model alias", () => {
         const app = registerExtension();
-        // User agent dirs can override bundled agents, so check the tier format rather than one agent.
-        assert.match(app.tool("delegate").description, /^- \S+ \(\S+\): /m, "agent list with model tier missing");
+        // User agent dirs can override bundled agents, so check the alias format rather than one agent.
+        assert.match(app.tool("delegate").description, /^- \S+ \(\S+\): /m, "agent list with model alias missing");
+    });
+
+    it("lists the model aliases the config and the loaded agents name", () => {
+        const app = registerExtension();
+        for (const tool of ["delegate", "delegate_steer"]) {
+            const description = app.tool(tool).parameters.properties.model.description as string;
+            for (const alias of ["cheap", "balanced", "strong"])
+                assert.match(description, new RegExp(`\\b${alias}\\b`), `${tool} model alias ${alias} missing`);
+            assert.match(description, /provider\/model id/, tool);
+        }
+        assert.match(
+            app.tool("delegate_steer").parameters.properties.model.description,
+            /A running job switches live\./,
+        );
+    });
+
+    // An unset alias silently uses the session model, so session start names it, not every delegate call.
+    it("warns once per unset agent alias on session start", () => {
+        const settings = join(agentDir, "settings.json");
+        writeFileSync(settings, JSON.stringify({ delegate: { models: { cheap: "anthropic/h" } } }));
+        try {
+            const handlers: Record<string, any> = {};
+            registerExtension({ on: (event, handler) => (handlers[event] = handler) });
+            const notices: string[] = [];
+            const ctx = { ...baseCtx, hasUI: true, ui: { notify: (message: string) => notices.push(message) } };
+            handlers.session_start({}, { ...ctx, sessionManager: { getBranch: () => [] } });
+            // general and reviewer share an alias each with another agent; both warn once.
+            assert.equal(notices.length, 2);
+            assert.ok(notices.some((notice) => /"balanced"/.test(notice)));
+            assert.ok(notices.some((notice) => /"strong"/.test(notice)));
+            assert.ok(notices.every((notice) => !/"cheap"/.test(notice)));
+        } finally {
+            rmSync(settings, { force: true });
+        }
     });
 
     // The model must learn from the tool description that steering continues or redirects any job.

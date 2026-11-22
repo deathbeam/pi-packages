@@ -610,7 +610,7 @@ describe("session restore", () => {
             readdirSync(sessionDir).some((name) => name.endsWith(`_delegate-${job.details.id}.jsonl`)),
             "the fake child did not persist its session",
         );
-        handlers.session_start({}, { sessionManager: { getBranch: () => app.savedEntries } });
+        handlers.session_start({}, { ...app.tuiCtx, sessionManager: { getBranch: () => app.savedEntries } });
         app.tui.terminal.rows = 40;
         const restoredReady = new Promise<any>((resolve) => (app.state.showViewer = resolve));
         const restoring = restored.inspect.handler("", { mode: "tui", ui: app.ui });

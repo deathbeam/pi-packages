@@ -58,6 +58,7 @@ function restoreOrphan(app: RecoverySession, id: string, description: string) {
     app.handlers.session_start(
         {},
         {
+            ...app.tuiCtx,
             sessionManager: {
                 getBranch: () => [{ type: "custom", customType: "delegate-job", data: orphan }],
             },

@@ -160,6 +160,7 @@ export type OverlayState = {
     renders: number;
     screens: number;
     widgetLines: string[];
+    notifications: string[];
     // What the last opened overlay looked like, read back by the tests that care about it.
     overlay?: {
         overlay?: boolean;
@@ -184,7 +185,7 @@ const inspectorKeys: Record<string, string> = {
 
 /** A TUI stub that opens the inspector overlay and records widget repaints and frame measurements. */
 export function overlayHarness(theme: any) {
-    const state: OverlayState = { renders: 0, screens: 0, widgetLines: [] };
+    const state: OverlayState = { renders: 0, screens: 0, widgetLines: [], notifications: [] };
     const viewerReady = new Promise<any>((resolve) => (state.showViewer = resolve));
     const tui = {
         terminal: { rows: 24 },
@@ -196,6 +197,9 @@ export function overlayHarness(theme: any) {
     };
     const ui = {
         theme,
+        notify(message: string) {
+            state.notifications.push(message);
+        },
         setWidget(_key: string, lines: any) {
             state.widgetLines = typeof lines === "function" ? lines(undefined, theme).render(500) : (lines as string[]);
             // Pi repaints the widgets on every setWidget, so the ticker also redraws an open overlay.
