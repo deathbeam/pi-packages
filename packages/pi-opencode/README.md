@@ -1,6 +1,6 @@
 # [@deathbeam/pi-opencode](https://www.npmjs.com/package/@deathbeam/pi-opencode)
 
-Use OpenCode Zen free models from pi through the built-in `opencode` provider.
+OpenCode models through the built-in `opencode` provider.
 Set `OPENCODE_API_KEY`.
 
 ## Installation

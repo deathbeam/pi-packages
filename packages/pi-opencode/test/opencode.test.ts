@@ -45,7 +45,7 @@ const headers = (init: Record<string, string> = {}): Record<string, string> => (
     ...init,
 });
 
-describe("OpenCode identity headers", () => {
+describe("request headers", () => {
     it("sends the CLI headers for a free model", () => {
         const { fire } = setup();
         const sent = headers();

@@ -1,7 +1,7 @@
 {
   "name": "@deathbeam/pi-opencode",
-  "version": "0.0.2",
-  "description": "OpenCode Zen free models through the built-in opencode provider for Pi",
+  "version": "0.0.3",
+  "description": "OpenCode models through the built-in opencode provider for Pi",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -9,10 +9,6 @@
     "url": "git+https://github.com/deathbeam/pi-packages.git",
     "directory": "packages/pi-opencode"
   },
-  "keywords": [
-    "pi-package",
-    "pi-extension"
-  ],
   "engines": {
     "node": ">=22.19.0"
   },

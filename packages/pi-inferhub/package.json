@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-inferhub",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "InferHub provider with a live model catalog for Pi",
   "type": "module",
   "license": "MIT",
@@ -9,10 +9,6 @@
     "url": "git+https://github.com/deathbeam/pi-packages.git",
     "directory": "packages/pi-inferhub"
   },
-  "keywords": [
-    "pi-package",
-    "pi-extension"
-  ],
   "engines": {
     "node": ">=22.19.0"
   },

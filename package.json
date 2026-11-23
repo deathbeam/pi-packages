@@ -21,6 +21,7 @@
       "./packages/pi-opencode/index.ts",
       "./packages/pi-surplus/index.ts",
       "./packages/pi-keenable/index.ts",
+      "./packages/pi-mistral/index.ts",
       "./packages/pi-usage/index.ts"
     ]
   },
