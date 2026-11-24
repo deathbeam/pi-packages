@@ -61,19 +61,20 @@ function describeImage(ctx: ExtensionContext, model: Model<Api>, block: ImageCon
             .streamSimple(
                 model,
                 { systemPrompt: VISION_PROMPT, messages: [{ role: "user", content: [block], timestamp: Date.now() }] },
-                { signal: ctx.signal },
+                { signal: ctx.signal, sessionId: ctx.sessionManager.getSessionId() },
             )
             .result()
             .then((result) => {
+                if (result.stopReason === "error") throw new Error(result.errorMessage || "the vision model failed");
                 const text = result.content
                     .flatMap((block) => (block.type === "text" ? [block.text] : []))
                     .join("\n")
                     .trim();
-                if (!text) throw new Error("the vision model returned no description");
+                if (!text)
+                    throw new Error(`the vision model returned no description (stopReason: ${result.stopReason})`);
                 return text;
             })
             .catch((error: unknown) => {
-                // Aborts and rate limits are temporary, so a failure must not stick for the process lifetime.
                 descriptions.delete(key);
                 throw error;
             });

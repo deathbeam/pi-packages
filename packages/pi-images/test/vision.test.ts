@@ -7,7 +7,7 @@ const project = tempDir("pi-images-project-");
 const handlers: Record<string, any> = {};
 const tools: Record<string, any> = {};
 const notifications: { message: string; type?: string }[] = [];
-const described: { model: any; context: any }[] = [];
+const described: { model: any; context: any; options: any }[] = [];
 
 index({
     on: (event: string, handler: unknown) => (handlers[event] = handler),
@@ -45,19 +45,20 @@ function visionCtx({ input = ["text"], find, reply }: VisionOptions = {}) {
         cwd: project,
         model: { id: "current", input },
         signal: undefined,
+        sessionManager: { getSessionId: () => "s1" },
         ui: { notify: (message: string, type?: string) => notifications.push({ message, type }) },
         modelRegistry: {
             find: find ?? ((provider: string, id: string) => ({ provider, id, input: ["text", "image"] })),
             // The extension streams simply so that a virtual model such as combo/cheap gets routed.
-            streamSimple: (model: any, request: any) => ({
+            streamSimple: (model: any, request: any, options: any) => ({
                 result: async () =>
                     (
                         reply ??
-                        (async (answered: any, asked: any) => {
-                            described.push({ model: answered, context: asked });
+                        (async (answered: any, asked: any, options: any) => {
+                            described.push({ model: answered, context: asked, options });
                             return { content: [{ type: "text", text: `desc-${asked.messages[0].content[0].data}` }] };
                         })
-                    )(model, request),
+                    )(model, request, options),
             }),
         },
     };
@@ -128,6 +129,7 @@ describe("vision handoff", () => {
         assert.deepEqual(described[0].model, { provider: "anthropic", id: "v", input: ["text", "image"] });
         assert.ok(described[0].context.systemPrompt.includes("exhaustively"));
         assert.deepEqual(described[0].context.messages[0].content, [image("aGk=")]);
+        assert.deepEqual(described[0].options, { signal: undefined, sessionId: "s1" });
     });
 
     it("describes each image only once", async () => {
@@ -226,14 +228,35 @@ describe("vision handoff", () => {
 
     it("reports an empty description as a failure", async () => {
         writeSettings(project, { vision: "anthropic/v" });
-        const emptyVision = visionCtx({ reply: async () => ({ content: [{ type: "text", text: "   " }] }) });
+        const emptyVision = visionCtx({
+            reply: async () => ({ stopReason: "stop", content: [{ type: "text", text: "   " }] }),
+        });
         const result = await context({ messages: [{ role: "user", content: [image("ZW1wdHk=")] }] }, emptyVision);
         assert.deepEqual(result.messages[0].content, [{ type: "text", text: "[Image description: unavailable]" }]);
         assert.deepEqual(notifications, [
             {
-                message: "Describing an image with anthropic/v failed: the vision model returned no description",
+                message:
+                    "Describing an image with anthropic/v failed: the vision model returned no description (stopReason: stop)",
                 type: "error",
             },
+        ]);
+    });
+
+    // streamSimple resolves with the errored message instead of rejecting, e.g. when every combo member fails.
+    it("reports the vision model's own error", async () => {
+        writeSettings(project, { vision: "anthropic/v" });
+        const errorVision = visionCtx({
+            reply: async () => ({
+                role: "assistant",
+                stopReason: "error",
+                errorMessage: "400 image_url is unsupported",
+                content: [],
+            }),
+        });
+        const result = await context({ messages: [{ role: "user", content: [image("ZXJyb3I=")] }] }, errorVision);
+        assert.deepEqual(result.messages[0].content, [{ type: "text", text: "[Image description: unavailable]" }]);
+        assert.deepEqual(notifications, [
+            { message: "Describing an image with anthropic/v failed: 400 image_url is unsupported", type: "error" },
         ]);
     });
 });
