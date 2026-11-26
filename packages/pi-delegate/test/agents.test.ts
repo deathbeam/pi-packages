@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, it } from "vitest";
-import { agentsFor, resolveModel, unresolvedAlias } from "../src/agents.ts";
+import { agentsFor, agentRoster, resolveModel, unresolvedAlias } from "../src/agents.ts";
 import { agentDir, cleanup, packageRoot } from "./helpers.ts";
 
 const agentFiles = readdirSync(join(packageRoot, "agents"))
@@ -98,6 +98,38 @@ describe("agent discovery", () => {
         } finally {
             rmSync(root, { recursive: true, force: true });
             rmSync(user, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("agent roster", () => {
+    it("shows each agent's model and isolation, and lists the configured and agent-named aliases", () => {
+        const root = mkdtempSync(join(tmpdir(), "pi-delegate-roster-"));
+        const settings = join(agentDir, "settings.json");
+        try {
+            // A .git stops the project-layer walk, so the roster holds only the bundled and this agent dir.
+            mkdirSync(join(root, ".git"), { recursive: true });
+            writeFileSync(
+                join(root, "aliased.md"),
+                "---\nname: aliased\ndescription: cheap one\nmodel: cheap\n---\np\n",
+            );
+            writeFileSync(
+                join(root, "raw.md"),
+                "---\nname: raw\ndescription: raw model\nmodel: provider/id\nisolated: true\n---\np\n",
+            );
+            writeFileSync(
+                settings,
+                JSON.stringify({ delegate: { agentDirs: [root], models: { configured: "anthropic/h" } } }),
+            );
+            const roster = agentRoster(root, true);
+            assert.match(roster, /^- aliased \(cheap\): cheap one$/m);
+            assert.match(roster, /^- raw \(provider\/id, isolated\): raw model$/m);
+            const aliases = roster.split("\n").find((line) => line.startsWith("Model aliases"));
+            assert.match(aliases!, /\bconfigured\b/);
+            assert.match(aliases!, /\bcheap\b/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+            rmSync(settings, { force: true });
         }
     });
 });

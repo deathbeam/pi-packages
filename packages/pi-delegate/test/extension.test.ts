@@ -33,20 +33,44 @@ describe("registration", () => {
         assert.match(notice!, /No delegates/);
     });
 
+    // The roster lives in the system prompt, so an agent file added mid-session shows up on the next turn.
     it("describes the available agents with their model alias", () => {
-        const app = registerExtension();
+        const handlers: Record<string, any> = {};
+        registerExtension({ activeTools: ["read", "delegate"], on: (event, handler) => (handlers[event] = handler) });
+        const prompt: any = { messageType: "user", systemPromptOptions: { sections: {} } };
+        handlers.before_agent_start(prompt, baseCtx);
+        const roster = prompt.systemPromptOptions.sections.agents;
+        assert.match(roster, /^Available agents for the delegate tool:$/m, "roster heading missing");
         // User agent dirs can override bundled agents, so check the alias format rather than one agent.
-        assert.match(app.tool("delegate").description, /^- \S+ \(\S+\): /m, "agent list with model alias missing");
+        assert.match(roster, /^- \S+ \(\S+\): /m, "agent list with model alias missing");
     });
 
+    // A child runs without the delegation tools, so the roster would only cost it context.
+    it("gives no roster to a session that cannot delegate", () => {
+        const handlers: Record<string, any> = {};
+        registerExtension({ activeTools: ["read"], on: (event, handler) => (handlers[event] = handler) });
+        const prompt: any = { messageType: "user", systemPromptOptions: { sections: {} } };
+        handlers.before_agent_start(prompt, baseCtx);
+        assert.equal(prompt.systemPromptOptions.sections.agents, undefined);
+    });
     it("lists the model aliases the config and the loaded agents name", () => {
-        const app = registerExtension();
+        const handlers: Record<string, any> = {};
+        const app = registerExtension({
+            activeTools: ["delegate"],
+            on: (event, handler) => (handlers[event] = handler),
+        });
+        const prompt: any = { messageType: "user", systemPromptOptions: { sections: {} } };
+        handlers.before_agent_start(prompt, baseCtx);
+        const roster = prompt.systemPromptOptions.sections.agents;
+        for (const alias of ["cheap", "balanced", "strong"])
+            assert.match(roster, new RegExp(`\\b${alias}\\b`), `model alias ${alias} missing`);
+        assert.match(roster, /Model aliases \(accepted by the `model` parameter\): /);
         for (const tool of ["delegate", "delegate_steer"]) {
             const description = app.tool(tool).parameters.properties.model.description as string;
-            for (const alias of ["cheap", "balanced", "strong"])
-                assert.match(description, new RegExp(`\\b${alias}\\b`), `${tool} model alias ${alias} missing`);
+            assert.match(description, /Model alias \(listed under Available agents\)/, tool);
             assert.match(description, /provider\/model id/, tool);
         }
+        assert.match(app.tool("delegate").parameters.properties.agent.description, /"Available agents" list/);
         assert.match(
             app.tool("delegate_steer").parameters.properties.model.description,
             /A running job switches live\./,
@@ -94,13 +118,16 @@ describe("registration", () => {
 describe("exploration nudges", () => {
     // Drift reminder: only the orchestrating session, at 5 then 10 direct calls, and a delegate call resets it.
     const nudged = (activeTools: string[]) => {
-        const handlers: Record<string, (payload: any) => void> = {};
+        const handlers: Record<string, (payload: any, ctx: any) => void> = {};
         const app = registerExtension({ activeTools, on: (event, handler) => (handlers[event] = handler) });
         return {
             reminders: app.messages,
-            prompt: () => handlers.before_agent_start({ messageType: "user" }),
-            customRun: () => handlers.before_agent_start({ messageType: "custom" }),
-            call: (toolName: string, parentToolCallId?: string) => handlers.tool_result({ toolName, parentToolCallId }),
+            prompt: () =>
+                handlers.before_agent_start({ messageType: "user", systemPromptOptions: { sections: {} } }, baseCtx),
+            customRun: () =>
+                handlers.before_agent_start({ messageType: "custom", systemPromptOptions: { sections: {} } }, baseCtx),
+            call: (toolName: string, parentToolCallId?: string) =>
+                handlers.tool_result({ toolName, parentToolCallId }, baseCtx),
         };
     };
 

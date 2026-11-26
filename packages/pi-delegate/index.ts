@@ -45,10 +45,10 @@ import {
 import { registerInspector } from "./src/inspector.ts";
 import {
     agentByName,
+    agentRoster,
     agentsFor,
     configFor,
     contextWindowFor,
-    projectTrusted,
     resolveModel,
     unresolvedAlias,
     type AgentFile,
@@ -79,6 +79,8 @@ const EXPLORATION_TOOLS = new Set(["read", "grep", "find", "ls", "bash", "powers
 const FIRST_REMINDER_AT = 5;
 const DELEGATE_SESSION_DIR = join(getAgentDir(), "sessions", "delegates");
 const INTERRUPTED_MESSAGE = "delegate-interrupted";
+const MODEL_PARAM =
+    "Model alias (listed under Available agents) or an explicit provider/model id, with an optional :<thinking> suffix. Agents default to a fitting model, so set this only when the user asks for a model or a report shows the default fell short.";
 const DELEGATE_PROMPT =
     "The orchestrator, another agent, wrote your task as a brief; you cannot see its conversation or ask it questions, so treat the brief as the user's whole request. Before starting, read the SKILL.md of every skill the brief names and follow it. Stay within the brief's scope and fill its gaps with your tools; if you are still blocked, stop and report what you tried and the exact blocker. The orchestrator sees none of your tool calls, only your final message: make that report stand alone and end it with statements.";
 
@@ -486,7 +488,11 @@ export default function (pi: ExtensionAPI) {
     });
     pi.on("session_tree", (_event, ctx) => restoreSession(ctx));
 
-    pi.on("before_agent_start", (event) => {
+    pi.on("before_agent_start", (event, ctx) => {
+        // Children run without the delegation tools, so only the orchestrating session gets the roster.
+        if (pi.getActiveTools().includes("delegate")) {
+            event.systemPromptOptions.sections.agents = agentRoster(ctx.cwd, ctx.isProjectTrusted());
+        }
         if (event.messageType !== "user") return;
         directCalls = 0;
         nextReminder = FIRST_REMINDER_AT;
@@ -531,45 +537,24 @@ export default function (pi: ExtensionAPI) {
 
     registerInspector(pi, store, DELEGATE_SESSION_DIR);
 
-    const project = process.cwd();
-    const trusted = projectTrusted(project);
-    const agents = agentsFor(project, trusted);
-    const agentList = agents.map((agent) => {
-        const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
-        return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
-    });
-    // Config keys plus the names loaded agents reference; a new alias needs a restart to show up here.
-    const modelAliases = [
-        ...new Set([
-            ...Object.keys(configFor(project, trusted).models ?? {}),
-            ...agents.flatMap((agent) => (agent.model && !/[/:]/.test(agent.model) ? [agent.model] : [])),
-        ]),
-    ];
-    const modelParam = `Model alias${modelAliases.length ? ` (${modelAliases.join(", ")})` : ""} or an explicit provider/model id, with an optional :<thinking> suffix.`;
-
     pi.registerTool({
         name: "delegate",
         label: "Delegate",
         description: [
-            "Start a delegate: a background run of one of the agents below on one focused task. Returns a job id immediately; its report arrives as a follow-up message.",
-            "",
-            "Available agents:",
-            ...agentList,
+            "Start a delegate: a background run of one of the available agents on one focused task. Returns a job id immediately; its report arrives as a follow-up message.",
             "",
             "A delegate starts with the project instructions and the skill list but none of this conversation, so write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence).",
             "",
-            'The delegate matches skills against the brief alone, so the brief names them: for every part of the work, side tasks included, name each listed skill that fits ("load the <name> skill first").',
+            'Check the skills list against every part of the brief, side tasks included, and name each match in the brief ("load the <name> skill first"). The delegate matches skills against the brief alone, and however detailed the brief, it still writes its own code and prose.',
             "",
             "With isolated: true, the delegate runs in a git clone at .pi/worktrees/<job id>, starting from the main tree as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
-            "",
-            "Pass an isolated job id as `clone` to run another delegate in its clone. delegate_apply or delegate_discard with any job id from that clone acts on the whole clone, and only one job runs in a clone at a time.",
             "",
             "To follow up on or redirect an existing job, see delegate_steer.",
         ].join("\n"),
         promptSnippet:
             "Delegate a focused task to a background agent with its own context; only its report comes back, as a later follow-up message",
         promptGuidelines: [
-            "You are the orchestrator: plan, split the work, brief delegates, and integrate their reports. Delegate on your own initiative. Your context is the scarce resource: everything you read stays in it, is re-sent with every request, and brings compaction closer. A delegate works in a fresh context, often on a cheaper model, and returns only its report.",
+            "You are the orchestrator: plan, split the work, brief delegates, and integrate their reports. Delegate on your own initiative. Your context is the scarce resource: everything you read stays in it, is re-sent with every request, and brings compaction closer.",
             "Delegate exploration, research, implementation beyond a small edit, build/test/debug loops, and reviews. Work directly only for reading one known file or the lines you are about to edit, one targeted search, a small edit (about 30 lines in one file), a quick verification (one test run or one cited line), or a command the user asked you to run. Shell one-liners and scripts that search or read code count as exploration.",
             "Your failure mode is drifting into doing the work yourself, one quick search at a time. Decide what to delegate before your first exploratory call; if one targeted search does not settle it, delegate the rest.",
             "Start every independent delegate before waiting on any, ideally in one message. Trust reports instead of repeating their searches; check only what you act on. If a report falls short, delegate a follow-up that names the gap.",
@@ -577,14 +562,14 @@ export default function (pi: ExtensionAPI) {
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
         ],
         parameters: Type.Object({
-            agent: Type.String({ description: "Agent name from the list in this tool's description." }),
+            agent: Type.String({ description: 'Agent to run, by name from the "Available agents" list.' }),
             description: Type.String({
                 description: "Short 3-8 word summary of this delegation, shown in the transcript.",
             }),
             task: Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
             model: Type.Optional(
                 Type.String({
-                    description: modelParam,
+                    description: MODEL_PARAM,
                 }),
             ),
             isolated: Type.Optional(
@@ -592,7 +577,8 @@ export default function (pi: ExtensionAPI) {
             ),
             clone: Type.Optional(
                 Type.String({
-                    description: "Job id of an isolated delegate; run in its clone instead of the main tree.",
+                    description:
+                        "Job id of an isolated delegate; run in its clone instead of the main tree. Only one job runs in a clone at a time.",
                 }),
             ),
         }),
@@ -655,7 +641,7 @@ export default function (pi: ExtensionAPI) {
             }),
             model: Type.Optional(
                 Type.String({
-                    description: `${modelParam} A running job switches live.`,
+                    description: `${MODEL_PARAM} A running job switches live.`,
                 }),
             ),
         }),
@@ -768,7 +754,7 @@ export default function (pi: ExtensionAPI) {
         name: "delegate_apply",
         label: "Apply delegate",
         description:
-            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. A successful apply removes the clone itself, so never call delegate_discard for the same clone, in the same turn or after. On conflict the clone is kept and the error explains the recovery. No delegate may be running in its clone.",
+            "Apply an isolated delegate's changes to the main working tree by job id. The delegate's commits and uncommitted changes are 3-way merged onto a fresh snapshot of the main tree, so nearby but non-overlapping edits apply cleanly; only a true conflict fails. A successful apply removes the clone itself. On conflict the clone is kept and the error explains the recovery. No delegate may be running in its clone.",
         promptSnippet: "Apply an isolated delegate's clone to the main tree by job id",
         parameters: Type.Object({
             id: Type.String({ description: "Job id of an isolated delegate; any job id that ran in the clone works." }),

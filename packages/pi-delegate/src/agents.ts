@@ -136,6 +136,26 @@ export function configFor(cwd: string, trusted: boolean): DelegateConfig {
     };
 }
 
+/** The roster the orchestrator's system prompt lists; see the `before_agent_start` hook in index.ts. */
+export function agentRoster(cwd: string, trusted: boolean): string {
+    const agents = agentsFor(cwd, trusted);
+    const lines = [
+        "Available agents for the delegate tool:",
+        ...agents.map((agent) => {
+            const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
+            return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
+        }),
+    ];
+    const aliases = [
+        ...new Set([
+            ...Object.keys(configFor(cwd, trusted).models ?? {}),
+            ...agents.flatMap((agent) => (agent.model && !/[/:]/.test(agent.model) ? [agent.model] : [])),
+        ]),
+    ];
+    if (aliases.length) lines.push("", `Model aliases (accepted by the \`model\` parameter): ${aliases.join(", ")}.`);
+    return lines.join("\n");
+}
+
 // Same `:<thinking>` suffix pi's --model takes; only known levels split, so ids like `llama3:8b` stay whole.
 function splitThinking(value: string): { model: string; thinking?: string } {
     const match = /^(.*):(off|minimal|low|medium|high|xhigh|max)$/.exec(value);
