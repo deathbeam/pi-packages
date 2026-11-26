@@ -116,7 +116,7 @@ describe("registration", () => {
         assert.match(guidelines, /self-contained brief/);
         assert.match(guidelines, /`delegate`'s `skills`/);
         assert.match(guidelines, /side tasks included/);
-        assert.match(guidelines, /listed in the delegate's prompt to read first and follow/);
+        assert.match(guidelines, /The delegate reads them first and follows them/);
         const skills = delegate.parameters.properties.skills;
         assert.ok(skills, "delegate has no skills parameter");
         assert.match(skills.description, /the delegate reads these first/);
