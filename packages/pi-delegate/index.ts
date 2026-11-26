@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionContext, KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, KeybindingHints, Skill, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, renderDiff } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import {
@@ -84,6 +84,17 @@ const MODEL_PARAM =
 const DELEGATE_PROMPT =
     "The orchestrator, another agent, wrote your task as a brief; you cannot see its conversation or ask it questions, so treat the brief as the user's whole request. Before starting, read the SKILL.md of every skill the brief names and follow it. Stay within the brief's scope and fill its gaps with your tools; if you are still blocked, stop and report what you tried and the exact blocker. The orchestrator sees none of your tool calls, only your final message: make that report stand alone and end it with statements.";
 
+function resolveSkills(names: string[], available: Skill[]): Skill[] {
+    return names.map((name) => {
+        const skill = available.find((candidate) => candidate.name === name);
+        if (!skill) {
+            const known = available.map((candidate) => candidate.name).join(", ") || "(none)";
+            throw new Error(`Unknown skill "${name}". Available skills: ${known}.`);
+        }
+        return skill;
+    });
+}
+
 function argText(value: unknown): string {
     return typeof value === "string" ? value : "";
 }
@@ -125,6 +136,8 @@ export default function (pi: ExtensionAPI) {
 
     // One warning per alias per session: an unset alias must not nag on every delegate call.
     const warnedAliases = new Set<string>();
+    // pi's loaded skills for this session; a child only gets the ones a launch names.
+    let availableSkills: Skill[] = [];
 
     /** An unset alias silently uses the session model, so name it and where it came from. */
     function warnAlias(alias: string | undefined, source: string, ctx: ExtensionContext) {
@@ -301,7 +314,7 @@ export default function (pi: ExtensionAPI) {
         ctx: ExtensionContext,
         agent: AgentFile,
         prior: InspectJob | undefined,
-        fields: { description: string; model?: string; isolated?: boolean; clone?: IsolationState },
+        fields: { description: string; model?: string; isolated?: boolean; clone?: IsolationState; skills?: string[] },
         task: string,
         signal: AbortSignal | undefined,
         prompt = task,
@@ -320,6 +333,16 @@ export default function (pi: ExtensionAPI) {
         const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
             (tool) => !DELEGATION_TOOLS.has(tool),
         );
+        // A revived job runs with exactly the skills it started with.
+        const skills = prior ? (prior.skills ?? []) : [...new Set(fields.skills ?? [])];
+        // Resolved here, before any clone or spawn: an unknown skill name must fail the launch with no side effects.
+        const resolvedSkills = skills.length ? resolveSkills(skills, availableSkills) : [];
+        const skillPins = resolvedSkills.length
+            ? [
+                  "Read these skills before starting and follow them:",
+                  ...resolvedSkills.map((skill) => `- ${skill.name}: ${skill.filePath}`),
+              ].join("\n")
+            : undefined;
         const displayModel = thinking ? `${model}:${thinking}` : model;
         const id = prior?.id ?? randomUUID().slice(0, 8);
         const isolation =
@@ -338,6 +361,7 @@ export default function (pi: ExtensionAPI) {
             status: "running",
             messages: prior ? sessionMessages(DELEGATE_SESSION_DIR, prior.id) : [],
             tools,
+            skills,
             toolCalls: 0,
             startedAt: Date.now(),
             contextWindow: contextWindowFor(ctx, model),
@@ -349,6 +373,7 @@ export default function (pi: ExtensionAPI) {
             agent: job.agent,
             model: displayModel,
             tools,
+            skills: skills.length ? skills : undefined,
             background: ctx.hasUI,
             isolation: job.isolation,
         };
@@ -365,6 +390,8 @@ export default function (pi: ExtensionAPI) {
         if (thinking) args.push("--thinking", thinking);
         args.push("--append-system-prompt", DELEGATE_PROMPT);
         if (agent.prompt) args.push("--append-system-prompt", agent.prompt);
+        // The pin names the skills this job was launched with; the delegate reads each one.
+        if (skillPins) args.push("--append-system-prompt", skillPins);
         const cwd = isolation ? cloneCwd(isolation, ctx.cwd) : ctx.cwd;
         if (isolation)
             args.push(
@@ -489,6 +516,7 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_tree", (_event, ctx) => restoreSession(ctx));
 
     pi.on("before_agent_start", (event, ctx) => {
+        availableSkills = event.systemPromptOptions.skills ?? [];
         // Children run without the delegation tools, so only the orchestrating session gets the roster.
         if (pi.getActiveTools().includes("delegate")) {
             event.systemPromptOptions.sections.agents = agentRoster(ctx.cwd, ctx.isProjectTrusted());
@@ -541,12 +569,7 @@ export default function (pi: ExtensionAPI) {
         name: "delegate",
         label: "Delegate",
         description: [
-            "Start a delegate: a background run of one of the available agents on one focused task. Returns a job id immediately; its report arrives as a follow-up message.",
-            "",
-            "A delegate starts with the project instructions and the skill list but none of this conversation, so write `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence).",
-            "",
-            'Check the skills list against every part of the brief, side tasks included, and name each match in the brief ("load the <name> skill first"). The delegate matches skills against the brief alone, and however detailed the brief, it still writes its own code and prose.',
-            "",
+            "Start a delegate: a background job that runs one of the available agents on one focused task. Returns a job id immediately; its report arrives as a follow-up message. A delegate starts with the project instructions and the skill list but none of this conversation.",
             "With isolated: true, the delegate runs in a git clone at .pi/worktrees/<job id>, starting from the main tree as it is now, uncommitted and untracked files included. It never touches the main tree and may commit freely; delegate_apply brings its changes back, delegate_discard drops them.",
             "",
             "To follow up on or redirect an existing job, see delegate_steer.",
@@ -557,6 +580,8 @@ export default function (pi: ExtensionAPI) {
             "You are the orchestrator: plan, split the work, brief delegates, and integrate their reports. Delegate on your own initiative. Your context is the scarce resource: everything you read stays in it, is re-sent with every request, and brings compaction closer.",
             "Delegate exploration, research, implementation beyond a small edit, build/test/debug loops, and reviews. Work directly only for reading one known file or the lines you are about to edit, one targeted search, a small edit (about 30 lines in one file), a quick verification (one test run or one cited line), or a command the user asked you to run. Shell one-liners and scripts that search or read code count as exploration.",
             "Your failure mode is drifting into doing the work yourself, one quick search at a time. Decide what to delegate before your first exploratory call; if one targeted search does not settle it, delegate the rest.",
+            "Write `delegate`'s `task` as a self-contained brief: the goal and why it matters, what you know (paths, symbols, errors), scope and constraints, whether to edit or only report, and what to return (format, length, path:line evidence).",
+            "Pass in `delegate`'s `skills` every skill that matches any part of the brief, side tasks included; they are listed in the delegate's prompt to read first and follow, so name them there instead of summarizing their rules in the brief, and however detailed the brief, it still writes its own code and prose.",
             "Start every independent delegate before waiting on any, ideally in one message. Trust reports instead of repeating their searches; check only what you act on. If a report falls short, delegate a follow-up that names the gap.",
             "While delegates run, stay outside their scopes. When a report is the next dependency, end your turn with a brief waiting status; completion will wake you.",
             "Read every required delegate report before claiming the task is done. Never sleep, poll, or call any tool solely to wait (including `bash` with `true`, `echo`, or `sleep 0`). Use delegate_list only for a one-time status check.",
@@ -566,10 +591,17 @@ export default function (pi: ExtensionAPI) {
             description: Type.String({
                 description: "Short 3-8 word summary of this delegation, shown in the transcript.",
             }),
-            task: Type.String({ description: "Self-contained brief; the delegate cannot see this conversation." }),
+            task: Type.String({
+                description: "Self-contained brief; the delegate cannot see this conversation.",
+            }),
             model: Type.Optional(
                 Type.String({
                     description: MODEL_PARAM,
+                }),
+            ),
+            skills: Type.Optional(
+                Type.Array(Type.String(), {
+                    description: "Skill names; the delegate reads these first and follows them",
                 }),
             ),
             isolated: Type.Optional(
@@ -588,11 +620,19 @@ export default function (pi: ExtensionAPI) {
             const model = optional(rawParams.model);
             const isolated = optional(rawParams.isolated);
             const cloneId = jobId(optional(rawParams.clone));
+            const skills = optional(rawParams.skills);
             if (cloneId && isolated === false) throw new Error("clone always runs isolated; omit isolated: false.");
             const clone = cloneId ? clonedJob(cloneId).isolation : undefined;
             const agent = agentByName(ctx.cwd, agentName, ctx.isProjectTrusted());
             const effective = clone ? true : (isolated ?? agent.isolated);
-            return runDelegate(ctx, agent, undefined, { description, model, isolated: effective, clone }, task, signal);
+            return runDelegate(
+                ctx,
+                agent,
+                undefined,
+                { description, model, isolated: effective, clone, skills },
+                task,
+                signal,
+            );
         },
 
         renderCall: callRenderer(

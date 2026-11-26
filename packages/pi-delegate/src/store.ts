@@ -10,6 +10,8 @@ export type InspectJob = {
     task: string;
     model: string;
     tools: string[];
+    /** The skills pinned in the child's prompt to read first; empty means none. */
+    skills?: string[];
     toolCalls: number;
     contextTokens?: number;
     contextWindow?: number;

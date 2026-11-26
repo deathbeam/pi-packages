@@ -326,8 +326,14 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                     }
                     function renderHistory(width: number, job: InspectJob): string[] {
                         const tools = toolsLines(job, width);
+                        const skills = job.skills?.length
+                            ? [truncateToWidth(theme.fg("dim", job.skills.join(", ")), width)]
+                            : [];
                         // Fixed rows: header, model, rule, footer, plus the failure detail.
-                        const height = Math.max(0, bodyHeight() - 4 - tools.length - (job.detail ? 1 : 0));
+                        const height = Math.max(
+                            0,
+                            bodyHeight() - 4 - tools.length - skills.length - (job.detail ? 1 : 0),
+                        );
                         const view = transcript(job);
                         const messages = messagesOf(job);
                         view.sync(messages);
@@ -364,6 +370,7 @@ export function registerInspector(pi: ExtensionAPI, store: JobStore, sessionDir:
                             ),
                             truncateToWidth(theme.fg("dim", job.model), width),
                             ...tools,
+                            ...skills,
                             theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
                             ...shown,
                             ...Array(Math.max(0, height - shown.length)).fill(""),

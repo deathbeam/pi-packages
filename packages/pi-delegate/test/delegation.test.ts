@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -16,6 +16,7 @@ import {
     registerExtension,
     sessionDir,
     spawnedChildren,
+    tempGitRepo,
     themeStub,
     withTimeout,
 } from "./helpers.ts";
@@ -43,9 +44,11 @@ afterAll(() => {
  * A fresh extension instance plus a TUI: its own job store, saved entries and report queue, so tests start clean.
  * Every test cancels the jobs it leaves running.
  */
-function tuiSession() {
-    const app = registerExtension();
+function tuiSession(skills: any[] = []) {
+    const handlers: Record<string, any> = {};
+    const app = registerExtension({ on: (event, handler) => (handlers[event] = handler) });
     const screen = overlayHarness(theme);
+    handlers.before_agent_start({ messageType: "user", systemPromptOptions: { sections: {}, skills } }, baseCtx);
     return {
         ...app,
         ...screen,
@@ -223,11 +226,156 @@ describe("launch", () => {
         ]);
         assert.deepEqual(spawn.slice(6, 10), ["--model", "anthropic/m", "--tools", job.details.tools.join(",")]);
         assert.ok(!spawn.includes("--no-session"), "child would start a fresh session");
+        // A skill-less launch pins nothing.
+        assert.ok(!spawn.some((arg) => arg.includes("Read these skills")), "a skill-less launch must pin nothing");
         await cancelJob(app, job);
+    });
+
+    it("passes the requested skills to the child once each", async () => {
+        const root = mkdtempSync(join(tmpdir(), "pi-delegate-skill-files-"));
+        const skillFile = (name: string, content: string) => {
+            const dir = join(root, name);
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(join(dir, "SKILL.md"), content);
+            return {
+                name,
+                description: `${name} skill`,
+                filePath: join(dir, "SKILL.md"),
+                baseDir: dir,
+                sourceInfo: {},
+                disableModelInvocation: false,
+            };
+        };
+        const firstSkill = skillFile("first-skill", "First rules.");
+        const secondSkill = skillFile("second-skill", "Second rules.");
+        try {
+            const app = tuiSession([firstSkill, secondSkill]);
+            const job = await app.delegate.execute(
+                "call",
+                {
+                    agent: "explore",
+                    description: "skills",
+                    task: "trace it",
+                    skills: ["first-skill", "second-skill", "first-skill"],
+                },
+                undefined,
+                () => {},
+                app.tuiCtx,
+            );
+            const spawn = await findSpawn(`delegate-${job.details.id}`);
+            assert.ok(spawn, "child never spawned");
+            assert.deepEqual(job.details.skills, ["first-skill", "second-skill"]);
+            const pinned = spawn.filter((arg, index) => spawn[index - 1] === "--append-system-prompt");
+            assert.deepEqual(
+                pinned.filter((arg) => arg.startsWith("Read these skills before starting")),
+                [
+                    [
+                        "Read these skills before starting and follow them:",
+                        `- first-skill: ${firstSkill.filePath}`,
+                        `- second-skill: ${secondSkill.filePath}`,
+                    ].join("\n"),
+                ],
+                "each named skill must be pinned once with its name and path",
+            );
+            const card = app.delegate.renderResult(job, { expanded: true }, theme, { isError: false, keyHint });
+            assert.match(card.render(160).join("\n"), /Skills: first-skill, second-skill/);
+            // The pin is the only argv difference: a launch without skills gets the rest byte for byte.
+            const plain = await app.delegate.execute(
+                "call",
+                { agent: "explore", description: "skills", task: "trace it" },
+                undefined,
+                () => {},
+                app.tuiCtx,
+            );
+            const plainSpawn = await findSpawn(`delegate-${plain.details.id}`);
+            assert.ok(plainSpawn, "plain child never spawned");
+            const withoutPin = (argv: string[]) =>
+                argv.filter(
+                    (arg, index) =>
+                        !arg.startsWith("Read these skills before starting") &&
+                        !(arg === "--append-system-prompt" && argv[index + 1]?.startsWith("Read these skills")),
+                );
+            const stripId = (argv: string[]) => argv.map((arg) => arg.replace(/delegate-[0-9a-f]+/, "delegate-ID"));
+            assert.deepEqual(
+                stripId(withoutPin(spawn)),
+                stripId(plainSpawn),
+                "skills must add nothing to the argv but the pin",
+            );
+            await cancelJob(app, plain);
+            await cancelJob(app, job);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("fails an unknown skill before spawning", async () => {
+        const app = tuiSession([{ name: "known-skill", filePath: "/skills/known-skill/SKILL.md" }]);
+        const before = spawnedChildren(pi.dir).length;
+        await assert.rejects(
+            app.delegate.execute(
+                "call",
+                { agent: "explore", description: "x", task: "y", skills: ["nope"] },
+                undefined,
+                () => {},
+                app.tuiCtx,
+            ),
+            /Unknown skill "nope"\. Available skills: known-skill\./,
+        );
+        assert.equal(spawnedChildren(pi.dir).length, before, "a rejected launch must not spawn");
+    });
+
+    it("fails an unknown skill before cloning an isolated delegate", async () => {
+        const repo = tempGitRepo({ "tracked.txt": "one\n" });
+        const app = tuiSession([{ name: "known-skill", filePath: "/skills/known-skill/SKILL.md" }]);
+        const before = spawnedChildren(pi.dir).length;
+        try {
+            await assert.rejects(
+                app.delegate.execute(
+                    "call",
+                    { agent: "explore", description: "x", task: "y", skills: ["nope"], isolated: true },
+                    undefined,
+                    () => {},
+                    { ...app.tuiCtx, cwd: repo.dir },
+                ),
+                /Unknown skill "nope"\./,
+            );
+            assert.equal(existsSync(join(repo.dir, ".pi", "worktrees")), false, "an unknown skill must not clone");
+            assert.equal(spawnedChildren(pi.dir).length, before, "a rejected launch must not spawn");
+        } finally {
+            repo.remove();
+        }
     });
 });
 
 describe("inspector", () => {
+    it("lists a job's skills under its tools", async () => {
+        const app = tuiSession([
+            {
+                name: "probe-skill",
+                description: "Probe",
+                filePath: "/skills/probe-skill/SKILL.md",
+                baseDir: "/skills/probe-skill",
+                sourceInfo: {},
+                disableModelInvocation: false,
+            },
+        ]);
+        const job = await app.delegate.execute(
+            "call",
+            { agent: "explore", description: "with skills", task: "trace it", skills: ["probe-skill"] },
+            undefined,
+            () => {},
+            app.tuiCtx,
+        );
+        app.inspect.handler("", { mode: "tui", ui: app.ui });
+        const view = await withTimeout(app.viewerReady);
+        const rows = view.render(80);
+        const toolsRow = rows.findIndex((row: string) => row.includes("read, grep"));
+        const skillsRow = rows.findIndex((row: string) => row.split("│")[1]?.includes("probe-skill"));
+        assert.ok(toolsRow >= 0 && skillsRow === toolsRow + 1, "skills row missing right under the tools row");
+        assert.match(rows[skillsRow + 1].split("│")[1], /─{20}/);
+        await cancelJob(app, job);
+    });
+
     it("opens the observer on a live job", async () => {
         const app = tuiSession();
         const first = await startJob(app, "first run");

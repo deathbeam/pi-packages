@@ -109,6 +109,19 @@ describe("registration", () => {
         assert.match(guidelines, /call any tool solely to wait/);
     });
 
+    it("makes the model pass the matching skills to the delegate", () => {
+        const app = registerExtension();
+        const delegate = app.tool("delegate");
+        const guidelines = delegate.promptGuidelines.join("\n");
+        assert.match(guidelines, /self-contained brief/);
+        assert.match(guidelines, /`delegate`'s `skills`/);
+        assert.match(guidelines, /side tasks included/);
+        assert.match(guidelines, /listed in the delegate's prompt to read first and follow/);
+        const skills = delegate.parameters.properties.skills;
+        assert.ok(skills, "delegate has no skills parameter");
+        assert.match(skills.description, /the delegate reads these first/);
+    });
+
     it("takes no discard flag on delegate_apply", () => {
         const app = registerExtension();
         assert.equal("discard" in app.tool("delegate_apply").parameters.properties, false);

@@ -42,7 +42,7 @@ type IsolationStateFields = {
     status?: string;
 };
 
-export type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "model" | "tools" | "isolation"> & {
+export type DelegateDetails = Pick<DelegateJob, "id" | "agent" | "model" | "tools" | "isolation" | "skills"> & {
     background: boolean;
 };
 
@@ -451,7 +451,14 @@ export function launchResult(
     if (expanded)
         container.addChild(
             new Text(
-                theme.fg("muted", `  Model: ${details.model ?? "default"}\n  Tools: ${formatTools(details.tools)}`),
+                theme.fg(
+                    "muted",
+                    [
+                        `  Model: ${details.model ?? "default"}`,
+                        `  Tools: ${formatTools(details.tools)}`,
+                        ...(details.skills?.length ? [`  Skills: ${details.skills.join(", ")}`] : []),
+                    ].join("\n"),
+                ),
                 0,
                 0,
             ),

@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import {
+    agentDir,
     baseCtx,
     cleanup,
     fakePi,
     keyHint,
     overlayHarness,
     registerExtension,
+    spawnedChildren,
     tempGitRepo,
     themeStub,
     withTimeout,
@@ -30,12 +32,26 @@ afterAll(() => {
     process.argv = argv;
     pi.remove();
     cleanup();
+    rmSync(skillDir, { recursive: true, force: true });
 });
 
-/** A fresh extension instance with its tools and a TUI that renders widgets. */
-function delegateSession() {
-    const app = registerExtension();
+const skillDir = mkdtempSync(join(tmpdir(), "pi-delegate-revive-skill-"));
+writeFileSync(join(skillDir, "SKILL.md"), "Probe rules.\n");
+
+const probeSkill = {
+    name: "probe-skill",
+    description: "probe",
+    filePath: join(skillDir, "SKILL.md"),
+    baseDir: skillDir,
+    sourceInfo: {},
+    disableModelInvocation: false,
+};
+
+function delegateSession(skills: any[] = []) {
+    const handlers: Record<string, any> = {};
+    const app = registerExtension({ on: (event, handler) => (handlers[event] = handler) });
     const screen = overlayHarness(theme);
+    handlers.before_agent_start({ messageType: "user", systemPromptOptions: { sections: {}, skills } }, baseCtx);
     return {
         ...app,
         ...screen,
@@ -93,6 +109,53 @@ describe("background revive", () => {
         const revivedReport = await withTimeout(report);
         assert.equal(revivedReport.message.details.id, cancelled.details.id);
         assert.equal(revivedReport.message.details.error, undefined);
+    });
+
+    it("revives a job with exactly the skills it was launched with", async () => {
+        const app = delegateSession([probeSkill]);
+        const job = await launch(app, app.tuiCtx, { description: "skilled run", skills: ["probe-skill"] });
+        const spawnedBefore = spawnedChildren(pi.dir).length;
+        await cancelJob(app, app.tuiCtx, job);
+        const report = app.nextMessage();
+        await app.steer.execute(
+            "call",
+            { id: job.details.id, message: "revive: finish it" },
+            undefined,
+            () => {},
+            app.tuiCtx,
+        );
+        await withTimeout(report);
+        const [launched, revived] = spawnedChildren(pi.dir).slice(spawnedBefore);
+        const pinned = revived.filter((arg, index) => revived[index - 1] === "--append-system-prompt");
+        assert.deepEqual(
+            pinned.filter((arg) => arg.startsWith("Read these skills before starting")),
+            [
+                ["Read these skills before starting and follow them:", `- probe-skill: ${probeSkill.filePath}`].join(
+                    "\n",
+                ),
+            ],
+            "the revive must pin the launch's skill once",
+        );
+        assert.deepEqual(revived, launched, "a revive must not change the argv of the launch");
+    });
+
+    it("revives a job without skills inlining nothing", async () => {
+        const app = delegateSession([probeSkill]);
+        const before = spawnedChildren(pi.dir).length;
+        const job = await launch(app, app.tuiCtx, { description: "plain run" });
+        await cancelJob(app, app.tuiCtx, job);
+        const report = app.nextMessage();
+        await app.steer.execute(
+            "call",
+            { id: job.details.id, message: "revive: finish it" },
+            undefined,
+            () => {},
+            app.tuiCtx,
+        );
+        await withTimeout(report);
+        const [launched, revived] = spawnedChildren(pi.dir).slice(before);
+        assert.deepEqual(revived, launched, "the revive must keep the argv of a skill-less launch");
+        assert.ok(!revived.some((arg) => arg.includes("Read these skills")), "the revive must pin nothing");
     });
 
     // Both revives pass the idle-clone checks, so only the first may spawn on the finished job's id.

@@ -51,17 +51,7 @@ Explore the codebase and report relevant paths.
 - `description` is required.
 - `tools` is optional, a comma-separated list of tool names. Defaults to the session tools.
 - `model` is optional, an alias name or a `provider/model[:thinking]` id. Defaults to the session model.
-- `isolated` is optional and defaults to `false`. See [Isolation](#isolation).
-
-## Isolation
-
-`isolated: true` (on a `delegate` call or in agent frontmatter) runs the delegate in its own git clone at
-`.pi/worktrees/<job id>`, starting from your current working tree including uncommitted changes.
-
-`delegate_apply` merges the result into your working tree as uncommitted changes.
-`delegate_discard` discards the clone and its changes.
-
-Any later delegate can share that clone with `clone: <job id>`, for review, tests, or follow-up work.
+- `isolated` is optional and defaults to `false`. The `isolated` parameter on a `delegate` call does the same: the delegate runs in its own git clone at `.pi/worktrees/<job id>`, starting from the working tree including uncommitted changes. `delegate_apply` merges the clone back as uncommitted changes, `delegate_discard` drops it, and `clone: <job id>` lets a later delegate share it for review, tests, or follow-up work.
 
 ## Development
 
