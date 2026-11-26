@@ -73,7 +73,7 @@ function writeSessions(): void {
     }
 }
 
-type View = { render(width: number): string[]; handleInput(data: string): void };
+type View = { render(width: number): string[]; handleInput(data: string): void; handleMouse(event: any): any };
 
 function mount(
     sessionDirOverride: string = sessionDir,
@@ -197,6 +197,35 @@ describe("usage dashboard render", () => {
         assert.ok(!summary.includes("enter open") && !summary.includes("[ ] day"), summary);
         view.handleInput("\t");
         assert.ok(view.render(100).at(-1)!.includes("enter open"));
+    });
+
+    it("scrolls with the mouse wheel", async () => {
+        const paint = { ...theme, bg: (color: string, text: string) => (color === "selectedBg" ? `[${text}]` : text) };
+        const view = mount(sessionDir, 24, KEYS, paint);
+        await loaded(view);
+        view.handleInput("\t"); // the Day view
+        const selected = () => view.render(100).find((line) => line.startsWith("[") && line.endsWith("]"));
+        const first = selected();
+        assert.ok(first, "no selected row");
+        const wheel = (wheelDelta: number) =>
+            view.handleMouse({
+                type: "wheel",
+                button: "none",
+                x: 10,
+                y: 10,
+                screenX: 10,
+                screenY: 10,
+                width: 100,
+                height: 24,
+                shift: false,
+                alt: false,
+                ctrl: false,
+                wheelDelta,
+            });
+        assert.ok(wheel(1), "the wheel was not handled");
+        assert.notEqual(selected(), first, "the wheel did not move the selection");
+        wheel(-100);
+        assert.equal(selected(), first, "the wheel did not scroll back to the top");
     });
 
     it("counts every project when getSessionDir returns a single project dir", async () => {

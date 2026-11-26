@@ -3,7 +3,7 @@
 import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import {
     clip,
     deltaText,
@@ -421,6 +421,13 @@ export default function (pi: ExtensionAPI) {
                         else return;
                         cursor = Math.max(0, Math.min(rowCount - 1, cursor));
                         tui.requestRender();
+                    },
+                    // Fullscreen turns on mouse tracking, so the wheel arrives here instead of as arrow keys.
+                    handleMouse(event: TuiMouseEvent) {
+                        if (event.type !== "wheel" || !event.wheelDelta) return;
+                        cursor = Math.max(0, Math.min(rowCount - 1, cursor + event.wheelDelta));
+                        tui.requestRender();
+                        return { handled: true };
                     },
                 };
             }, screen);
