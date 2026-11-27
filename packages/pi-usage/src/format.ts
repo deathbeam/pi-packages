@@ -30,6 +30,13 @@ export function hitPct(stats: Stats, theme: Theme): string {
     return theme.fg(pct >= 90 ? "success" : pct >= 75 ? "warning" : "error", `${pct}%`);
 }
 
+/** The mirror of hitPct: a fault rate over its base, colored by how far it is from zero. */
+export function ratePct(errors: number, base: number, theme: Theme, bad = 5, digits = 0): string {
+    if (base === 0) return "-";
+    const pct = (100 * errors) / base;
+    return theme.fg(pct >= bad ? "error" : pct >= bad / 2 ? "warning" : "success", `${pct.toFixed(digits)}%`);
+}
+
 export function padWidth(s: string, w: number): string {
     return s + " ".repeat(Math.max(0, w - visibleWidth(s)));
 }

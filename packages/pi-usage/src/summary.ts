@@ -3,13 +3,24 @@
 import { basename } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { callLine, deltaText, displayName, formatCost, formatTokens, hitPct, padWidth, topLine } from "./format.ts";
+import {
+    callLine,
+    deltaText,
+    displayName,
+    formatCost,
+    formatTokens,
+    hitPct,
+    padWidth,
+    ratePct,
+    topLine,
+} from "./format.ts";
 import {
     buildRows,
     comparison,
     dailyTotals,
     dayKey,
     percentChange,
+    sumCounts,
     summarize,
     type DailyCost,
     type GroupMode,
@@ -99,11 +110,21 @@ const MIN_SECTION_WIDTH = 44;
 const MAX_NAME_WIDTH = 30;
 /** Space the bar and the cost take in a top list row. */
 const LIST_OVERHEAD = 24;
-/** Two lists share a row while each keeps its names readable. */
-const LISTS_PER_ROW = 2;
+/** Ranking blocks per row: three when the width allows, then two, then one. */
+const MAX_LISTS_PER_ROW = 3;
 
 function emptyStats(): Stats {
-    return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    return {
+        cost: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        aborts: 0,
+        apiErrors: 0,
+        toolErrors: 0,
+        tools: {},
+    };
 }
 
 function trends(records: UsageRecord[], now: number): Trends {
@@ -236,59 +257,73 @@ function delegateSplit(records: UsageRecord[]): Delegates {
     return { cost, share: total > 0 ? cost / total : 0 };
 }
 
-/** Cost, volume and token cells; one group per column so the three start side by side. */
-function kpiGroups(model: SummaryModel, theme: Theme): Cell[][] {
+/** The Overview blocks, side by side like Trends and Streaks; Errors carries the failure rates. */
+function kpiSections(model: SummaryModel, theme: Theme): Section[] {
     const { stats } = model;
+    /** A failure cell, or nothing when its base is empty: the cells below then move up. */
+    function faults(label: string, errors: number, base: number): Cell[] {
+        if (base === 0) return [];
+        const rate = cellValue(ratePct(errors, base, theme, 5, 1), false, theme);
+        return [{ label, value: `${rate} ${theme.fg("muted", `${errors}`)}` }];
+    }
     return [
-        [
-            { label: "Total", value: cellValue(formatCost(stats.cost), true, theme) },
-            { label: "Per day", value: cellValue(formatCost(model.perDay), false, theme) },
-            { label: "Per session", value: cellValue(formatCost(model.perSession), false, theme) },
-            {
-                label: "Delegates",
-                value:
-                    cellValue(formatCost(model.delegates.cost), false, theme) +
-                    "  " +
-                    theme.fg("muted", `${Math.round(100 * model.delegates.share)}%`),
-            },
-        ],
-        [
-            { label: "Reqs", value: cellValue(formatTokens(model.requests), false, theme) },
-            { label: "Sessions", value: cellValue(formatTokens(model.sessions), false, theme) },
-            { label: "Active days", value: cellValue(formatTokens(model.activeDays), false, theme) },
-        ],
-        [
-            { label: "In", value: cellValue(formatTokens(stats.input), false, theme) },
-            { label: "Out", value: cellValue(formatTokens(stats.output), false, theme) },
-            // shortcut: no per-model price table, so cache savings show as the read/write split, not dollars.
-            { label: "Cache R", value: cellValue(formatTokens(stats.cacheRead), false, theme) },
-            { label: "Cache W", value: cellValue(formatTokens(stats.cacheWrite), false, theme) },
-            { label: "Hit", value: cellValue(hitPct(stats, theme), false, theme) },
-        ],
+        {
+            title: "Cost",
+            maxColumns: 1,
+            cells: () => [
+                { label: "Total", value: cellValue(formatCost(stats.cost), true, theme) },
+                { label: "Per day", value: cellValue(formatCost(model.perDay), false, theme) },
+                { label: "Per session", value: cellValue(formatCost(model.perSession), false, theme) },
+                {
+                    label: "Delegates",
+                    value:
+                        cellValue(formatCost(model.delegates.cost), false, theme) +
+                        "  " +
+                        theme.fg("muted", `${Math.round(100 * model.delegates.share)}%`),
+                },
+            ],
+        },
+        {
+            title: "Requests",
+            maxColumns: 1,
+            cells: () => [
+                { label: "Reqs", value: cellValue(formatTokens(model.requests), false, theme) },
+                { label: "Sessions", value: cellValue(formatTokens(model.sessions), false, theme) },
+                { label: "Active days", value: cellValue(formatTokens(model.activeDays), false, theme) },
+            ],
+        },
+        {
+            title: "Tokens",
+            maxColumns: 1,
+            cells: () => [
+                { label: "In", value: cellValue(formatTokens(stats.input), false, theme) },
+                { label: "Out", value: cellValue(formatTokens(stats.output), false, theme) },
+                // shortcut: no per-model price table, so cache savings show as the read/write split, not dollars.
+                { label: "Cache R", value: cellValue(formatTokens(stats.cacheRead), false, theme) },
+                { label: "Cache W", value: cellValue(formatTokens(stats.cacheWrite), false, theme) },
+                { label: "Hit", value: cellValue(hitPct(stats, theme), false, theme) },
+            ],
+        },
+        {
+            title: "Errors",
+            maxColumns: 1,
+            cells: () => [
+                ...faults("Aborted", stats.aborts, model.requests),
+                ...faults("API", stats.apiErrors, model.requests),
+                ...faults("Tool", stats.toolErrors, sumCounts(stats.tools)),
+            ],
+        },
     ];
 }
 
-/** Column-major: each group is a column with its labels padded, so every value in a column lines up. */
-function kpiBlock(groups: Cell[][], width: number, theme: Theme): string[] {
-    const labelWidths = groups.map((group) => Math.max(...group.map((cell) => visibleWidth(cell.label))));
-    const widths = groups.map(
-        (group, column) =>
-            Math.max(...group.map((cell) => visibleWidth(cellText(cell, theme, labelWidths[column]!)))) + COLUMN_GAP,
-    );
-    if (widths.reduce((sum, column) => sum + column, 0) - COLUMN_GAP > width)
-        return groups.flatMap((group) => grid(group, width, group.length, theme));
-    const height = Math.max(...groups.map((group) => group.length));
-    return Array.from({ length: height }, (_, row) =>
-        groups
-            .map((group, column) =>
-                padWidth(
-                    group[row] === undefined ? "" : cellText(group[row]!, theme, labelWidths[column]!),
-                    widths[column]!,
-                ),
-            )
-            .join("")
-            .trimEnd(),
-    );
+/** The four Overview blocks in one row; the whole Errors block goes before the cells are cut. */
+function overviewLines(model: SummaryModel, width: number, theme: Theme): string[] {
+    const blocks = kpiSections(model, theme).filter((section) => section.cells(width).length > 0);
+    const natural = blocks.map((section) => sectionBlock(section, width, theme));
+    const widths = natural.map((block) => Math.max(...block.map((line) => visibleWidth(line))));
+    const gaps = COLUMN_GAP * (natural.length - 1);
+    if (widths.reduce((sum, block) => sum + block, 0) + gaps <= width) return sideBySide(natural, widths);
+    return sections(blocks.slice(0, 3), width, theme);
 }
 
 /** Total, then per day, then the change against the previous period. */
@@ -609,7 +644,7 @@ export function summaryModel(
 
 export function summaryLines(model: SummaryModel, width: number, theme: Theme): string[] {
     const bodyWidth = Math.max(1, width - INDENT.length);
-    const lines = [heading(theme, "Overview"), ...indent(kpiBlock(kpiGroups(model, theme), bodyWidth, theme))];
+    const lines = overviewLines(model, width, theme);
     const items: Section[] = [];
     if (model.trends) items.push({ title: "Trends", maxColumns: 1, cells: (w) => trendCells(model, w, theme) });
     items.push({ title: "Streaks", maxColumns: 1, cells: () => streakCells(model, theme) });
@@ -627,18 +662,22 @@ export function summaryLines(model: SummaryModel, width: number, theme: Theme): 
             { title: "Skills", rows: model.top.skills, calls: model.top.skillCalls },
         ] satisfies List[]
     ).filter((list) => list.rows.length > 0);
-    // A list column is as wide as the widest list that lands in it, so the pairs line up down the rows and
+    // A list column is as wide as the widest list that lands in it, so the blocks line up down the rows and
     // stop at their content instead of hugging the right edge of a wide terminal.
-    const listColumns = Array.from({ length: LISTS_PER_ROW }, (_, column) =>
-        Math.max(
-            0,
-            ...lists.filter((_, index) => index % LISTS_PER_ROW === column).map((list) => listWidth(list, width)),
-        ),
-    );
-    const paired = lists.length > 1 && listColumns.reduce((sum, column) => sum + column, 0) + COLUMN_GAP <= width;
-    for (let start = 0; start < lists.length; start += paired ? LISTS_PER_ROW : 1) {
-        const row = lists.slice(start, start + (paired ? LISTS_PER_ROW : 1));
-        const widths = row.map((_, column) => (paired ? listColumns[column]! : width));
+    function columns(count: number): number[] {
+        return Array.from({ length: count }, (_, column) =>
+            Math.max(0, ...lists.filter((_, index) => index % count === column).map((list) => listWidth(list, width))),
+        );
+    }
+    const perRow =
+        [MAX_LISTS_PER_ROW, 2].find(
+            (count) =>
+                lists.length > 1 &&
+                columns(count).reduce((sum, column) => sum + column, 0) + COLUMN_GAP * (count - 1) <= width,
+        ) ?? 1;
+    const widths = perRow === 1 ? [width] : columns(perRow);
+    for (let start = 0; start < lists.length; start += perRow) {
+        const row = lists.slice(start, start + perRow);
         lines.push("", ...listRow(row, widths, model.stats.cost, theme));
     }
     return lines;

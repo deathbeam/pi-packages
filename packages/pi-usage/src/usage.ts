@@ -21,8 +21,14 @@ export type UsageRecord = {
     sessionId: string;
     /** Assistant messages this record stands for. */
     requests: number;
+    /** Requests that ended in stopReason "aborted". */
+    aborts: number;
+    /** Requests that ended in stopReason "error". */
+    apiErrors: number;
     /** Tool calls this record stands for, by tool name. */
     tools: Record<string, number>;
+    /** Tool calls in this record that returned an error. */
+    toolErrors: number;
     /** Skill uses this record stands for, by skill name. */
     skills: Record<string, number>;
 };
@@ -33,6 +39,11 @@ export type Stats = {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    aborts: number;
+    apiErrors: number;
+    toolErrors: number;
+    /** Tool calls, by tool name; their count is the base of the tool error rate. */
+    tools: Record<string, number>;
 };
 
 type CacheEntry = { size: number; mtimeMs: number; records: UsageRecord[] };
@@ -63,10 +74,21 @@ export type TimeWindow = { since: number; until: number };
 
 type Tally = { stats: Stats; requests: number; models?: Map<string, Tally> };
 
-const CACHE_VERSION = 6;
+/** Bump whenever a record field changes: cached records of another version are re-parsed. */
+const CACHE_VERSION = 7;
 
 function emptyStats(): Stats {
-    return { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    return {
+        cost: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        aborts: 0,
+        apiErrors: 0,
+        tools: {},
+        toolErrors: 0,
+    };
 }
 
 function num(value: unknown): number {
@@ -92,7 +114,6 @@ function aggregate(records: UsageRecord[]): UsageRecord[] {
         addStats(bucket, record);
         bucket.ts = Math.max(bucket.ts, record.ts);
         bucket.requests += record.requests;
-        addCalls(bucket.tools, record.tools);
         addCalls(bucket.skills, record.skills);
     }
     return [...buckets.values()];
@@ -104,10 +125,21 @@ function addStats(stats: Stats, record: UsageRecord): void {
     stats.output += record.output;
     stats.cacheRead += record.cacheRead;
     stats.cacheWrite += record.cacheWrite;
+    stats.aborts += record.aborts;
+    stats.apiErrors += record.apiErrors;
+    stats.toolErrors += record.toolErrors;
+    addCalls(stats.tools, record.tools);
 }
 
 function addCalls(into: Record<string, number>, from: Record<string, number>): void {
     for (const [name, calls] of Object.entries(from)) into[name] = (into[name] ?? 0) + calls;
+}
+
+/** Total of a per-name count map: the base of a share, or the errors behind a rate. */
+export function sumCounts(counts: Record<string, number>): number {
+    let total = 0;
+    for (const count of Object.values(counts)) total += count;
+    return total;
 }
 
 function recordKey(record: UsageRecord, mode: GroupMode): string {
@@ -179,10 +211,19 @@ function toolCalls(content: unknown): { tools: Record<string, number>; skills: R
 }
 
 /** Throws only on read errors, so a partial parse is never cached. */
+/** A delegate worktree sits inside the project that spawned it, so it counts as that project. */
+function projectCwd(cwd: string): string {
+    const marker = "/.pi/worktrees/";
+    const at = cwd.indexOf(marker);
+    return at < 0 ? cwd : cwd.slice(0, at);
+}
+
 async function parseFile(file: string): Promise<UsageRecord[]> {
     const records: UsageRecord[] = [];
     let cwd = "";
     let sessionId = "";
+    // A tool result carries no model of its own; it counts against the last assistant message's record.
+    let current: UsageRecord | undefined;
     const lines = createInterface({ input: createReadStream(file, "utf8"), crlfDelay: Infinity });
     for await (const line of lines) {
         // Cheap prefilter: escaped JSON inside tool results never matches this literal.
@@ -190,14 +231,15 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             line.includes('"role":"assistant"') ||
             line.includes('"type":"usage"') ||
             line.includes('"type":"compaction"') ||
-            line.includes('"type":"branch_summary"');
+            line.includes('"type":"branch_summary"') ||
+            line.includes('"isError":true');
         if (!isUsage) {
             // The session header (type:"session", cwd, id) is normally the first line.
             if (sessionId === "" && line.includes('"type":"session"')) {
                 try {
                     const header = JSON.parse(line);
                     if (header?.type === "session") {
-                        cwd = String(header.cwd ?? "");
+                        cwd = projectCwd(String(header.cwd ?? ""));
                         sessionId = String(header.id ?? "");
                     }
                 } catch {
@@ -213,6 +255,11 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             continue;
         }
         const message = entry?.message;
+        if (message?.role === "toolResult") {
+            // A tool result is its own entry; a failing one counts against the tool that the last message called.
+            if (message.isError === true && typeof message.toolName === "string" && current) current.toolErrors += 1;
+            continue;
+        }
         const usage =
             entry?.type === "message" ? (message?.role === "assistant" ? message.usage : undefined) : entry?.usage;
         if (!usage) continue;
@@ -235,11 +282,26 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
         const output = num(usage.output);
         const cacheRead = num(usage.cacheRead);
         const cacheWrite = num(usage.cacheWrite);
-        // An aborted request (delegate children report one) carries no usage; counting it adds a phantom row.
-        if (cost === 0 && input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) continue;
+        const aborts = entry.type === "message" && message.stopReason === "aborted" ? 1 : 0;
+        const apiErrors = entry.type === "message" && message.stopReason === "error" ? 1 : 0;
+        // An aborted or failed request (delegate children report one) usually carries no usage, but it still
+        // counts: dropping it would hide most of the failure rate.
+        if (
+            aborts === 0 &&
+            apiErrors === 0 &&
+            cost === 0 &&
+            input === 0 &&
+            output === 0 &&
+            cacheRead === 0 &&
+            cacheWrite === 0
+        )
+            continue;
         const stamp = entry.type === "message" ? message.timestamp : entry.timestamp;
-        const { tools, skills } = toolCalls(entry.type === "message" ? message.content : undefined);
-        records.push({
+        if (typeof stamp !== "string" && typeof stamp !== "number") continue;
+        // An aborted message can still list tool calls that never ran, so it contributes no calls.
+        const content = entry.type === "message" && aborts === 0 ? message.content : undefined;
+        const { tools, skills } = toolCalls(content);
+        const record: UsageRecord = {
             provider,
             model,
             ts: typeof stamp === "string" ? num(Date.parse(stamp)) : num(stamp),
@@ -249,11 +311,17 @@ async function parseFile(file: string): Promise<UsageRecord[]> {
             cacheRead,
             cacheWrite,
             requests: 1,
+            aborts,
+            apiErrors,
             tools,
+            toolErrors: 0,
             skills,
             cwd,
             sessionId,
-        });
+        };
+        records.push(record);
+        // Only an assistant message owns the tool results that follow; a summaries row has no tools.
+        if (entry.type === "message") current = record;
     }
     return records;
 }
@@ -368,39 +436,56 @@ export function usageWindow(records: UsageRecord[], day?: string, now = Date.now
     return { since: first === Infinity ? until : dayWindow(dayKey(first)).since, until };
 }
 
-export function comparison(records: UsageRecord[], now = Date.now()) {
+/** The current week against the week before it: the boundaries every week comparison in the view uses. */
+function weekWindows(now = Date.now()): { weekStart: number; lastWeekStart: number; until: number } {
     const { since: today, until } = dayWindow(dayKey(now));
     const week = new Date(today);
     week.setDate(week.getDate() - ((week.getDay() + 6) % 7));
     const weekStart = startOfDay(week.getTime());
-    const lastWeek = dayWindow(dayKey(weekStart), -7).since;
+    return { weekStart, lastWeekStart: dayWindow(dayKey(weekStart), -7).since, until };
+}
+
+export function comparison(records: UsageRecord[], now = Date.now()) {
+    const { since: today, until } = dayWindow(dayKey(now));
+    const { weekStart, lastWeekStart: lastWeek } = weekWindows(now);
     const month = new Date(today);
     month.setDate(1);
     const monthStart = startOfDay(month.getTime());
     month.setMonth(month.getMonth() - 1);
     const lastMonth = startOfDay(month.getTime());
+    // The earlier windows stop the same distance from their start, so Thursday noon meets last week's
+    // Thursday noon instead of a whole week, and the same elapsed part of last month for the month.
+    const lastWeekEnd = lastWeek + (now - weekStart);
+    const lastMonthEnd = lastMonth + (now - monthStart);
     let todayCost = 0,
         weekCost = 0,
         lastWeekCost = 0,
         monthCost = 0,
-        lastMonthCost = 0;
+        lastMonthCost = 0,
+        lastMonthTotal = 0;
     for (const record of records) {
         if (record.ts >= until) continue;
         if (record.ts >= today) todayCost += record.cost;
         if (record.ts >= weekStart) weekCost += record.cost;
-        else if (record.ts >= lastWeek) lastWeekCost += record.cost;
+        else if (record.ts >= lastWeek && record.ts < lastWeekEnd) lastWeekCost += record.cost;
         if (record.ts >= monthStart) monthCost += record.cost;
-        else if (record.ts >= lastMonth) lastMonthCost += record.cost;
+        else if (record.ts >= lastMonth) {
+            // The projection compares against the whole previous month, which stayed a forecast.
+            lastMonthTotal += record.cost;
+            if (record.ts < lastMonthEnd) lastMonthCost += record.cost;
+        }
     }
+    const weekDays = windowDays(weekStart, until);
+    const monthDays = windowDays(monthStart, until);
     return {
         today: todayCost,
-        week: weekCost / windowDays(weekStart, until),
+        week: weekCost / weekDays,
         weekTotal: weekCost,
-        lastWeek: lastWeekCost / 7,
-        month: monthCost / windowDays(monthStart, until),
+        lastWeek: lastWeekCost / weekDays,
+        month: monthCost / monthDays,
         monthTotal: monthCost,
-        lastMonth: lastMonthCost / windowDays(lastMonth, monthStart),
-        lastMonthTotal: lastMonthCost,
+        lastMonth: lastMonthCost / monthDays,
+        lastMonthTotal,
     };
 }
 

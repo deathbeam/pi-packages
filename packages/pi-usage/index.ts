@@ -13,6 +13,7 @@ import {
     formatTokens,
     hitPct,
     padWidth,
+    ratePct,
     shareBar,
 } from "./src/format.ts";
 import { summaryLines, summaryModel, type SummaryModel } from "./src/summary.ts";
@@ -24,6 +25,7 @@ import {
     dayKey,
     dayWindow,
     matchesFilter,
+    sumCounts,
     summarize,
     usageWindow,
     type DailyCost,
@@ -75,6 +77,14 @@ const COLUMNS: Column[] = [
     // Cost already prices read/write differently; one combined token column is enough.
     { label: "Cache", width: 7, cell: (s) => formatTokens(s.cacheRead + s.cacheWrite) },
     { label: "Hit%", width: 5, cell: (s, _r, _t, _row, theme) => hitPct(s, theme) },
+    // One decimal keeps the usual sub-1% failure rates readable instead of a wall of 0%.
+    { label: "Abort%", width: 6, cell: (s, requests, _t, _row, theme) => ratePct(s.aborts, requests, theme, 5, 1) },
+    { label: "Err%", width: 6, cell: (s, requests, _t, _row, theme) => ratePct(s.apiErrors, requests, theme, 5, 1) },
+    {
+        label: "Tool%",
+        width: 6,
+        cell: (s, _r, _t, _row, theme) => ratePct(s.toolErrors, sumCounts(s.tools), theme, 5, 1),
+    },
 ];
 
 const SPARK_BARS = "▁▂▃▄▅▆▇█";
@@ -87,7 +97,7 @@ function layout(width: number, allColumns: Column[]): { nameWidth: number; colum
         return cols.reduce((sum, c) => sum + c.width + 1, 0);
     }
     let columns = allColumns;
-    for (const label of ["Share", "Hit%", "Cache", "Out", "In", "Reqs", "Δ"]) {
+    for (const label of ["Abort%", "Err%", "Tool%", "Share", "Hit%", "Cache", "Out", "In", "Reqs", "Δ"]) {
         if (width - used(columns) >= MIN_NAME_WIDTH) break;
         columns = columns.filter((c) => c.label !== label);
     }
@@ -288,7 +298,8 @@ export default function (pi: ExtensionAPI) {
                                     width,
                                 ),
                             );
-                            lines.push(rule, footer(width));
+                            // Overlays size to their content, so pad to keep the footer on the last row.
+                            lines.push(...Array(Math.max(0, rows - lines.length - 2)).fill(""), rule, footer(width));
                             return lines.slice(0, rows);
                         }
                         const view = getView(VIEWS[group]!, filters());
@@ -300,7 +311,13 @@ export default function (pi: ExtensionAPI) {
                             // The summary has no cursor: its position is the scroll offset.
                             cursor = Math.max(0, Math.min(cursor, Math.max(0, rowCount - viewHeight)));
                             top = cursor;
-                            lines.push(...content.slice(top, top + viewHeight), rule, footer(width, view.mode));
+                            const shown = content.slice(top, top + viewHeight);
+                            lines.push(
+                                ...shown,
+                                ...Array(Math.max(0, rows - lines.length - shown.length - 2)).fill(""),
+                                rule,
+                                footer(width, view.mode),
+                            );
                             return clip(lines, width, rows);
                         }
                         const { mode, summary } = view;

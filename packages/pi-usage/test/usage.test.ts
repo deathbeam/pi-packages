@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
@@ -54,10 +54,17 @@ function messageUsage(over: Record<string, unknown> = {}) {
     };
 }
 
-function messageLine(provider: string, model: string, ts: number, usage: unknown, content: unknown[] = []): string {
+function messageLine(
+    provider: string,
+    model: string,
+    ts: number,
+    usage: unknown,
+    content: unknown[] = [],
+    stopReason?: string,
+): string {
     return JSON.stringify({
         type: "message",
-        message: { role: "assistant", provider, model, timestamp: ts, content, usage },
+        message: { role: "assistant", provider, model, timestamp: ts, content, usage, stopReason },
     });
 }
 
@@ -76,7 +83,10 @@ function usageRecord(over: Partial<UsageRecord> = {}): UsageRecord {
         cwd: "/tmp",
         sessionId: "s1",
         requests: 1,
+        aborts: 0,
+        apiErrors: 0,
         tools: {},
+        toolErrors: 0,
         skills: {},
         ...over,
     };
@@ -182,7 +192,7 @@ describe("collectUsage", () => {
             join(tree, "session.jsonl"),
             [
                 sessionHeader("s1", "/tmp"),
-                JSON.stringify({ role: "assistant", usage: messageUsage({ cost: 0.5 }) }),
+                JSON.stringify({ role: "assistant", timestamp: daysAgo(0), usage: messageUsage({ cost: 0.5 }) }),
             ].join("\n"),
         );
         const parsed = await collectUsage(tree);
@@ -217,6 +227,70 @@ describe("collectUsage", () => {
         assert.equal(rest.length, 0, "both messages count into one day record");
         assert.deepEqual(record!.tools, { read: 2, bash: 2, edit: 1 });
         assert.deepEqual(record!.skills, { "prepare-plan": 1 }, "only a SKILL.md read names a skill");
+    });
+
+    it("counts aborted and errored requests, and error tool results against their tool", async () => {
+        const tree = tempDir("pi-usage-quality-");
+        function toolResult(toolName: string, isError: boolean): string {
+            return JSON.stringify({
+                type: "message",
+                message: { role: "toolResult", toolName, isError, timestamp: daysAgo(0), content: [] },
+            });
+        }
+        writeFileSync(
+            join(tree, "session.jsonl"),
+            [
+                sessionHeader("s1", "/tmp"),
+                toolResult("read", true), // before any assistant message: nothing to attribute it to
+                messageLine("anthropic", "claude-x", daysAgo(0), messageUsage(), [], "aborted"),
+                toolResult("edit", true),
+                toolResult("bash", false),
+                // The literal also appears in a user message and in a custom entry: neither is a tool result.
+                JSON.stringify({ type: "message", message: { role: "user", content: 'not json "isError":true' } }),
+                JSON.stringify({ type: "custom", data: { isError: true } }),
+                messageLine("openai", "gpt-5", daysAgo(0), messageUsage(), [], "error"),
+                toolResult("bash", true),
+                toolResult("edit", true),
+                // An aborted request usually spends nothing, so it must count without usage of its own.
+                messageLine(
+                    "google",
+                    "gemini",
+                    daysAgo(0),
+                    messageUsage({ input: 0, output: 0, cost: { total: 0 } }),
+                    [],
+                    "aborted",
+                ),
+            ].join("\n"),
+        );
+        assert.deepEqual(
+            (await collectUsage(tree)).map((record) => [
+                record.model,
+                record.requests,
+                record.aborts,
+                record.apiErrors,
+                record.toolErrors,
+            ]),
+            [
+                ["claude-x", 1, 1, 0, 1],
+                ["gpt-5", 1, 0, 1, 2],
+                ["gemini", 1, 1, 0, 0],
+            ],
+        );
+    });
+
+    it("counts a delegate worktree as the project that owns it", async () => {
+        const tree = tempDir("pi-usage-worktree-");
+        writeFileSync(
+            join(tree, "session.jsonl"),
+            [
+                sessionHeader("w1", "/home/x/git/proj/.pi/worktrees/1b801549"),
+                messageLine("anthropic", "claude-x", daysAgo(0), messageUsage()),
+            ].join("\n"),
+        );
+        assert.deepEqual(
+            (await collectUsage(tree)).map((record) => record.cwd),
+            ["/home/x/git/proj"],
+        );
     });
 
     it("returns nothing for a directory that does not exist", async () => {
@@ -329,6 +403,19 @@ describe("summarize", () => {
 
         assert.equal(summarize([], 0).sessions, 0);
     });
+
+    it("merges the abort, API and tool error counters", () => {
+        const faulty = [
+            usageRecord({ requests: 4, aborts: 1, tools: { bash: 3 }, toolErrors: 2 }),
+            usageRecord({ provider: "openai", requests: 2, apiErrors: 1, tools: { edit: 2 }, toolErrors: 2 }),
+        ];
+        const all = summarize(faulty).stats;
+        assert.deepEqual([all.aborts, all.apiErrors, all.toolErrors], [1, 1, 4]);
+        assert.deepEqual(all.tools, { bash: 3, edit: 2 });
+        const [model] = buildRows(faulty, 0, "model");
+        assert.deepEqual([model!.stats.aborts, model!.stats.apiErrors, model!.stats.toolErrors], [1, 1, 4]);
+        assert.equal(model!.stats.tools.bash, 3);
+    });
 });
 
 describe("dayWindow", () => {
@@ -365,7 +452,7 @@ describe("dayWindow", () => {
             today: 9,
             week: 9,
             weekTotal: 9,
-            lastWeek: 12 / 7,
+            lastWeek: 0,
             month: 21 / 8,
             monthTotal: 21,
             lastMonth: 0,
@@ -400,10 +487,10 @@ describe("comparison", () => {
             today: 9,
             week: 3,
             weekTotal: 9,
-            lastWeek: 4,
+            lastWeek: 0, // the 05-14 record sits on the matched last-week boundary
             month: 47 / 21,
             monthTotal: 47,
-            lastMonth: 1,
+            lastMonth: 30 / 21,
             lastMonthTotal: 30,
         });
         assert.deepEqual(comparison([], at("2025-05-21")), {
@@ -420,9 +507,33 @@ describe("comparison", () => {
             comparison(
                 sample.filter((record) => matchesFilter(record, { mode: "provider", key: "other" })),
                 at("2025-05-21"),
-            ).lastWeek,
-            4,
+            ).monthTotal,
+            28,
         );
+    });
+
+    it("matches the elapsed span of the previous week and month", () => {
+        // Thursday 2025-05-22 12:00: Monday 00:00 plus three and a half days.
+        const thursday = new Date(2025, 4, 22, 12).getTime();
+        const sample = [
+            usageRecord({ ts: at("2025-05-19"), cost: 1 }), // this week, Monday
+            usageRecord({ ts: at("2025-05-22"), cost: 3 }), // this week, Thursday noon
+            usageRecord({ ts: at("2025-05-13"), cost: 2 }), // last week, inside the matched span
+            usageRecord({ ts: at("2025-05-15"), cost: 40 }), // last week, exactly on the boundary
+            usageRecord({ ts: at("2025-05-05"), cost: 4 }), // this month
+            usageRecord({ ts: at("2025-04-10"), cost: 8 }), // last month, inside the matched span
+            usageRecord({ ts: at("2025-04-25"), cost: 80 }), // last month, after the matched span
+        ];
+        assert.deepEqual(comparison(sample, thursday), {
+            today: 3,
+            weekTotal: 4,
+            week: 1, // Mon 00:00 through Thu 12:00 touches four calendar days
+            lastWeek: 0.5, // 2 over the same four days, the boundary record excluded
+            monthTotal: 50,
+            month: 50 / 22, // 05-01 through 05-22
+            lastMonth: 8 / 22, // 04-01 through 04-22 12:00
+            lastMonthTotal: 88, // the whole of April, for the projection
+        });
     });
 
     it("starts the week on Monday", () => {
@@ -430,15 +541,16 @@ describe("comparison", () => {
             [usageRecord({ ts: at("2025-05-18"), cost: 7 }), usageRecord({ ts: at("2025-05-19"), cost: 10 })],
             at("2025-05-19"),
         );
-        assert.deepEqual([monday.week, monday.weekTotal, monday.lastWeek], [10, 10, 1]);
+        assert.deepEqual([monday.week, monday.weekTotal, monday.lastWeek], [10, 10, 0]);
     });
 
-    it("counts the leap day in the month window", () => {
+    it("counts the leap day in the whole previous month but not in its elapsed span", () => {
         const leap = comparison(
             [usageRecord({ ts: at("2024-02-29"), cost: 58 }), usageRecord({ ts: at("2024-03-01"), cost: 6 })],
             at("2024-03-03"),
         );
-        assert.deepEqual([leap.month, leap.lastMonth], [2, 2]);
+        // 03-01 00:00 plus two and a half days stops on 02-03, so the leap day is only in the full total.
+        assert.deepEqual([leap.month, leap.lastMonth, leap.lastMonthTotal], [2, 0, 58]);
     });
 });
 
@@ -756,6 +868,24 @@ describe("usage cache", () => {
         assert.deepEqual(await collectUsage(sessions, undefined, cacheFile), await collectUsage(sessions));
     });
 
+    it("re-parses a cache written by an older version", async () => {
+        const { sessions, file, cacheFile } = sessionTree([first]);
+        const info = statSync(file);
+        const stale = usageRecord({ provider: "stale" });
+        writeFileSync(
+            cacheFile,
+            JSON.stringify({
+                version: 6,
+                files: { [file]: { size: info.size, mtimeMs: info.mtimeMs, records: [stale] } },
+            }),
+        );
+        assert.deepEqual(
+            (await collectUsage(sessions, undefined, cacheFile)).map((record) => record.provider),
+            ["anthropic"],
+        );
+        assert.equal(JSON.parse(readFileSync(cacheFile, "utf8")).version, 7);
+    });
+
     it("stops at the first file when aborted and leaves the cache alone", async () => {
         const { sessions, cacheFile } = sessionTree([first, second]);
         const controller = new AbortController();
@@ -832,5 +962,24 @@ describe("non-message usage entries", () => {
             ],
         );
         assert.equal(summarize(parsed).requests, 3);
+    });
+
+    it("does not attribute an error tool result to a summaries record", async () => {
+        const stamp = new Date(at("2025-01-02")).toISOString();
+        const { sessions } = sessionTree([
+            messageLine("anthropic", "claude-x", daysAgo(0), messageUsage(), [], "toolUse"),
+            JSON.stringify({ type: "compaction", timestamp: stamp, usage: messageUsage() }),
+            JSON.stringify({
+                type: "message",
+                message: { role: "toolResult", toolName: "bash", isError: true, timestamp: daysAgo(0), content: [] },
+            }),
+        ]);
+        assert.deepEqual(
+            (await collectUsage(sessions)).map((record) => [record.model, record.toolErrors]),
+            [
+                ["claude-x", 1],
+                ["compaction", 0],
+            ],
+        );
     });
 });
