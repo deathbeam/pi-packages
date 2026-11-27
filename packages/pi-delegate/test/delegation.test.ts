@@ -91,6 +91,15 @@ async function finishJob(app: TuiSession, job: any, finalMessage = "second"): Pr
     return withTimeout(report);
 }
 
+/** Polls until the condition holds, so a wait never races a fixed sleep. */
+async function until(check: () => boolean, message: string, ms = 10000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!check()) {
+        if (Date.now() > deadline) assert.fail(message);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+}
+
 function reportCard(app: TuiSession, entry: any): string {
     return app.renderReport(entry.message, { expanded: false }, theme).render(120).join("\n");
 }
@@ -386,6 +395,12 @@ describe("inspector", () => {
 
         const observing = app.inspect.handler("", { mode: "tui", ui: app.ui });
         const view = await withTimeout(app.viewerReady);
+        // The child's first user message arrives only once its process answers the launch prompt, which a ticker
+        // frame can precede on a loaded machine.
+        await until(
+            () => view.render(80).join("\n").includes("Trace delegates"),
+            "initial user message missing from inspector",
+        );
         const renderCount = app.state.renders;
         await withTimeout(new Promise<void>((resolve) => (app.state.onRender = resolve)));
         assert.ok(app.state.renders > renderCount, "ticker did not redraw the observer");
