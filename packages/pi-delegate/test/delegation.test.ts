@@ -44,9 +44,9 @@ afterAll(() => {
  * A fresh extension instance plus a TUI: its own job store, saved entries and report queue, so tests start clean.
  * Every test cancels the jobs it leaves running.
  */
-function tuiSession(skills: any[] = []) {
+function tuiSession(skills: any[] = [], activeTools?: string[]) {
     const handlers: Record<string, any> = {};
-    const app = registerExtension({ on: (event, handler) => (handlers[event] = handler) });
+    const app = registerExtension({ activeTools, on: (event, handler) => (handlers[event] = handler) });
     const screen = overlayHarness(theme);
     handlers.before_agent_start({ messageType: "user", systemPromptOptions: { sections: {}, skills } }, baseCtx);
     return {
@@ -213,6 +213,42 @@ describe("launch", () => {
             );
             assert.deepEqual(job.details.tools, ["read"]);
             await cancelJob(app, job);
+        } finally {
+            rmSync(join(agentDir, "settings.json"), { force: true });
+            rmSync(agentsDir, { recursive: true, force: true });
+        }
+    });
+
+    // The `tools` param adds names the agent file omits; an unknown name fails the launch with no job behind it.
+    it("adds the tools the request names and rejects an unknown one", async () => {
+        const agentsDir = mkdtempSync(join(tmpdir(), "pi-delegate-agents-"));
+        writeFileSync(
+            join(agentsDir, "reader.md"),
+            "---\nname: reader\ndescription: reader agent\ntools: read\n---\nYou read.\n",
+        );
+        writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ delegate: { agentDirs: [agentsDir] } }));
+        try {
+            const app = tuiSession([], ["read", "probe_tool", "delegate", "delegate_steer"]);
+            const launch = (tools?: unknown) =>
+                app.delegate.execute(
+                    "call",
+                    { agent: "reader", description: "extras", task: "trace it", tools },
+                    undefined,
+                    () => {},
+                    app.tuiCtx,
+                );
+            const job = await launch(["probe_tool", "read", "delegate_steer"]);
+            assert.deepEqual(job.details.tools, ["read", "probe_tool"]);
+            await cancelJob(app, job);
+            await assert.rejects(launch(["nope"]), /Unknown tools: nope/);
+            const list = await app.list.execute("call", {}, undefined, () => {}, app.tuiCtx);
+            assert.match(list.content[0].text, /^1 delegates \(0 running\):/m, "the rejected launch left a job");
+            // A strict model sends the literal "null" for an omitted optional, so both keep the agent's own list.
+            for (const tools of [undefined, "null"]) {
+                const plain = await launch(tools);
+                assert.deepEqual(plain.details.tools, ["read"]);
+                await cancelJob(app, plain);
+            }
         } finally {
             rmSync(join(agentDir, "settings.json"), { force: true });
             rmSync(agentsDir, { recursive: true, force: true });

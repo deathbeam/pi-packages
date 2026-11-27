@@ -47,9 +47,9 @@ const probeSkill = {
     disableModelInvocation: false,
 };
 
-function delegateSession(skills: any[] = []) {
+function delegateSession(skills: any[] = [], activeTools?: string[]) {
     const handlers: Record<string, any> = {};
-    const app = registerExtension({ on: (event, handler) => (handlers[event] = handler) });
+    const app = registerExtension({ activeTools, on: (event, handler) => (handlers[event] = handler) });
     const screen = overlayHarness(theme);
     handlers.before_agent_start({ messageType: "user", systemPromptOptions: { sections: {}, skills } }, baseCtx);
     return {
@@ -156,6 +156,27 @@ describe("background revive", () => {
         const [launched, revived] = spawnedChildren(pi.dir).slice(before);
         assert.deepEqual(revived, launched, "the revive must keep the argv of a skill-less launch");
         assert.ok(!revived.some((arg) => arg.includes("Read these skills")), "the revive must pin nothing");
+    });
+
+    // The extra tools a launch names are part of the list its revive reuses.
+    it("revives a job with the tools it was launched with", async () => {
+        const app = delegateSession([], ["read", "probe_tool"]);
+        const before = spawnedChildren(pi.dir).length;
+        const job = await launch(app, app.tuiCtx, { description: "tool run", tools: ["probe_tool"] });
+        await cancelJob(app, app.tuiCtx, job);
+        const report = app.nextMessage();
+        await app.steer.execute(
+            "call",
+            { id: job.details.id, message: "revive: finish it" },
+            undefined,
+            () => {},
+            app.tuiCtx,
+        );
+        await withTimeout(report);
+        const [launched, revived] = spawnedChildren(pi.dir).slice(before);
+        const tools = (args: string[]) => args[args.indexOf("--tools") + 1];
+        assert.match(tools(launched), /\bprobe_tool\b/);
+        assert.equal(tools(revived), tools(launched), "the revive must keep the launch's tool list");
     });
 
     // Both revives pass the idle-clone checks, so only the first may spawn on the finished job's id.

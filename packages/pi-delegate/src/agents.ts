@@ -141,9 +141,13 @@ export function agentRoster(cwd: string, trusted: boolean): string {
     const agents = agentsFor(cwd, trusted);
     const lines = [
         "Available agents for the delegate tool:",
-        ...agents.map((agent) => {
-            const qualifiers = [agent.model, agent.isolated ? "isolated" : undefined].filter(Boolean).join(", ");
-            return `- ${agent.name}${qualifiers ? ` (${qualifiers})` : ""}: ${agent.description}`;
+        ...agents.flatMap((agent) => {
+            const facts = [
+                `model: ${agent.model ?? "session model"}`,
+                `tools: ${agent.tools?.length ? agent.tools.join(", ") : "session tools"}`,
+            ];
+            if (agent.isolated) facts.push("isolated: true");
+            return [`- ${agent.name}: ${agent.description}`, `  ${facts.join("; ")}`];
         }),
     ];
     const aliases = [

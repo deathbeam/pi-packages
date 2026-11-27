@@ -42,7 +42,8 @@ describe("registration", () => {
         const roster = prompt.systemPromptOptions.sections.agents;
         assert.match(roster, /^Available agents for the delegate tool:$/m, "roster heading missing");
         // User agent dirs can override bundled agents, so check the alias format rather than one agent.
-        assert.match(roster, /^- \S+ \(\S+\): /m, "agent list with model alias missing");
+        assert.match(roster, /^- \S+: .*\n  model: /m, "agent list with model line missing");
+        assert.match(roster, /explore: .*\n  model: [^;]+; tools: read, grep, find, ls/, "bundled agent tools missing");
     });
 
     // A child runs without the delegation tools, so the roster would only cost it context.

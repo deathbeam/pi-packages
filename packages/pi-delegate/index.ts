@@ -314,7 +314,14 @@ export default function (pi: ExtensionAPI) {
         ctx: ExtensionContext,
         agent: AgentFile,
         prior: InspectJob | undefined,
-        fields: { description: string; model?: string; isolated?: boolean; clone?: IsolationState; skills?: string[] },
+        fields: {
+            description: string;
+            model?: string;
+            isolated?: boolean;
+            clone?: IsolationState;
+            skills?: string[];
+            tools?: string[];
+        },
         task: string,
         signal: AbortSignal | undefined,
         prompt = task,
@@ -330,9 +337,15 @@ export default function (pi: ExtensionAPI) {
             ctx,
         );
         if (!model) throw new Error(`No model found for "${requested}".`);
-        const tools = (agent.tools?.length ? agent.tools : pi.getActiveTools()).filter(
-            (tool) => !DELEGATION_TOOLS.has(tool),
-        );
+        const active = pi.getActiveTools();
+        // A revived job runs with exactly the tools it started with.
+        const base = prior?.tools?.length ? prior.tools : agent.tools?.length ? agent.tools : active;
+        const extra = fields.tools ?? [];
+        // Like an unknown skill, an unknown tool name fails the launch before any clone or spawn.
+        const unknown = extra.filter((tool) => !active.includes(tool));
+        if (unknown.length)
+            throw new Error(`Unknown tools: ${unknown.join(", ")}. Active tools: ${active.join(", ")}.`);
+        const tools = [...new Set([...base, ...extra])].filter((tool) => !DELEGATION_TOOLS.has(tool));
         // A revived job runs with exactly the skills it started with.
         const skills = prior ? (prior.skills ?? []) : [...new Set(fields.skills ?? [])];
         // Resolved here, before any clone or spawn: an unknown skill name must fail the launch with no side effects.
@@ -604,6 +617,12 @@ export default function (pi: ExtensionAPI) {
                     description: "Skill names; the delegate reads these first and follows them",
                 }),
             ),
+            tools: Type.Optional(
+                Type.Array(Type.String(), {
+                    description:
+                        "Extra tool names added to the agent's own tools when the task needs one it does not have. A name the session does not have is rejected.",
+                }),
+            ),
             isolated: Type.Optional(
                 Type.Boolean({ description: "Run in a new isolated git clone; apply results with delegate_apply." }),
             ),
@@ -621,6 +640,7 @@ export default function (pi: ExtensionAPI) {
             const isolated = optional(rawParams.isolated);
             const cloneId = jobId(optional(rawParams.clone));
             const skills = optional(rawParams.skills);
+            const tools = optional(rawParams.tools);
             if (cloneId && isolated === false) throw new Error("clone always runs isolated; omit isolated: false.");
             const clone = cloneId ? clonedJob(cloneId).isolation : undefined;
             const agent = agentByName(ctx.cwd, agentName, ctx.isProjectTrusted());
@@ -629,7 +649,7 @@ export default function (pi: ExtensionAPI) {
                 ctx,
                 agent,
                 undefined,
-                { description, model, isolated: effective, clone, skills },
+                { description, model, isolated: effective, clone, skills, tools },
                 task,
                 signal,
             );

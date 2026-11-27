@@ -122,8 +122,8 @@ describe("agent roster", () => {
                 JSON.stringify({ delegate: { agentDirs: [root], models: { configured: "anthropic/h" } } }),
             );
             const roster = agentRoster(root, true);
-            assert.match(roster, /^- aliased \(cheap\): cheap one$/m);
-            assert.match(roster, /^- raw \(provider\/id, isolated\): raw model$/m);
+            assert.match(roster, /^- aliased: cheap one\n  model: cheap; tools: session tools$/m);
+            assert.match(roster, /^- raw: raw model\n  model: provider\/id; tools: session tools; isolated: true$/m);
             const aliases = roster.split("\n").find((line) => line.startsWith("Model aliases"));
             assert.match(aliases!, /\bconfigured\b/);
             assert.match(aliases!, /\bcheap\b/);

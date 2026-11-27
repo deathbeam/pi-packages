@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-delegate",
-  "version": "0.0.59",
+  "version": "0.0.60",
   "description": "Background subagents for Pi with steering, isolation and a /delegate inspector",
   "type": "module",
   "license": "MIT",
