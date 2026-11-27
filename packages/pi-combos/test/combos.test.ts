@@ -213,6 +213,11 @@ async function realSession(dir: string, sessionManager: SessionManager, reason: 
         modelRuntime,
         resourceLoaderOptions: { additionalExtensionPaths: [extensionPath] },
     });
+    // pi fills the auth snapshot in a background availability pass that the extension's provider
+    // registration can invalidate; the resume restore below reads it, so settle it first.
+    for (let tries = 0; tries < 5 && !modelRuntime.hasConfiguredAuth("anthropic"); tries++) {
+        await modelRuntime.refresh({ allowNetwork: false });
+    }
     const { session } = await createAgentSessionFromServices({
         services,
         sessionManager,
