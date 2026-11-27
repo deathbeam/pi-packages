@@ -10,5 +10,6 @@
 - [@deathbeam/pi-keenable](packages/pi-keenable) - Web search and fetch through the Keenable API.
 - [@deathbeam/pi-mistral](packages/pi-mistral) - Mistral models through the built-in `mistral` provider.
 - [@deathbeam/pi-opencode](packages/pi-opencode) - OpenCode models through the built-in `opencode` provider.
+- [@deathbeam/pi-plan](packages/pi-plan) - Structured plans with a progress widget and a `/plan` picker.
 - [@deathbeam/pi-surplus](packages/pi-surplus) - Surplus Intelligence provider with a live model catalog.
 - [@deathbeam/pi-usage](packages/pi-usage) - `/usage` dashboard of token usage and cost per provider, model, and project.
