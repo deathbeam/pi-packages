@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { KeybindingHints, Theme } from "@earendil-works/pi-coding-agent";
+import type { KeybindingHints, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 export const STATUSES = ["todo", "doing", "done", "blocked"] as const;
 
@@ -218,13 +219,35 @@ export function taskRow(theme: Theme, plan: Plan, task: PlanTask): string {
     return `${statusText(theme, task.status)} ${theme.fg("accent", task.id)} ${task.title}${blocked}`;
 }
 
-/** The muted lines under a task row: where it lives, its check, and its notes. */
-export function taskFacts(theme: Theme, task: PlanTask): string[] {
+/** Wrapped rows whose continuations sit `indent` columns in, so a wrapped line never reads as a new one. */
+export function hanging(text: string, width: number, indent: number): string[] {
+    return wrapTextWithAnsi(text, Math.max(1, width - indent)).map(
+        (line, index) => (index ? " ".repeat(indent) : "") + line,
+    );
+}
+
+/** A labelled line under a task row or in the plan header: the label muted so it reads as a key, the value in `color`, wrapping in the label's column. */
+export function fact(
+    theme: Theme,
+    label: string,
+    text: string,
+    width: number,
+    indent = 2,
+    color: ThemeColor = label ? "text" : "dim",
+): string[] {
+    return hanging((label ? theme.fg("muted", label) : "") + theme.fg(color, text), width - indent, label.length).map(
+        (line) => " ".repeat(indent) + line,
+    );
+}
+
+/** The lines under a task row: where it lives, its check, and its dim notes as written. */
+export function taskFacts(theme: Theme, task: PlanTask, width: number): string[] {
     return [
-        ...(task.where ? [`where ${task.where}`] : []),
-        `doneWhen: ${task.doneWhen}`,
-        ...task.notes.map((note) => `note: ${note}`),
-    ].map((line) => `  ${theme.fg("dim", line)}`);
+        // Paths are reference, not the point of the task; the check is.
+        ...(task.where ? fact(theme, "Where: ", task.where, width, 2, "dim") : []),
+        ...fact(theme, "Done when: ", task.doneWhen, width),
+        ...task.notes.flatMap((note) => fact(theme, "", note, width)),
+    ];
 }
 
 /** pi's built-in expand hint; callers place it on its own row, so it carries no leading newline. */

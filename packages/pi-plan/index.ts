@@ -12,6 +12,8 @@ import { openPlans } from "./src/inspector.ts";
 import {
     doneCount,
     excludePlans,
+    fact,
+    hanging,
     listPlans,
     listText,
     moreLines,
@@ -125,15 +127,19 @@ function capLines<T>(lines: readonly T[], max: number): { shown: T[]; hidden: nu
 }
 
 /** A result view capped to ten rows until the user expands it, then in full. */
-function resultView(lines: string[], theme: Theme, expanded: boolean, keyHint: KeybindingHints["keyHint"]): Component {
-    const body = new Text(lines.join("\n"), 0, 0);
+function resultView(
+    rows: (width: number) => string[],
+    theme: Theme,
+    expanded: boolean,
+    keyHint: KeybindingHints["keyHint"],
+): Component {
     return {
         render: (width) => {
             // Wrapping turns one long line into many rows, so the cap counts rendered rows.
-            const { shown, hidden } = capLines(body.render(width), expanded ? Infinity : COLLAPSED_LINES + 1);
+            const { shown, hidden } = capLines(rows(width), expanded ? Infinity : COLLAPSED_LINES + 1);
             return hidden ? [...shown, truncateToWidth(moreLines(theme, hidden, keyHint), width)] : shown;
         },
-        invalidate: () => body.invalidate(),
+        invalidate() {},
     };
 }
 
@@ -149,34 +155,44 @@ function resultText(result: { content: { type: string; text?: string }[] }): str
 }
 
 /** The whole plan: a summary line, then one row per task; only the expansion carries goal, context and notes. */
-function planLines(plan: Plan, theme: Theme, expanded: boolean): string[] {
+function planLines(plan: Plan, theme: Theme, expanded: boolean, width: number): string[] {
     const tasks = plan.tasks.flatMap((task) =>
-        expanded ? [taskRow(theme, plan, task), ...taskFacts(theme, task)] : [taskRow(theme, plan, task)],
+        expanded
+            ? [...hanging(taskRow(theme, plan, task), width, task.id.length + 3), ...taskFacts(theme, task, width)]
+            : [taskRow(theme, plan, task)],
     );
     return [
         "",
         `${theme.fg("accent", "plan")} ${planSummary(theme, plan)}`,
         ...(expanded
-            ? [`  ${theme.fg("dim", `goal: ${plan.goal}`)}`, `  ${theme.fg("dim", `context: ${plan.context}`)}`]
+            ? [...fact(theme, "Goal: ", plan.goal, width), ...fact(theme, "Context: ", plan.context, width, 2, "dim")]
             : []),
         ...tasks,
     ];
 }
 
 /** One task of a plan: its row, then the check and notes that make it a brief. */
-function focusLines(plan: Plan, id: string, theme: Theme): string[] {
+function focusLines(plan: Plan, id: string, theme: Theme, width: number): string[] {
     const task = plan.tasks.find((item) => item.id === id);
-    return task ? ["", taskRow(theme, plan, task), ...taskFacts(theme, task)] : [];
+    return task
+        ? ["", ...hanging(taskRow(theme, plan, task), width, task.id.length + 3), ...taskFacts(theme, task, width)]
+        : [];
 }
 
 /** What changed: the task row, the note this call appended, and where the plan now stands. */
-function updateLines(plan: Plan, id: string | undefined, note: string | undefined, theme: Theme): string[] {
+function updateLines(
+    plan: Plan,
+    id: string | undefined,
+    note: string | undefined,
+    theme: Theme,
+    width: number,
+): string[] {
     const task = plan.tasks.find((item) => item.id === id);
     if (!task) return [];
     return [
         "",
-        taskRow(theme, plan, task),
-        ...(note ? [`  ${theme.fg("muted", note)}`] : []),
+        ...hanging(taskRow(theme, plan, task), width, task.id.length + 3),
+        ...(note ? fact(theme, "", note, width) : []),
         theme.fg("muted", planSummary(theme, plan)),
     ];
 }
@@ -357,14 +373,18 @@ export default function (pi: ExtensionAPI) {
 
         renderResult(result, { expanded }, theme, context) {
             const details = context.isError ? undefined : (result.details as PlanDetails | undefined);
-            let lines: string[] = [];
-            if (details?.list) lines = listLines(details.list, details.active, theme);
-            else if (details?.plan && details.action === "update")
-                lines = updateLines(details.plan, details.id, details.note, theme);
-            else if (details?.plan && details.id) lines = focusLines(details.plan, details.id, theme);
-            else if (details?.plan) lines = planLines(details.plan, theme, expanded);
-            return lines.length
-                ? resultView(lines, theme, expanded, context.keyHint)
+            const plan = details?.plan;
+            const list = details?.list;
+            const active = details?.active;
+            const id = details?.id;
+            const note = details?.note;
+            let rows: ((width: number) => string[]) | undefined;
+            if (list) rows = () => listLines(list, active, theme);
+            else if (plan && details?.action === "update") rows = (width) => updateLines(plan, id, note, theme, width);
+            else if (plan && id) rows = (width) => focusLines(plan, id, theme, width);
+            else if (plan) rows = (width) => planLines(plan, theme, expanded, width);
+            return rows
+                ? resultView(rows, theme, expanded, context.keyHint)
                 : errorView(resultText(result), theme, context.isError);
         },
     });

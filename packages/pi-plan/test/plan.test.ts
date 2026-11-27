@@ -27,6 +27,7 @@ function themeStub() {
     const colors: string[] = [];
     const theme: any = {
         fg: (color: string, text: string) => (colors.push(color), text),
+        bold: (text: string) => text,
     };
     return { theme, colors };
 }
@@ -378,17 +379,17 @@ describe("PlansScreen", () => {
             {
                 id: "t2",
                 title: "wire the tool",
+                where: "src/tool.ts",
                 blockedBy: ["t1"],
                 doneWhen: "npm run check",
                 status: "doing",
-                notes: [],
+                notes: ["npm run check: no errors", "wired the dispatcher"],
             },
         ],
     };
     const bar: Plan = { name: "bar", goal: "other goal", context: "c", tasks: [] };
 
-    function screen(active: string | undefined, height = 16, unreadable: string[] = []) {
-        const { theme } = themeStub();
+    function screen(active: string | undefined, height = 16, unreadable: string[] = [], theme = themeStub().theme) {
         const keys: any = {
             matches: (data: string, id: string) => data === id,
             getKeys: (id: string) => [id],
@@ -412,15 +413,81 @@ describe("PlansScreen", () => {
     it("renders the sidebar and the selected plan's detail", () => {
         const { value } = screen("foo");
         const lines = value.render(100);
-
         assert.equal(lines.length, 16);
-        assert.match(lines[0]!, /Plans · 2 in \.pi\/plans/);
-        assert.ok(lines.some((line) => line.includes("› foo 1/2 · active")));
-        assert.ok(lines.some((line) => line.includes("bar 0/0")));
-        assert.ok(lines.some((line) => line.includes("goal: ship the widget")));
-        assert.ok(lines.some((line) => line.includes("◐ t2 wire the tool") && !line.includes("blockedBy")));
-        assert.ok(lines.some((line) => line.includes("note: Ruling: dropped the cache")));
+        assert.match(lines[0]!, /\[Plans\]  Tasks · 2 in \.pi\/plans/);
+        assert.ok(lines.some((line) => line.includes("› ◐ foo 1/2")));
+        assert.ok(lines.some((line) => line.includes("active · ship the widget")));
+        assert.ok(lines.some((line) => line.includes("○ bar 0/0")));
+        assert.ok(lines.some((line) => /1 of 2 done/.test(line)));
+        assert.ok(lines.some((line) => line.trimEnd().includes("Tasks ─")));
+        assert.ok(
+            lines.some((line) => line.includes("│ ship the widget")),
+            "the goal opens the body",
+        );
+        assert.ok(lines.some((line) => line.includes("◐ wire the tool") && !line.includes("after")));
+        assert.ok(lines.some((line) => / {2}Done when {2}npm run check/.test(line)));
+        assert.ok(!lines.some((line) => line.includes("Ruling: dropped the cache")), "a done task is one line");
+        // The bottom rule and footer close the screen, so the counter is the third-to-last row.
+        assert.ok(lines.at(-3)!.endsWith("1–10/14"), "the tasks scroll under the counter");
         for (const line of lines) assert.ok(visibleWidth(line) <= 100);
+
+        value.handleInput("\x1b[C");
+        value.handleInput("tui.altScreen.bottom");
+        assert.ok(value.render(100).some((line) => line.trimEnd().includes("Context ─")));
+    });
+
+    it("shows a done task's notes once the details are expanded", () => {
+        const { value } = screen("foo");
+        assert.ok(!value.render(100).some((line) => line.includes("Ruling: dropped the cache")));
+
+        value.handleInput("app.tools.expand");
+        const expanded = value.render(100);
+        assert.ok(expanded.some((line) => line.includes("Ruling: dropped the cache")));
+        assert.ok(expanded.some((line) => / {2}Where {6}src\/widget\.ts/.test(line)));
+    });
+
+    it("lines the where up under the check's value", () => {
+        const lines = screen("foo").value.render(100);
+        assert.ok(lines.some((line) => / {2}Where {6}src\/tool\.ts/.test(line)));
+    });
+
+    it("wraps only headings and labels in accent, over text content", () => {
+        const marked: any = { fg: (color: string, text: string) => `<${color}>${text}`, bold: (text: string) => text };
+        const { value } = screen("foo", 16, [], marked);
+        const lines = value.render(100);
+
+        assert.ok(lines.some((line) => line.includes("<accent>Done when  <text>npm run check")));
+        assert.ok(lines.some((line) => line.includes("<accent>Where      <text>src/tool.ts")));
+        assert.ok(lines.some((line) => line.includes("<accent>Tasks ")));
+        assert.ok(lines.some((line) => line.includes("<text>ship the widget")));
+        assert.ok(
+            lines.some((line) => line.includes("<text>npm run check: no errors")),
+            "notes are text",
+        );
+
+        value.handleInput("\x1b[C");
+        value.handleInput("tui.altScreen.bottom");
+        const bottom = value.render(100);
+        assert.ok(bottom.some((line) => line.includes("<accent>Context ")));
+        assert.ok(
+            bottom.some((line) => /<text>c\b/.test(line)),
+            "the context prose is text",
+        );
+    });
+
+    it("renders markdown in the context, code spans and single newlines included", () => {
+        const { value } = screen("foo", 40);
+        const context = foo.context;
+        foo.context = "Uses `Foo.bar` in the seam\nthen a second line";
+        try {
+            const lines = value.render(100).map((line) => line.replace(/\u001b\[[0-9;]*m/g, ""));
+            const start = lines.findIndex((line) => line.includes("Uses Foo.bar in the seam"));
+            assert.ok(start >= 0, "the code span renders without backticks");
+            assert.ok(!lines.some((line) => line.includes("`Foo.bar`")));
+            assert.ok(lines[start + 1]!.includes("then a second line"), "a single newline stays a line break");
+        } finally {
+            foo.context = context;
+        }
     });
 
     it("selects with the keyboard and makes the selection active", () => {
@@ -432,20 +499,48 @@ describe("PlansScreen", () => {
 
         assert.deepEqual(chosen, ["bar"]);
         assert.equal(drawn.count, 2);
-        assert.ok(value.render(100).some((line) => line.includes("goal: other goal")));
+        assert.ok(value.render(100).some((line) => line.includes("other goal")));
     });
 
     it("names unreadable plan files", () => {
         const { value } = screen("foo", 16, ["broken"]);
         const lines = value.render(100);
-        assert.match(lines[0]!, /Plans · 3 in \.pi\/plans/);
+        assert.match(lines[0]!, /\[Plans\]  Tasks · 3 in \.pi\/plans/);
         assert.ok(lines.some((line) => line.includes("? broken unreadable")));
     });
 
     it("selects a plan with a click on its sidebar row", () => {
         const { value, chosen } = screen("foo");
         value.render(100);
-        value.handleMouse({ type: "click", button: "left", x: 1, y: 3 } as any);
+        value.handleMouse({ type: "click", button: "left", x: 1, y: 4 } as any);
+        value.handleInput("tui.select.confirm");
+        assert.deepEqual(chosen, ["bar"]);
+    });
+
+    it("moves the focus between the panes with ←/→, and the keys follow it", () => {
+        const { value, chosen } = screen("foo");
+        assert.match(value.render(100)[0]!, /^\[Plans\]  Tasks/);
+
+        value.handleInput("\x1b[C");
+        assert.match(value.render(100)[0]!, /^Plans  \[Tasks\]/);
+        value.handleInput("tui.select.down");
+        value.handleInput("tui.select.confirm");
+        assert.deepEqual(chosen, ["foo"], "↓ scrolled the tasks instead of moving to bar");
+        assert.ok(value.render(100).at(-3)!.endsWith("2–11/14"));
+
+        value.handleInput("\x1b[D");
+        value.handleInput("tui.select.down");
+        value.handleInput("tui.select.confirm");
+        assert.deepEqual(chosen, ["foo", "bar"]);
+    });
+
+    it("scrolls the tasks on a wheel, and selects a plan when the wheel is over the sidebar", () => {
+        const { value, chosen } = screen("foo");
+        value.render(100);
+
+        value.handleMouse({ type: "wheel", x: 80, y: 5, wheelDelta: 3 } as any);
+        assert.ok(value.render(100).at(-3)!.endsWith("4–13/14"), "three lines down stops at the plan's end");
+        value.handleMouse({ type: "wheel", x: 1, y: 4, wheelDelta: 1 } as any);
         value.handleInput("tui.select.confirm");
         assert.deepEqual(chosen, ["bar"]);
     });

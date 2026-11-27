@@ -123,15 +123,15 @@ describe("create", () => {
             tasks: [{ title: "a", where: "src/a.ts", doneWhen: "x", status: "done", notes: ["Ruling: dropped it"] }],
         });
         const collapsed = view(setup_, result);
-        assert.ok(!collapsed.some((line) => line.includes("goal:")));
-        assert.ok(!collapsed.some((line) => line.includes("doneWhen:")));
+        assert.ok(!collapsed.some((line) => line.includes("Goal:")));
+        assert.ok(!collapsed.some((line) => line.includes("Done when:")));
 
         const expanded = view(setup_, result, true);
-        assert.ok(expanded.includes("  goal: ship the widget"));
-        assert.ok(expanded.includes("  context: src/widget.ts renders nothing yet"));
-        assert.ok(expanded.includes("  where src/a.ts"));
-        assert.ok(expanded.includes("  doneWhen: x"));
-        assert.ok(expanded.includes("  note: Ruling: dropped it"));
+        assert.ok(expanded.includes("  Goal: ship the widget"));
+        assert.ok(expanded.includes("  Context: src/widget.ts renders nothing yet"));
+        assert.ok(expanded.includes("  Where: src/a.ts"));
+        assert.ok(expanded.includes("  Done when: x"));
+        assert.ok(expanded.includes("  Ruling: dropped it"));
         assert.equal(expanded[1], "plan foo 1/1");
     });
 
@@ -181,7 +181,7 @@ describe("get", () => {
         assert.deepEqual(view(setup_, await call(setup_, { action: "get", id: "t2" })), [
             "",
             "○ t2 wire the tool · blockedBy t1",
-            "  doneWhen: npm run check: no errors",
+            "  Done when: npm run check: no errors",
         ]);
     });
 
@@ -190,6 +190,16 @@ describe("get", () => {
         await call(setup_, plan);
         await call(setup_, { action: "update", id: "t1", status: "done" });
         assert.equal(view(setup_, await call(setup_, { action: "get", id: "t2" }))[1], "○ t2 wire the tool");
+    });
+
+    it("wraps a long note under its label", async () => {
+        const setup_ = setup();
+        const note = Array.from({ length: 60 }, (_, index) => `w${index}`).join(" ");
+        const result = await call(setup_, { ...plan, tasks: [{ title: "a", doneWhen: "x", notes: [note] }] });
+        const lines = view(setup_, result, true);
+        const start = lines.findIndex((line) => line.startsWith("  w0 "));
+        assert.ok(start >= 0);
+        assert.match(lines[start + 1]!, /^ {2}w/);
     });
 });
 
