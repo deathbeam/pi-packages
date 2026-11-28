@@ -50,8 +50,8 @@ function view(setup: Setup, result: any, expanded = false, isError = false): str
         expanded,
         isError,
     });
-    // Text pads every row to the width, so compare the visible text only.
-    return component.render(100).map((line: string) => line.trimEnd());
+    // Text pads every row to the width and markdown colors it, so compare the visible text only.
+    return component.render(100).map((line: string) => line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd());
 }
 
 function callView(setup: Setup, args: Record<string, unknown>): string {
@@ -64,19 +64,20 @@ function callView(setup: Setup, args: Record<string, unknown>): string {
 
 const plan = {
     action: "create",
-    name: "foo",
-    goal: "ship the widget",
-    context: "src/widget.ts renders nothing yet",
+    plan: "foo",
+    title: "ship the widget",
+    goal: "the widget ships",
+    detail: "src/widget.ts renders nothing yet",
     tasks: [
-        { title: "render the widget", where: "src/widget.ts", doneWhen: "npm test -- widget: 1 passed" },
-        { title: "wire the tool", blockedBy: ["t1"], doneWhen: "npm run check: no errors" },
+        { title: "render the widget", goal: "npm test -- widget: 1 passed", detail: "src/widget.ts" },
+        { title: "wire the tool", goal: "npm run check: no errors", detail: "src/tool.ts", dependsOn: ["t1"] },
     ],
 };
 
 function many(count: number) {
     return {
         ...plan,
-        tasks: Array.from({ length: count }, (_, index) => ({ title: `task ${index + 1}`, doneWhen: "x" })),
+        tasks: Array.from({ length: count }, (_, index) => ({ title: `task ${index + 1}`, goal: "x", detail: "d" })),
     };
 }
 
@@ -84,55 +85,53 @@ describe("renderCall", () => {
     it("names the action and its key argument on one line", () => {
         const setup_ = setup();
         assert.equal(
-            callView(setup_, { action: "create", name: "foo", goal: "g", context: "c", tasks: [] }),
+            callView(setup_, { action: "create", plan: "foo", title: "t", goal: "g", detail: "d", tasks: [] }),
             "plan create foo",
         );
         assert.equal(callView(setup_, { action: "get" }), "plan get");
-        assert.equal(callView(setup_, { action: "get", name: "foo", id: "t2" }), "plan get foo t2");
+        assert.equal(callView(setup_, { action: "get", plan: "foo", task: "t2" }), "plan get foo t2");
         assert.equal(callView(setup_, { action: "list" }), "plan list");
         assert.equal(
-            callView(setup_, { action: "update", id: "t1", status: "doing", note: "dispatched" }),
+            callView(setup_, { action: "update", task: "t1", status: "doing", note: "dispatched" }),
             "plan update t1 doing · dispatched",
         );
-        assert.equal(callView(setup_, { action: "update", id: "t1", status: "null" }), "plan update t1");
+        assert.equal(callView(setup_, { action: "update", task: "t1", status: "null" }), "plan update t1");
     });
 
     it("truncates a long note", () => {
         const setup_ = setup();
         const note = "x".repeat(100);
-        assert.equal(callView(setup_, { action: "update", id: "t1", note }).length, "plan update t1 · ".length + 60);
+        assert.equal(callView(setup_, { action: "update", task: "t1", note }).length, "plan update t1 · ".length + 60);
     });
 });
 
 describe("create", () => {
-    it("renders the summary, a row per task and the blockers", async () => {
+    it("renders the summary, a row per task and the dependencies", async () => {
         const setup_ = setup();
         const result = await call(setup_, plan);
         const lines = view(setup_, result);
 
         assert.equal(lines[0], "");
-        assert.equal(lines[1], "plan foo 0/2 · next t1");
+        assert.equal(lines[1], "plan foo ship the widget 0/2");
         assert.equal(lines[2], "○ t1 render the widget");
-        assert.equal(lines[3], "○ t2 wire the tool · blockedBy t1");
+        assert.equal(lines[3], "○ t2 wire the tool · dependsOn t1");
     });
 
-    it("adds goal, context, checks and notes when expanded", async () => {
+    it("renders the summary and one row per task, with the facts expanded", async () => {
         const setup_ = setup();
         const result = await call(setup_, {
             ...plan,
-            tasks: [{ title: "a", where: "src/a.ts", doneWhen: "x", status: "done", notes: ["Ruling: dropped it"] }],
+            tasks: [{ title: "a", goal: "x", detail: "src/a.ts", status: "done", notes: ["dropped it"] }],
         });
         const collapsed = view(setup_, result);
-        assert.ok(!collapsed.some((line) => line.includes("Goal:")));
-        assert.ok(!collapsed.some((line) => line.includes("Done when:")));
+        assert.equal(collapsed[1], "plan foo ship the widget 1/1");
+        assert.ok(!collapsed.some((line) => line.includes("src/a.ts")));
 
         const expanded = view(setup_, result, true);
-        assert.ok(expanded.includes("  Goal: ship the widget"));
-        assert.ok(expanded.includes("  Context: src/widget.ts renders nothing yet"));
-        assert.ok(expanded.includes("  Where: src/a.ts"));
-        assert.ok(expanded.includes("  Done when: x"));
-        assert.ok(expanded.includes("  Ruling: dropped it"));
-        assert.equal(expanded[1], "plan foo 1/1");
+        assert.ok(expanded.includes("  Goal: the widget ships"));
+        assert.ok(expanded.includes("  Detail: src/widget.ts renders nothing yet"));
+        assert.ok(expanded.includes("  Detail: src/a.ts"));
+        assert.ok(expanded.includes("  dropped it"));
     });
 
     it("caps the collapsed view with pi's more-lines hint", async () => {
@@ -141,8 +140,8 @@ describe("create", () => {
         const collapsed = view(setup_, result);
 
         assert.equal(collapsed.length, 12);
-        assert.equal(collapsed.at(-1), "... (3 more lines, to expand)");
-        assert.equal(view(setup_, result, true).length, 28);
+        assert.match(collapsed.at(-1)!, /^\.\.\. \(\d+ more lines, to expand\)$/);
+        assert.ok(view(setup_, result, true).some((line) => line.includes("t12 task 12")));
     });
 });
 
@@ -150,52 +149,80 @@ describe("update", () => {
     it("renders the changed task, where the plan stands and the note", async () => {
         const setup_ = setup();
         const created = await call(setup_, plan);
-        const result = await call(setup_, { action: "update", id: "t1", status: "done", note: "npm test: 1 passed" });
+        const result = await call(setup_, { action: "update", task: "t1", status: "done", note: "npm test: 1 passed" });
         const lines = view(setup_, result);
 
-        assert.equal(text_of(created), "plan foo 0/2");
-        assert.deepEqual(lines, ["", "✓ t1 render the widget", "  npm test: 1 passed", "foo 1/2 · next t2"]);
+        assert.equal(text_of(created), "# Plan foo: ship the widget (0/2 done)");
+        assert.deepEqual(lines, ["", "✓ t1 render the widget", "  npm test: 1 passed", "foo ship the widget 1/2"]);
     });
 
     it("omits the note row when the call only changed the status", async () => {
         const setup_ = setup();
         await call(setup_, plan);
-        const result = await call(setup_, { action: "update", id: "t1", status: "blocked" });
-        assert.deepEqual(view(setup_, result), ["", "✗ t1 render the widget", "foo 0/2"]);
+        const result = await call(setup_, { action: "update", task: "t1", status: "blocked" });
+        assert.deepEqual(view(setup_, result), ["", "✗ t1 render the widget", "foo ship the widget 0/2"]);
+    });
+
+    it("renders a plan note when the call names no task", async () => {
+        const setup_ = setup();
+        await call(setup_, plan);
+        const result = await call(setup_, { action: "update", note: "Ruling: widget stays in src" });
+        assert.deepEqual(view(setup_, result), ["", "  Ruling: widget stays in src", "foo ship the widget 0/2"]);
     });
 });
 
 describe("get", () => {
-    it("renders the whole plan", async () => {
+    it("renders the whole plan as markdown", async () => {
         const setup_ = setup();
         await call(setup_, plan);
-        const lines = view(setup_, await call(setup_, { action: "get" }));
+        const lines = view(setup_, await call(setup_, { action: "get" }), true);
 
-        assert.equal(lines[1], "plan foo 0/2 · next t1");
-        assert.equal(lines[2], "○ t1 render the widget");
+        assert.equal(lines[0], "");
+        assert.equal(lines[1], "Plan foo: ship the widget (0/2 done)");
+        assert.deepEqual(
+            lines.filter((line) => line.startsWith("Task ")),
+            ["Task t1 [todo]: render the widget", "Task t2 [todo]: wire the tool"],
+        );
+        assert.ok(lines.includes("the widget ships"));
+        assert.ok(lines.includes("src/widget.ts renders nothing yet"));
     });
 
-    it("renders one task as a row plus its brief", async () => {
+    it("renders one task with the plan's goal and detail", async () => {
         const setup_ = setup();
         await call(setup_, plan);
-        assert.deepEqual(view(setup_, await call(setup_, { action: "get", id: "t2" })), [
-            "",
-            "○ t2 wire the tool · blockedBy t1",
-            "  Done when: npm run check: no errors",
-        ]);
+        const lines = view(setup_, await call(setup_, { action: "get", task: "t2" }), true);
+
+        assert.ok(lines.includes("Plan foo: ship the widget (0/2 done)"));
+        assert.ok(lines.includes("Depends on: t1"));
+        assert.ok(lines.includes("npm run check: no errors"));
+        assert.ok(lines.includes("src/tool.ts"));
+        assert.ok(!lines.some((line) => line.includes("render the widget")));
     });
 
-    it("drops a blocker that is already done", async () => {
+    it("caps the task brief until the result is expanded", async () => {
         const setup_ = setup();
         await call(setup_, plan);
-        await call(setup_, { action: "update", id: "t1", status: "done" });
-        assert.equal(view(setup_, await call(setup_, { action: "get", id: "t2" }))[1], "○ t2 wire the tool");
+        const collapsed = view(setup_, await call(setup_, { action: "get", task: "t2" }));
+
+        assert.equal(collapsed.length, 12);
+        assert.match(collapsed.at(-1)!, /^\.\.\. \(\d+ more lines, to expand\)$/);
+    });
+
+    it("keeps a declared dependency that is already done", async () => {
+        const setup_ = setup();
+        await call(setup_, plan);
+        await call(setup_, { action: "update", task: "t1", status: "done" });
+        const lines = view(setup_, await call(setup_, { action: "get", task: "t2" }), true);
+        assert.ok(lines.includes("Depends on: t1"));
     });
 
     it("wraps a long note under its label", async () => {
         const setup_ = setup();
         const note = Array.from({ length: 60 }, (_, index) => `w${index}`).join(" ");
-        const result = await call(setup_, { ...plan, tasks: [{ title: "a", doneWhen: "x", notes: [note] }] });
+        const result = await call(setup_, {
+            ...plan,
+            tasks: [{ title: "a", goal: "x", detail: "src/a.ts", notes: [note] }],
+        });
         const lines = view(setup_, result, true);
         const start = lines.findIndex((line) => line.startsWith("  w0 "));
         assert.ok(start >= 0);
@@ -207,12 +234,12 @@ describe("list", () => {
     it("shows a row per plan, marks the active one and names unreadable files", async () => {
         const setup_ = setup();
         await call(setup_, plan);
-        await call(setup_, { ...plan, name: "other", tasks: [] });
+        await call(setup_, { ...plan, plan: "other", title: "other plan", tasks: [] });
         const dir = join(setup_.ctx.cwd, ".pi", "plans");
         writeFileSync(join(dir, "broken.json"), "{ not json");
 
         const lines = view(setup_, await call(setup_, { action: "list" }));
-        assert.deepEqual(lines, ["", "  foo 0/2 · next t1", "› other 0/0", "? broken unreadable"]);
+        assert.deepEqual(lines, ["", "  foo ship the widget 0/2", "› other other plan 0/0", "? broken unreadable"]);
     });
 });
 

@@ -30,10 +30,12 @@ type PlansScreenOptions = {
     keys: KeybindingsManager;
     /** Terminal rows, read per frame. */
     height: () => number;
-    setActive: (name: string) => void;
+    setActive: (id: string) => void;
     onClose: () => void;
     requestRender: () => void;
 };
+
+type Focus = "list" | "detail";
 
 /** Fixed rows: title, top rule, bottom rule, footer. */
 const CHROME_ROWS = 4;
@@ -42,14 +44,12 @@ const MAX_TEXT_WIDTH = 120;
 /** Rendered markdown by theme, then width and text; cleared by invalidate() and on a width change. */
 const MARKDOWN_CACHE = new WeakMap<Theme, Map<string, string[]>>();
 
-type Focus = "list" | "detail";
-
 function hint(keys: KeybindingsManager, ids: Keybinding[], description: string): string {
     return rawKeyHint(ids.flatMap((id) => keys.getKeys(id)).join("/"), description);
 }
 
 /** Markdown reads a lone newline as a space; a planner's one-newline paragraph break is meant as a break. */
-function hardBreaks(text: string): string {
+export function hardBreaks(text: string): string {
     const lines = text.split("\n");
     let fenced = false;
     return lines
@@ -90,7 +90,7 @@ function section(theme: Theme, word: string, width: number, trailing = ""): stri
 
 /** The title row: the glyph, the title, and the id at the right edge, with the blockers still open after it. */
 function taskLines(plan: Plan, task: PlanTask, theme: Theme, width: number, current: boolean): string[] {
-    const open = task.blockedBy.filter((id) => !plan.tasks.some((item) => item.id === id && item.status === "done"));
+    const open = task.dependsOn.filter((id) => !plan.tasks.some((item) => item.id === id && item.status === "done"));
     const id = theme.fg("muted", open.length ? `${task.id} · after ${open.join(", ")}` : task.id);
     // Accent means headings and labels, so the task the reader is on is bold text instead.
     const title = theme.fg("text", task.title);
@@ -111,7 +111,7 @@ function field(theme: Theme, label: string, value: string, width: number, prose 
     return [lead + first, ...rest.map((line) => " ".repeat(column) + line)];
 }
 
-/** One task: its title row, then the check, where and notes of every task still open. */
+/** One task: its title row, then the goal, the brief and notes of every task still open. */
 function taskBlock(
     plan: Plan,
     task: PlanTask,
@@ -124,15 +124,15 @@ function taskBlock(
     if (!expanded && task.status === "done") return head;
     return [
         ...head,
-        // Both labels pad to nine columns, so the two values start in one column.
-        ...field(theme, "Done when", task.doneWhen, width, true),
-        ...(task.where ? field(theme, "Where", task.where, width) : []),
+        // Every label pads to nine columns, so the values start in one column.
+        ...field(theme, "Goal", task.goal, width, true),
+        ...(task.detail ? field(theme, "Detail", task.detail, width, true) : []),
         ...task.notes.flatMap((note) => ["", ...markdown(theme, note, Math.max(1, width - 2), 2)]),
         "",
     ];
 }
 
-/** Goal, tasks and context as three sections; the headings show where the reader is in a long plan. */
+/** Goal, tasks and detail as three sections; the headings show where the reader is in a long plan. */
 function taskRows(plan: Plan, theme: Theme, width: number, expanded: boolean): string[] {
     const current = plan.tasks.find((task) => task.status === "doing") ?? nextTask(plan);
     const blocks = plan.tasks.flatMap((task) => taskBlock(plan, task, theme, width, task === current, expanded));
@@ -144,12 +144,13 @@ function taskRows(plan: Plan, theme: Theme, width: number, expanded: boolean): s
         section(theme, "Tasks", width, theme.fg("muted", ` ${planCount(plan)}`)),
         ...blocks,
         "",
-        section(theme, "Context", width),
-        ...markdown(theme, plan.context, width),
+        section(theme, "Detail", width),
+        ...markdown(theme, plan.detail, width),
+        ...plan.notes.flatMap((note) => ["", ...markdown(theme, note, Math.max(1, width - 2), 2)]),
     ].map((line) => truncateToWidth(line, width, "…", true));
 }
 
-/** Two rows per plan, like pi-delegate's job rows: cursor, status glyph, name and count, then the goal. */
+/** Two rows per plan, like pi-delegate's job rows: cursor, status glyph, id and count, then the title. */
 function sidebarRows(
     plans: Plan[],
     unreadable: string[],
@@ -167,18 +168,18 @@ function sidebarRows(
             const cursor = chosen ? theme.fg(focus === "list" ? "accent" : "muted", "›") : " ";
             return {
                 lines: [
-                    `${cursor} ${statusText(theme, planStatus(plan))} ${theme.fg(chosen ? "accent" : "text", plan.name)} ${theme.fg("muted", planCount(plan))}`,
-                    theme.fg("dim", `  ${plan.name === active ? "active · " : ""}${plan.goal}`),
+                    `${cursor} ${statusText(theme, planStatus(plan))} ${theme.fg(chosen ? "accent" : "text", plan.id)} ${theme.fg("muted", planCount(plan))}`,
+                    theme.fg("dim", `  ${plan.id === active ? "active · " : ""}${plan.title}`),
                 ],
                 index: planIndex,
             };
         }),
-        ...unreadable.map((name) => ({ lines: [theme.fg("error", `  ? ${name} unreadable`)] })),
+        ...unreadable.map((file) => ({ lines: [theme.fg("error", `  ? ${file} unreadable`)] })),
     ];
     const rows = all.flatMap((entry) => entry.lines.map((line, at) => ({ line, index: entry.index, head: at === 0 })));
     const selectedRow = rows.findIndex((row) => row.index === selected);
     let start = Math.max(0, Math.min(selectedRow - Math.floor(height / 2), rows.length - height));
-    // A window never opens on a plan's second row, which would show a goal with no name above it.
+    // A window never opens on a plan's second row, which would show a title with no id above it.
     while (start > 0 && !rows[start]!.head) start--;
     const shown = rows.slice(start, start + height);
     return {
@@ -210,7 +211,7 @@ export class PlansScreen implements Component {
     constructor(options: PlansScreenOptions) {
         this.options = options;
         this.active = options.active;
-        const found = options.active ? options.plans.findIndex((plan) => plan.name === options.active) : -1;
+        const found = options.active ? options.plans.findIndex((plan) => plan.id === options.active) : -1;
         this.index = Math.max(0, found);
     }
 
@@ -267,8 +268,8 @@ export class PlansScreen implements Component {
         else if (keys.matches(data, "tui.select.confirm")) {
             const plan = this.options.plans[this.index];
             if (!plan) return;
-            this.active = plan.name;
-            setActive(plan.name);
+            this.active = plan.id;
+            setActive(plan.id);
         } else if (keys.matches(data, "app.tools.expand")) {
             this.expanded = !this.expanded;
             this.top = 0;
@@ -297,7 +298,7 @@ export class PlansScreen implements Component {
         return { handled: true };
     }
 
-    /** The right pane: the plan's name stays put over the goal, tasks and context, with a counter below. */
+    /** The right pane: the plan's id and title stay put over the goal, tasks and detail, with a counter below. */
     private detail(plan: Plan, textWidth: number, width: number, body: number): string[] {
         const { theme } = this.options;
         if (this.lastTextWidth !== textWidth) {
@@ -306,9 +307,9 @@ export class PlansScreen implements Component {
         }
         const blocked = plan.tasks.some((task) => task.status === "blocked") ? " · blocked" : "";
         const progress = theme.fg("muted", `${doneCount(plan)} of ${plan.tasks.length} done${blocked}`);
-        const name = theme.fg("accent", plan.name);
+        const head = `${theme.fg("accent", plan.id)} ${theme.fg("text", plan.title)}`;
         const header = [
-            name + " ".repeat(Math.max(0, textWidth - visibleWidth(name) - visibleWidth(progress))) + progress,
+            head + " ".repeat(Math.max(0, textWidth - visibleWidth(head) - visibleWidth(progress))) + progress,
         ];
         const height = Math.max(0, body - header.length - 1);
         const all = taskRows(plan, theme, textWidth, this.expanded);
@@ -353,7 +354,7 @@ export function openPlans(
     ctx: ExtensionContext,
     list: PlanList,
     active: string | undefined,
-    setActive: (name: string) => void,
+    setActive: (id: string) => void,
 ): Promise<void> {
     const screen = { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0 } } as const;
     return ctx.ui.custom<void>(

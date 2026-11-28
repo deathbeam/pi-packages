@@ -13,15 +13,15 @@ initTheme("dark");
 
 const dirs: string[] = [];
 
+afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 function project(): string {
     const dir = mkdtempSync(join(tmpdir(), "pi-plan-test-"));
     dirs.push(dir);
     return dir;
 }
-
-afterEach(() => {
-    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 function themeStub() {
     const colors: string[] = [];
@@ -71,21 +71,31 @@ function text(result: any): string {
 function sample(overrides: Record<string, unknown> = {}) {
     return {
         action: "create",
-        name: "foo",
-        goal: "ship the widget",
-        context: "src/widget.ts renders nothing yet",
+        plan: "foo",
+        title: "ship the widget",
+        goal: "the widget ships: npm test -- widget: 1 passed",
+        detail: "src/widget.ts renders nothing yet",
         tasks: [
-            { title: "render the widget", where: "src/widget.ts", doneWhen: "npm test -- widget: 1 passed" },
-            { title: "wire the tool", blockedBy: ["t1"], doneWhen: "npm run check: no errors" },
+            {
+                title: "render the widget",
+                goal: "npm test -- widget: 1 passed",
+                detail: "Where: src/widget.ts:12",
+            },
+            {
+                title: "wire the tool",
+                goal: "npm run check: no errors",
+                detail: "Where: src/tool.ts:3",
+                dependsOn: ["t1"],
+            },
         ],
         ...overrides,
     };
 }
 
-const second = { name: "second", goal: "g2", context: "c2" };
+const second = { plan: "second", title: "second plan", goal: "g", detail: "d" };
 
-function stored(setup: Setup, name: string): Plan {
-    return JSON.parse(readFileSync(join(setup.ctx.cwd, ".pi", "plans", `${name}.json`), "utf8"));
+function stored(setup: Setup, id: string): Plan {
+    return JSON.parse(readFileSync(join(setup.ctx.cwd, ".pi", "plans", `${id}.json`), "utf8"));
 }
 
 describe("create", () => {
@@ -94,31 +104,58 @@ describe("create", () => {
         const result = await call(setup_, sample());
 
         assert.equal(result.details.active, "foo");
-        assert.match(text(result), /plan foo 0\/2/);
-        assert.match(text(result), /t1 \[todo\] render the widget — where src\/widget\.ts/);
-        assert.match(text(result), /t2 \[todo\] wire the tool — blockedBy t1/);
+        assert.match(text(result), /# Plan foo: ship the widget \(0\/2 done\)/);
+        assert.match(text(result), /## Task t1 \[todo\]: render the widget/);
+        assert.match(text(result), /## Task t2 \[todo\]: wire the tool\nDepends on: t1/);
         assert.deepEqual(
             stored(setup_, "foo").tasks.map((task) => task.id),
             ["t1", "t2"],
         );
-        assert.deepEqual(setup_.state.widget, ["plan foo 0/2 · next t1"]);
+        assert.deepEqual(setup_.state.widget, ["plan ship the widget 0/2"]);
     });
 
-    it("keeps imported statuses and notes", async () => {
+    it("lists every task in progress in the widget", async () => {
+        const setup_ = setup(project());
+        await call(
+            setup_,
+            sample({
+                tasks: [
+                    { title: "a", goal: "x", detail: "src/a.ts", status: "doing" },
+                    { title: "b", goal: "y", detail: "src/b.ts", status: "doing" },
+                ],
+            }),
+        );
+
+        assert.deepEqual(setup_.state.widget, ["plan ship the widget 0/2", "  t1 a", "  t2 b"]);
+    });
+
+    it("keeps imported statuses, details and notes", async () => {
         const setup_ = setup(project());
         const result = await call(
             setup_,
             sample({
                 tasks: [
-                    { title: "a", doneWhen: "x", status: "done", notes: ["Ruling: dropped the cache"] },
-                    { title: "b", doneWhen: "y", status: "doing" },
+                    { title: "a", goal: "x", detail: "src/a.ts", status: "done", notes: ["dropped the cache"] },
+                    { title: "b", goal: "y", detail: "src/b.ts", status: "doing" },
                 ],
             }),
         );
 
-        assert.match(text(result), /t1 \[done\] a/);
-        assert.match(text(result), / {2}note: Ruling: dropped the cache/);
-        assert.deepEqual(setup_.state.widget, ["plan foo 1/2 · doing t2"]);
+        assert.match(text(result), /## Task t1 \[done\]: a/);
+        assert.match(text(result), /### Detail\nsrc\/a\.ts/);
+        assert.match(text(result), /### Notes\n- dropped the cache/);
+        assert.deepEqual(setup_.state.widget, ["plan ship the widget 1/2", "  t2 b"]);
+    });
+
+    it("rejects a heading that would break the plan layout", async () => {
+        const setup_ = setup(project());
+        const message = /Headings inside detail use #### or lower/;
+        await assert.rejects(call(setup_, sample({ detail: "## Problem\ntext" })), message);
+        await assert.rejects(
+            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "### Goal\nx" }] })),
+            message,
+        );
+        await call(setup_, sample({ detail: "#### Chosen\ntext" }));
     });
 
     it("rejects a plan that already exists", async () => {
@@ -127,39 +164,39 @@ describe("create", () => {
         await assert.rejects(call(setup_, sample()), /already exists/);
     });
 
-    it("rejects a blockedBy id no task has", async () => {
+    it("rejects a dependsOn id no task has", async () => {
         const setup_ = setup(project());
         await assert.rejects(
-            call(setup_, sample({ tasks: [{ title: "a", blockedBy: ["t9"], doneWhen: "x" }] })),
+            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "src/a.ts", dependsOn: ["t9"] }] })),
             /lacks/,
         );
         assert.equal(existsSync(join(setup_.ctx.cwd, ".pi", "plans", "foo.json")), false);
     });
 
-    it("rejects a blockedBy id that is not earlier", async () => {
+    it("rejects a dependsOn id that is not earlier", async () => {
         const setup_ = setup(project());
         await assert.rejects(
             call(
                 setup_,
                 sample({
                     tasks: [
-                        { title: "a", blockedBy: ["t2"], doneWhen: "x" },
-                        { title: "b", doneWhen: "y" },
+                        { title: "a", goal: "x", detail: "src/a.ts", dependsOn: ["t2"] },
+                        { title: "b", goal: "y", detail: "src/b.ts" },
                     ],
                 }),
             ),
-            /blockedBy takes only earlier ids/,
+            /dependsOn takes only earlier ids/,
         );
         await assert.rejects(
-            call(setup_, sample({ tasks: [{ title: "a", blockedBy: ["t1"], doneWhen: "x" }] })),
-            /blockedBy takes only earlier ids/,
+            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "src/a.ts", dependsOn: ["t1"] }] })),
+            /dependsOn takes only earlier ids/,
         );
     });
 
-    it("rejects a name that escapes the plans directory", async () => {
+    it("rejects an id that escapes the plans directory", async () => {
         const setup_ = setup(project());
-        await assert.rejects(call(setup_, sample({ name: "../evil" })), /kebab-case/);
-        await assert.rejects(call(setup_, sample({ name: "a/b" })), /kebab-case/);
+        await assert.rejects(call(setup_, sample({ plan: "../evil" })), /kebab-case/);
+        await assert.rejects(call(setup_, sample({ plan: "a/b" })), /kebab-case/);
         assert.equal(existsSync(join(setup_.ctx.cwd, ".pi", "plans")), false);
     });
 });
@@ -169,29 +206,40 @@ describe("update", () => {
         const setup_ = setup(project());
         await call(setup_, sample());
 
-        const first = await call(setup_, { action: "update", id: "t1", status: "done", note: "npm test: 1 passed" });
+        const first = await call(setup_, { action: "update", task: "t1", status: "done", note: "npm test: 1 passed" });
         assert.match(text(first), /t1 \[done\]/);
-        assert.match(text(first), /^foo 1\/\d+/m);
+        assert.match(text(first), /^foo 1\/2$/m);
         assert.doesNotMatch(text(first), /goal:/);
 
-        await call(setup_, { action: "update", id: "t1", status: "blocked", note: "Ruling: widget moved" });
-        assert.deepEqual(stored(setup_, "foo").tasks[0]!.notes, ["npm test: 1 passed", "Ruling: widget moved"]);
+        await call(setup_, { action: "update", task: "t1", status: "blocked", note: "the seam moved" });
+        assert.deepEqual(stored(setup_, "foo").tasks[0]!.notes, ["npm test: 1 passed", "the seam moved"]);
         assert.equal(stored(setup_, "foo").tasks[0]!.status, "blocked");
     });
 
     it("changes only the fields given", async () => {
         const setup_ = setup(project());
         await call(setup_, sample());
-        const result = await call(setup_, { action: "update", id: "t1", note: "delegate reported back" });
+        const result = await call(setup_, { action: "update", task: "t1", note: "delegate reported back" });
         assert.match(text(result), /t1 \[todo\] render the widget/);
         assert.deepEqual(stored(setup_, "foo").tasks[0]!.notes, ["delegate reported back"]);
+    });
+
+    it("appends a plan note when the call names no task", async () => {
+        const setup_ = setup(project());
+        await call(setup_, sample());
+        const result = await call(setup_, { action: "update", note: "Ruling: widget stays in src" });
+
+        assert.match(text(result), /^note: Ruling: widget stays in src/m);
+        assert.deepEqual(stored(setup_, "foo").notes, ["Ruling: widget stays in src"]);
+        assert.deepEqual(stored(setup_, "foo").tasks[0]!.notes, []);
     });
 
     it("rejects a missing status or note, or a missing task", async () => {
         const setup_ = setup(project());
         await call(setup_, sample());
-        await assert.rejects(call(setup_, { action: "update", id: "t1" }), /needs status or note/);
-        await assert.rejects(call(setup_, { action: "update", id: "t9", status: "done" }), /no task t9/);
+        await assert.rejects(call(setup_, { action: "update", task: "t1" }), /needs status or note/);
+        await assert.rejects(call(setup_, { action: "update" }), /needs task, or a note/);
+        await assert.rejects(call(setup_, { action: "update", task: "t9", status: "done" }), /no task t9/);
     });
 
     it("rejects a call with no active plan", async () => {
@@ -206,23 +254,34 @@ describe("get and list", () => {
         await call(setup_, sample());
 
         const whole = await call(setup_, { action: "get" });
-        assert.match(text(whole), /goal: ship the widget/);
-        assert.match(text(whole), /context: src\/widget\.ts renders nothing yet/);
+        assert.match(text(whole), /# Plan foo: ship the widget \(0\/2 done\)/);
+        assert.match(text(whole), /## Goal\nthe widget ships/);
+        assert.match(text(whole), /## Detail\nsrc\/widget\.ts renders nothing yet/);
 
-        const slice = await call(setup_, { action: "get", name: "foo", id: "t2" });
-        assert.match(text(slice), /t2 \[todo\] wire the tool/);
-        assert.match(text(slice), /doneWhen: npm run check: no errors/);
+        const slice = await call(setup_, { action: "get", plan: "foo", task: "t2" });
+        assert.match(text(slice), /## Task t2 \[todo\]: wire the tool/);
+        assert.match(text(slice), /Depends on: t1/);
+        assert.match(text(slice), /### Goal\nnpm run check: no errors/);
         assert.doesNotMatch(text(slice), /render the widget/);
     });
 
-    it("lists plans with counts and the next task", async () => {
+    it("keeps a multi-line note inside its list item", async () => {
+        const setup_ = setup(project());
+        const result = await call(
+            setup_,
+            sample({ tasks: [{ title: "a", goal: "x", detail: "d", notes: ["first line\nsecond line"] }] }),
+        );
+        assert.match(text(result), /### Notes\n- first line\n {2}second line/);
+    });
+
+    it("lists plans with their title and count", async () => {
         const setup_ = setup(project());
         await call(setup_, sample());
-        await call(setup_, sample({ name: "other", goal: "g", context: "c", tasks: [] }));
+        await call(setup_, sample({ ...second, tasks: [] }));
 
         const result = await call(setup_, { action: "list" });
-        assert.match(text(result), / {2}foo 0\/2 · next t1/);
-        assert.match(text(result), /\* other 0\/0/);
+        assert.match(text(result), / {2}foo ship the widget 0\/2/);
+        assert.match(text(result), /\* second second plan 0\/0/);
     });
 
     it("names unreadable plan files instead of failing", async () => {
@@ -231,34 +290,124 @@ describe("get and list", () => {
         const dir = join(setup_.ctx.cwd, ".pi", "plans");
         writeFileSync(join(dir, "broken.json"), "{ not json");
         writeFileSync(join(dir, "shape.json"), JSON.stringify({ name: "shape", goal: "g" }));
+        // An old plan file is not migrated; it is skipped like any other file with the wrong shape.
+        writeFileSync(
+            join(dir, "old.json"),
+            JSON.stringify({
+                name: "old",
+                goal: "g",
+                context: "c",
+                tasks: [{ id: "t1", title: "a", blockedBy: [], doneWhen: "x", status: "todo", notes: [] }],
+            }),
+        );
+        // The plan shell is current but the tasks keep the old fields, so the whole file stays unreadable.
+        writeFileSync(
+            join(dir, "half.json"),
+            JSON.stringify({
+                id: "half",
+                title: "half migrated",
+                goal: "g",
+                detail: "d",
+                notes: [],
+                tasks: [{ id: "t1", title: "a", where: "x", blockedBy: [], doneWhen: "y", status: "todo", notes: [] }],
+            }),
+        );
+        // A current shell with an unusable task field is no plan either: the inspector would crash on it.
+        for (const [file, task] of [
+            ["bad-detail", { title: "a", goal: "g", detail: 5, status: "todo" }],
+            ["bad-status", { title: "a", goal: "g", detail: "d", status: "paused" }],
+        ] as const)
+            writeFileSync(
+                join(dir, `${file}.json`),
+                JSON.stringify({ id: file, title: "t", goal: "g", detail: "d", notes: [], tasks: [task] }),
+            );
         const result = await call(setup_, { action: "list" });
         assert.match(text(result), /\? broken unreadable/);
         assert.match(text(result), /\? shape unreadable/);
+        assert.match(text(result), /\? old unreadable/);
+        assert.match(text(result), /\? half unreadable/);
+        assert.match(text(result), /\? bad-detail unreadable/);
+        assert.match(text(result), /\? bad-status unreadable/);
+        await assert.rejects(call(setup_, { action: "get", plan: "half" }), /No plan half/);
     });
 
-    it('drops null and "null" optionals, including a task where', async () => {
+    it('drops null and "null" optionals, and needs a detail on every task', async () => {
         const setup_ = setup(project());
         await assert.rejects(call(setup_, sample({ goal: "null" })), /create needs/);
-        await call(setup_, sample({ tasks: [{ title: "a", where: "null", doneWhen: "x" }] }));
-        assert.equal("where" in stored(setup_, "foo").tasks[0]!, false);
-        const result = await call(setup_, { action: "get", name: "null", id: "null", note: null, status: null });
-        assert.match(text(result), /plan foo 0\/1/);
-        assert.match(text(result), /t1 \[todo\] a/);
-        assert.match(text(result), / {2}doneWhen: x/);
+        await assert.rejects(call(setup_, sample({ plan: "null" })), /create needs/);
+        await assert.rejects(call(setup_, sample({ tasks: [{ title: "a", goal: "x" }] })), /needs a detail/);
+        await assert.rejects(call(setup_, sample({ detail: "  " })), /create needs/);
+        await assert.rejects(call(setup_, sample({ detail: "null" })), /create needs/);
+        await assert.rejects(call(setup_, sample({ goal: " " })), /create needs/);
+        await assert.rejects(
+            call(setup_, sample({ tasks: [{ title: "a", goal: "null", detail: "d" }] })),
+            /needs a goal/,
+        );
+        await assert.rejects(
+            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "  " }] })),
+            /needs a detail/,
+        );
+        await assert.rejects(
+            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "d", dependsOn: "t1" }] })),
+            /t1 dependsOn must be an array/,
+        );
+        await assert.rejects(
+            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "d", notes: "a note" }] })),
+            /t1 notes must be an array/,
+        );
+        await call(
+            setup_,
+            sample({ tasks: [{ title: "a", goal: "x", detail: "src/a.ts", dependsOn: ["null"], notes: ["null"] }] }),
+        );
+        assert.deepEqual(stored(setup_, "foo").tasks[0]!.dependsOn, []);
+        assert.deepEqual(stored(setup_, "foo").tasks[0]!.notes, []);
+        assert.equal(stored(setup_, "foo").tasks[0]!.detail, "src/a.ts");
+        const result = await call(setup_, { action: "get", plan: "null", task: "null", note: null, status: null });
+        assert.match(text(result), /# Plan foo: ship the widget \(0\/1 done\)/);
+        assert.match(text(result), /## Task t1 \[todo\]: a/);
+        assert.match(text(result), /### Goal\nx/);
+    });
+});
+
+describe("widget", () => {
+    it("hides once every task is done and returns when a task reopens", async () => {
+        const setup_ = setup(project());
+        await call(setup_, sample());
+        await call(setup_, { action: "update", task: "t1", status: "done" });
+        await call(setup_, { action: "update", task: "t2", status: "done" });
+        assert.equal(setup_.state.widget, undefined);
+
+        await call(setup_, { action: "update", task: "t1", status: "todo" });
+        assert.deepEqual(setup_.state.widget, ["plan ship the widget 1/2"]);
+
+        await call(setup_, { action: "update", task: "t1", status: "done" });
+        assert.equal(setup_.state.widget, undefined);
+        await call(setup_, sample({ ...second, tasks: [{ title: "a", goal: "x", detail: "src/a.ts" }] }));
+        assert.deepEqual(setup_.state.widget, ["plan second plan 0/1"]);
+    });
+
+    it("leaves a task open while its dependency runs", async () => {
+        const setup_ = setup(project());
+        await call(setup_, sample());
+        await call(setup_, { action: "update", task: "t1", status: "doing" });
+        assert.deepEqual(setup_.state.widget, ["plan ship the widget 0/2", "  t1 render the widget"]);
     });
 });
 
 describe("nextTask", () => {
     function plan(tasks: Array<Partial<PlanTask>>): Plan {
         return {
-            name: "p",
+            id: "p",
+            title: "t",
             goal: "g",
-            context: "c",
+            detail: "d",
+            notes: [],
             tasks: tasks.map((task, index) => ({
                 id: `t${index + 1}`,
                 title: "x",
-                blockedBy: [],
-                doneWhen: "y",
+                goal: "y",
+                detail: "",
+                dependsOn: [],
                 status: "todo",
                 notes: [],
                 ...task,
@@ -266,17 +415,10 @@ describe("nextTask", () => {
         };
     }
 
-    it("skips a todo task whose blocker is open", () => {
-        assert.equal(nextTask(plan([{ blockedBy: ["t2"] }, {}]))?.id, "t2");
-        assert.equal(nextTask(plan([{}, { blockedBy: ["t1"] }]))?.id, "t1");
-        assert.equal(nextTask(plan([{ status: "doing" }, { blockedBy: ["t1"] }])), undefined);
-    });
-
-    it("unblocks a task after its blocker is marked done", async () => {
-        const setup_ = setup(project());
-        await call(setup_, sample());
-        await call(setup_, { action: "update", id: "t1", status: "done" });
-        assert.deepEqual(setup_.state.widget, ["plan foo 1/2 · next t2"]);
+    it("skips a todo task whose dependency is open", () => {
+        assert.equal(nextTask(plan([{ dependsOn: ["t2"] }, {}]))?.id, "t2");
+        assert.equal(nextTask(plan([{}, { dependsOn: ["t1"] }]))?.id, "t1");
+        assert.equal(nextTask(plan([{ status: "doing" }, { dependsOn: ["t1"] }])), undefined);
     });
 });
 
@@ -285,7 +427,7 @@ describe("active plan restore", () => {
         type: "message",
         message: { role: "toolResult", toolName: "plan", content: [], details: { action: "get", active } },
     });
-    const branch = (names: string[]) => names.map(toolResult);
+    const branch = (ids: string[]) => ids.map(toolResult);
 
     it("uses the last plan tool result on the branch", async () => {
         const cwd = project();
@@ -295,10 +437,10 @@ describe("active plan restore", () => {
 
         const restored = setup(cwd, branch(["foo", "second"]));
         restored.handlers.session_start!({}, restored.ctx);
-        assert.deepEqual(restored.state.widget, ["plan second 0/2 · next t1"]);
+        assert.deepEqual(restored.state.widget, ["plan second plan 0/2"]);
 
         const result = await call(restored, { action: "get" });
-        assert.match(text(result), /plan second 0\/2/);
+        assert.match(text(result), /# Plan second: second plan \(0\/2 done\)/);
     });
 
     it("clears the widget when the restored plan is gone", () => {
@@ -316,11 +458,11 @@ describe("active plan restore", () => {
 
         const afterSelection = setup(cwd, [toolResult("second"), custom("foo")]);
         afterSelection.handlers.session_start!({}, afterSelection.ctx);
-        assert.deepEqual(afterSelection.state.widget, ["plan foo 0/2 · next t1"]);
+        assert.deepEqual(afterSelection.state.widget, ["plan ship the widget 0/2"]);
 
         const afterTool = setup(cwd, [custom("foo"), toolResult("second")]);
         afterTool.handlers.session_start!({}, afterTool.ctx);
-        assert.deepEqual(afterTool.state.widget, ["plan second 0/2 · next t1"]);
+        assert.deepEqual(afterTool.state.widget, ["plan second plan 0/2"]);
     });
 });
 
@@ -330,7 +472,7 @@ describe("/plan", () => {
         await call(setup_, sample());
         setup_.ctx.mode = "print";
         await setup_.commands.plan!.handler("", setup_.ctx);
-        assert.match(setup_.state.notes[0]!, /goal: ship the widget/);
+        assert.match(setup_.state.notes[0]!, /## Goal\nthe widget ships/);
     });
 
     it("sets a named plan active", async () => {
@@ -339,7 +481,7 @@ describe("/plan", () => {
         await call(setup_, sample({ ...second, tasks: [] }));
         await setup_.commands.plan!.handler("foo", setup_.ctx);
         assert.match(setup_.state.notes.at(-1)!, /Active plan: foo/);
-        assert.deepEqual(setup_.state.widget, ["plan foo 0/2 · next t1"]);
+        assert.deepEqual(setup_.state.widget, ["plan ship the widget 0/2"]);
         assert.deepEqual(setup_.entries.at(-1), { type: "custom", customType: "plan", data: "foo" });
     });
 
@@ -363,31 +505,33 @@ describe("/plan", () => {
 
 describe("PlansScreen", () => {
     const foo: Plan = {
-        name: "foo",
+        id: "foo",
+        title: "ship the widget",
         goal: "ship the widget",
-        context: "c",
+        detail: "c",
+        notes: [],
         tasks: [
             {
                 id: "t1",
                 title: "render the widget",
-                where: "src/widget.ts",
-                blockedBy: [],
-                doneWhen: "npm test: 1 passed",
+                goal: "npm test: 1 passed",
+                detail: "src/widget.ts",
+                dependsOn: [],
                 status: "done",
-                notes: ["Ruling: dropped the cache"],
+                notes: ["dropped the cache"],
             },
             {
                 id: "t2",
                 title: "wire the tool",
-                where: "src/tool.ts",
-                blockedBy: ["t1"],
-                doneWhen: "npm run check",
+                goal: "npm run check",
+                detail: "src/tool.ts",
+                dependsOn: ["t1"],
                 status: "doing",
                 notes: ["npm run check: no errors", "wired the dispatcher"],
             },
         ],
     };
-    const bar: Plan = { name: "bar", goal: "other goal", context: "c", tasks: [] };
+    const bar: Plan = { id: "bar", title: "other plan", goal: "other goal", detail: "c", notes: [], tasks: [] };
 
     function screen(active: string | undefined, height = 16, unreadable: string[] = [], theme = themeStub().theme) {
         const keys: any = {
@@ -403,7 +547,7 @@ describe("PlansScreen", () => {
             theme,
             keys,
             height: () => height,
-            setActive: (name) => chosen.push(name),
+            setActive: (id) => chosen.push(id),
             onClose: () => {},
             requestRender: () => (drawn.count += 1),
         });
@@ -425,30 +569,30 @@ describe("PlansScreen", () => {
             "the goal opens the body",
         );
         assert.ok(lines.some((line) => line.includes("◐ wire the tool") && !line.includes("after")));
-        assert.ok(lines.some((line) => / {2}Done when {2}npm run check/.test(line)));
-        assert.ok(!lines.some((line) => line.includes("Ruling: dropped the cache")), "a done task is one line");
+        assert.ok(lines.some((line) => / {2}Goal {7}npm run check/.test(line)));
+        assert.ok(!lines.some((line) => line.includes("dropped the cache")), "a done task is one line");
         // The bottom rule and footer close the screen, so the counter is the third-to-last row.
         assert.ok(lines.at(-3)!.endsWith("1–10/14"), "the tasks scroll under the counter");
         for (const line of lines) assert.ok(visibleWidth(line) <= 100);
 
         value.handleInput("\x1b[C");
         value.handleInput("tui.altScreen.bottom");
-        assert.ok(value.render(100).some((line) => line.trimEnd().includes("Context ─")));
+        assert.ok(value.render(100).some((line) => line.trimEnd().includes("Detail ─")));
     });
 
     it("shows a done task's notes once the details are expanded", () => {
         const { value } = screen("foo");
-        assert.ok(!value.render(100).some((line) => line.includes("Ruling: dropped the cache")));
+        assert.ok(!value.render(100).some((line) => line.includes("dropped the cache")));
 
         value.handleInput("app.tools.expand");
         const expanded = value.render(100);
-        assert.ok(expanded.some((line) => line.includes("Ruling: dropped the cache")));
-        assert.ok(expanded.some((line) => / {2}Where {6}src\/widget\.ts/.test(line)));
+        assert.ok(expanded.some((line) => line.includes("dropped the cache")));
+        assert.ok(expanded.some((line) => / {2}Detail {5}src\/widget\.ts/.test(line)));
     });
 
-    it("lines the where up under the check's value", () => {
+    it("lines the detail up under the goal's value", () => {
         const lines = screen("foo").value.render(100);
-        assert.ok(lines.some((line) => / {2}Where {6}src\/tool\.ts/.test(line)));
+        assert.ok(lines.some((line) => / {2}Detail {5}src\/tool\.ts/.test(line)));
     });
 
     it("wraps only headings and labels in accent, over text content", () => {
@@ -456,8 +600,8 @@ describe("PlansScreen", () => {
         const { value } = screen("foo", 16, [], marked);
         const lines = value.render(100);
 
-        assert.ok(lines.some((line) => line.includes("<accent>Done when  <text>npm run check")));
-        assert.ok(lines.some((line) => line.includes("<accent>Where      <text>src/tool.ts")));
+        assert.ok(lines.some((line) => line.includes("<accent>Goal       <text>npm run check")));
+        assert.ok(lines.some((line) => line.includes("<accent>Detail     <text>src/tool.ts")));
         assert.ok(lines.some((line) => line.includes("<accent>Tasks ")));
         assert.ok(lines.some((line) => line.includes("<text>ship the widget")));
         assert.ok(
@@ -468,17 +612,29 @@ describe("PlansScreen", () => {
         value.handleInput("\x1b[C");
         value.handleInput("tui.altScreen.bottom");
         const bottom = value.render(100);
-        assert.ok(bottom.some((line) => line.includes("<accent>Context ")));
+        assert.ok(bottom.some((line) => line.includes("<accent>Detail ")));
         assert.ok(
             bottom.some((line) => /<text>c\b/.test(line)),
-            "the context prose is text",
+            "the detail prose is text",
         );
     });
 
-    it("renders markdown in the context, code spans and single newlines included", () => {
+    it("renders plan notes under the detail, in the same style as task notes", () => {
         const { value } = screen("foo", 40);
-        const context = foo.context;
-        foo.context = "Uses `Foo.bar` in the seam\nthen a second line";
+        foo.notes = ["Ruling: widget stays in src", "second ruling"];
+        try {
+            const lines = value.render(100);
+            assert.ok(lines.some((line) => line.includes("  Ruling: widget stays in src")));
+            assert.ok(lines.some((line) => line.includes("  second ruling")));
+        } finally {
+            foo.notes = [];
+        }
+    });
+
+    it("renders markdown in the plan detail, code spans and single newlines included", () => {
+        const { value } = screen("foo", 40);
+        const detail = foo.detail;
+        foo.detail = "Uses `Foo.bar` in the seam\nthen a second line";
         try {
             const lines = value.render(100).map((line) => line.replace(/\u001b\[[0-9;]*m/g, ""));
             const start = lines.findIndex((line) => line.includes("Uses Foo.bar in the seam"));
@@ -486,7 +642,7 @@ describe("PlansScreen", () => {
             assert.ok(!lines.some((line) => line.includes("`Foo.bar`")));
             assert.ok(lines[start + 1]!.includes("then a second line"), "a single newline stays a line break");
         } finally {
-            foo.context = context;
+            foo.detail = detail;
         }
     });
 

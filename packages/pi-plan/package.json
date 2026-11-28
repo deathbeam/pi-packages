@@ -1,6 +1,6 @@
 {
   "name": "@deathbeam/pi-plan",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Structured plans with a progress widget and a full-screen plan picker",
   "type": "module",
   "license": "MIT",
