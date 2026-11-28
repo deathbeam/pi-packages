@@ -517,6 +517,33 @@ describe("pi-combos", () => {
         );
     });
 
+    it("names every failed member when the fallback fails too", async () => {
+        const down = (id: string, text: string): AssistantMessageEvent => ({
+            type: "error",
+            reason: "error",
+            error: { ...message(id, "error"), errorMessage: text },
+        });
+        const replies: Record<string, AssistantMessageEvent[]> = {
+            "deepseek-v4-1-flash-1017": [down("deepseek-v4-1-flash-1017", "Mistral API error (402)")],
+            "deepseek-v4.1-flash": replied("deepseek-v4.1-flash"),
+        };
+        const { provider } = start(
+            { smart: ["mistral/deepseek-v4-1-flash-1017", "opencode-go/deepseek-v4.1-flash"] },
+            [model("mistral", "deepseek-v4-1-flash-1017"), model("opencode-go", "deepseek-v4.1-flash")],
+            replies,
+        );
+        assert.ok(provider, "combo provider registered");
+        // Mistral's 402 puts it on cooldown, so the next request tries opencode-go first.
+        assert.equal((await send(provider, {})).result.stopReason, "stop");
+        replies["deepseek-v4.1-flash"] = [down("deepseek-v4.1-flash", "429 rate limited")];
+
+        const { result } = await send(provider, {});
+        assert.equal(
+            result.errorMessage,
+            "All members failed: opencode-go/deepseek-v4.1-flash: 429 rate limited; mistral/deepseek-v4-1-flash-1017: Mistral API error (402)",
+        );
+    });
+
     it("strips the combo provider credentials before forwarding to a member", async () => {
         const signal = new AbortController().signal;
         const { provider, calls } = start({ smart: ["openai/ok"] }, [model("openai", "ok")], {

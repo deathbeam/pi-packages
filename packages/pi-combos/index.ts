@@ -123,7 +123,9 @@ async function pipe(
     options: SimpleStreamOptions,
 ): Promise<void> {
     const cooling = (model: Model<Api>) => (cooldowns.get(memberKey(model))?.until ?? 0) > Date.now();
-    const failed = (model: Model<Api>) => {
+    const reasons: string[] = [];
+    const failed = (model: Model<Api>, event: ErrorEvent) => {
+        reasons.push(`${memberKey(model)}: ${event.error.errorMessage ?? event.reason}`);
         const failures = (cooldowns.get(memberKey(model))?.failures ?? 0) + 1;
         cooldowns.set(memberKey(model), {
             failures,
@@ -144,7 +146,7 @@ async function pipe(
                     }
                     if (event.type === "error" && event.reason !== "aborted") {
                         failure = event;
-                        failed(member);
+                        failed(member, event);
                         break;
                     }
                     started = true;
@@ -165,11 +167,19 @@ async function pipe(
                 return out.end(event.error);
             }
             failure = event;
-            failed(member);
+            failed(member, event);
         }
     }
     // shortcut: every member stream ends with done or error, so a silent one ends this stream without a result.
-    if (failure) out.push(failure);
+    if (failure) {
+        // A member on cooldown is tried last, so its known error would hide the one that failed fresh.
+        if (reasons.length > 1)
+            failure = {
+                ...failure,
+                error: { ...failure.error, errorMessage: `All members failed: ${reasons.join("; ")}` },
+            };
+        out.push(failure);
+    }
     out.end(failure?.error);
 }
 
