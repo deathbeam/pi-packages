@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AssistantMessage, AssistantMessageEvent, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import {
+    createAssistantMessageEventStream,
+    getSupportedThinkingLevels,
+    isRetryableAssistantError,
+} from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import {
     createAgentSessionFromServices,
@@ -517,31 +521,46 @@ describe("pi-combos", () => {
         );
     });
 
-    it("names every failed member when the fallback fails too", async () => {
-        const down = (id: string, text: string): AssistantMessageEvent => ({
+    /** A combo whose Mistral member is on cooldown after a 402, so the next request tries opencode-go first. */
+    async function mistralCooling(fallbackError: string) {
+        const down = (provider: string, id: string, text: string): AssistantMessageEvent => ({
             type: "error",
             reason: "error",
-            error: { ...message(id, "error"), errorMessage: text },
+            error: { ...message(id, "error"), provider, errorMessage: text },
         });
+        const mistral = "deepseek-v4-1-flash-1017";
+        const opencode = "deepseek-v4.1-flash";
+        const budget =
+            'Mistral API error (402): {"object":"error","message":"Vibe budget exhausted.","type":"billing_vibe_budget_exhausted"}';
         const replies: Record<string, AssistantMessageEvent[]> = {
-            "deepseek-v4-1-flash-1017": [down("deepseek-v4-1-flash-1017", "Mistral API error (402)")],
-            "deepseek-v4.1-flash": replied("deepseek-v4.1-flash"),
+            [mistral]: [down("mistral", mistral, budget)],
+            [opencode]: replied(opencode),
         };
         const { provider } = start(
-            { smart: ["mistral/deepseek-v4-1-flash-1017", "opencode-go/deepseek-v4.1-flash"] },
-            [model("mistral", "deepseek-v4-1-flash-1017"), model("opencode-go", "deepseek-v4.1-flash")],
+            { smart: [`mistral/${mistral}`, `opencode-go/${opencode}`] },
+            [model("mistral", mistral), model("opencode-go", opencode)],
             replies,
         );
         assert.ok(provider, "combo provider registered");
-        // Mistral's 402 puts it on cooldown, so the next request tries opencode-go first.
         assert.equal((await send(provider, {})).result.stopReason, "stop");
-        replies["deepseek-v4.1-flash"] = [down("deepseek-v4.1-flash", "429 rate limited")];
+        replies[opencode] = [down("opencode-go", opencode, fallbackError)];
+        return send(provider, {});
+    }
 
-        const { result } = await send(provider, {});
+    it("surfaces a throttled member alone, so pi retries the turn", async () => {
+        const { result } = await mistralCooling("429 Too Many Requests");
+        assert.equal(result.errorMessage, "429 Too Many Requests");
+        assert.equal(result.provider, "opencode-go");
+        assert.equal(isRetryableAssistantError(result), true);
+    });
+
+    it("names every failed member when none of the errors is retryable", async () => {
+        const { result } = await mistralCooling("GoUsageLimitError: Monthly usage limit reached");
         assert.equal(
             result.errorMessage,
-            "All members failed: opencode-go/deepseek-v4.1-flash: 429 rate limited; mistral/deepseek-v4-1-flash-1017: Mistral API error (402)",
+            'All members failed: opencode-go/deepseek-v4.1-flash: GoUsageLimitError: Monthly usage limit reached; mistral/deepseek-v4-1-flash-1017: Mistral API error (402): {"object":"error","message":"Vibe budget exhausted.","type":"billing_vibe_budget_exhausted"}',
         );
+        assert.equal(isRetryableAssistantError(result), false);
     });
 
     it("strips the combo provider credentials before forwarding to a member", async () => {

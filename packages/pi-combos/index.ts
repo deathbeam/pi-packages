@@ -8,7 +8,11 @@ import type {
     SimpleStreamOptions,
     TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import {
+    createAssistantMessageEventStream,
+    getSupportedThinkingLevels,
+    isRetryableAssistantError,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ModelRegistry, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
@@ -123,13 +127,13 @@ async function pipe(
     options: SimpleStreamOptions,
 ): Promise<void> {
     const cooling = (model: Model<Api>) => (cooldowns.get(memberKey(model))?.until ?? 0) > Date.now();
-    const reasons: string[] = [];
+    const failures: Array<{ model: Model<Api>; event: ErrorEvent }> = [];
     const failed = (model: Model<Api>, event: ErrorEvent) => {
-        reasons.push(`${memberKey(model)}: ${event.error.errorMessage ?? event.reason}`);
-        const failures = (cooldowns.get(memberKey(model))?.failures ?? 0) + 1;
+        failures.push({ model, event });
+        const count = (cooldowns.get(memberKey(model))?.failures ?? 0) + 1;
         cooldowns.set(memberKey(model), {
-            failures,
-            until: Date.now() + Math.min(COOLDOWN_MS * 2 ** (failures - 1), MAX_COOLDOWN_MS),
+            failures: count,
+            until: Date.now() + Math.min(COOLDOWN_MS * 2 ** (count - 1), MAX_COOLDOWN_MS),
         });
     };
     let failure: ErrorEvent | undefined;
@@ -172,11 +176,20 @@ async function pipe(
     }
     // shortcut: every member stream ends with done or error, so a silent one ends this stream without a result.
     if (failure) {
-        // A member on cooldown is tried last, so its known error would hide the one that failed fresh.
-        if (reasons.length > 1)
+        // pi restarts a turn only on a retryable error, so a member that is merely throttled must win over
+        // one on cooldown whose error is final.
+        const retryable = failures.find(({ event }) => isRetryableAssistantError(event.error));
+        if (retryable) failure = retryable.event;
+        // Otherwise name them all: a member on cooldown is tried last, so its known error would hide the fresh one.
+        else if (failures.length > 1)
             failure = {
                 ...failure,
-                error: { ...failure.error, errorMessage: `All members failed: ${reasons.join("; ")}` },
+                error: {
+                    ...failure.error,
+                    errorMessage: `All members failed: ${failures
+                        .map(({ model, event }) => `${memberKey(model)}: ${event.error.errorMessage ?? event.reason}`)
+                        .join("; ")}`,
+                },
             };
         out.push(failure);
     }
