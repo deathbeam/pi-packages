@@ -54,7 +54,6 @@ type PlanDetails = {
 };
 
 const ACTIONS = ["create", "update", "get", "list"] as const;
-const DETAIL_HEADING = /^#{1,3}\s/m;
 
 const PlanParams = Type.Object({
     action: StringEnum(ACTIONS),
@@ -70,7 +69,7 @@ const PlanParams = Type.Object({
     detail: Type.Optional(
         Type.String({
             description:
-                "create: markdown sections: current behaviour with path:line, problem, chosen design and rejected alternatives, accepted behaviour changes, out of scope, open questions. Headings inside use #### or lower.",
+                "create: markdown sections: current behaviour with path:line, problem, chosen design and rejected alternatives, accepted behaviour changes, out of scope, open questions.",
         }),
     ),
     tasks: Type.Optional(
@@ -83,8 +82,7 @@ const PlanParams = Type.Object({
                     description: "Observable result, with the command to run and its expected output.",
                 }),
                 detail: Type.String({
-                    description:
-                        "Approach, interfaces to match, pitfalls, and a Where: line citing path:line. Headings inside use #### or lower.",
+                    description: "Approach, interfaces to match, pitfalls, and a Where: line citing path:line.",
                 }),
                 dependsOn: Type.Optional(
                     Type.Array(Type.String(), { description: "Task ids this task waits on, such as t1." }),
@@ -329,10 +327,6 @@ export default function (pi: ExtensionAPI) {
                     if (tasks.some((task) => blank(task.detail)))
                         throw new Error(
                             "Every task needs a detail: the approach, the interfaces and a Where: path:line.",
-                        );
-                    if (DETAIL_HEADING.test(detail) || tasks.some((task) => DETAIL_HEADING.test(task.detail)))
-                        throw new Error(
-                            "Headings inside detail use #### or lower; # to ### belong to the plan layout.",
                         );
                     if (readPlan(root, id)) throw new Error(`Plan ${id} already exists; use get or update.`);
                     const plan: Plan = {

@@ -15,7 +15,7 @@ Write the plan with the `plan` tool, action `create`. The plan is the source of 
 
 3. **Resolve decisions.** Find facts in the code and docs rather than asking. Ask the user only for a decision that changes the plan. Settle a blocking choice before the plan exists and record it in the plan `detail`.
 
-4. **Write the plan detail.** Plan `detail` is markdown in sections (headings inside it use `####` or lower, below the fixed `##`):
+4. **Write the plan detail.** Plan `detail` is markdown in sections:
 
     - Current behaviour, with `path:line` for each site.
     - The problem: why that code is wrong today.
@@ -30,7 +30,7 @@ Write the plan with the `plan` tool, action `create`. The plan is the source of 
 
     - `title`: the deliverable or behaviour, one line.
     - `goal`: the observable result and the command that proves it.
-    - `detail`: the approach, the interfaces it must match, the pitfalls, and a `Where:` line citing `path:line` for each file that changes. Headings inside it use `####` or lower, below the fixed `###`.
+    - `detail`: the approach, the interfaces it must match, the pitfalls, and a `Where:` line citing `path:line` for each file that changes.
 
     Add `dependsOn` only for a real dependency; tasks without one run at the same time, so keep their files disjoint.
 

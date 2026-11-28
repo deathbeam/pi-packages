@@ -1,6 +1,8 @@
 import { rawKeyHint, getMarkdownTheme, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import {
+    Box,
     Markdown,
+    Text,
     type Component,
     type Keybinding,
     type KeybindingsManager,
@@ -8,16 +10,17 @@ import {
     type TuiMouseEvent,
     truncateToWidth,
     visibleWidth,
-    wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import {
     doneCount,
     hanging,
     nextTask,
+    noteItem,
     planCount,
     planStatus,
     statusText,
     type Plan,
+    type PlanStatus,
     type PlanList,
     type PlanTask,
 } from "./store.ts";
@@ -39,8 +42,6 @@ type Focus = "list" | "detail";
 
 /** Fixed rows: title, top rule, bottom rule, footer. */
 const CHROME_ROWS = 4;
-/** Prose past this width is hard to follow on a wide terminal; the pane leaves the rest empty. */
-const MAX_TEXT_WIDTH = 120;
 /** Rendered markdown by theme, then width and text; cleared by invalidate() and on a width change. */
 const MARKDOWN_CACHE = new WeakMap<Theme, Map<string, string[]>>();
 
@@ -63,7 +64,7 @@ export function hardBreaks(text: string): string {
 }
 
 /** Markdown rendered at one width, cached per theme: render() runs every frame and contexts can be long. */
-function markdown(theme: Theme, text: string, width: number, indent = 0): string[] {
+function markdown(theme: Theme, text: string, width: number): string[] {
     let cache = MARKDOWN_CACHE.get(theme);
     if (!cache) MARKDOWN_CACHE.set(theme, (cache = new Map()));
     const key = `${width} ${text}`;
@@ -78,40 +79,47 @@ function markdown(theme: Theme, text: string, width: number, indent = 0): string
         while (lines.length && !lines.at(-1)) lines.pop();
         cache.set(key, lines);
     }
-    return lines.map((line) => " ".repeat(indent) + line);
+    return lines;
 }
 
-/** A section heading: the word in accent, a rule to the pane edge, and the tasks heading's own count. */
-function section(theme: Theme, word: string, width: number, trailing = ""): string {
+/** A section heading: the word in accent on a rule to the pane edge. */
+function section(theme: Theme, word: string, width: number): string {
     const head = `${theme.bold(theme.fg("accent", word))} `;
-    const rule = "─".repeat(Math.max(0, width - visibleWidth(head) - visibleWidth(trailing)));
-    return head + theme.fg("borderMuted", rule) + trailing;
+    const rule = "─".repeat(Math.max(0, width - visibleWidth(head)));
+    return head + theme.fg("borderMuted", rule);
 }
 
-/** The title row: the glyph, the title, and the id at the right edge, with the blockers still open after it. */
+/** The block header: glyph, muted id, title, then the blockers still open after a dim separator. */
 function taskLines(plan: Plan, task: PlanTask, theme: Theme, width: number, current: boolean): string[] {
     const open = task.dependsOn.filter((id) => !plan.tasks.some((item) => item.id === id && item.status === "done"));
-    const id = theme.fg("muted", open.length ? `${task.id} · after ${open.join(", ")}` : task.id);
+    const after = open.length ? ` ${theme.fg("muted", `· after ${open.join(", ")}`)}` : "";
     // Accent means headings and labels, so the task the reader is on is bold text instead.
     const title = theme.fg("text", task.title);
-    const [first = "", ...rest] = hanging(current ? theme.bold(title) : title, width, 2);
-    // The id sits beside the first row only, so that row loses the room the id and its gap take.
-    const room = Math.max(1, width - 3 - visibleWidth(id));
-    return [`${statusText(theme, task.status)} ${truncateToWidth(first, room, "…", true)} ${id}`, ...rest];
+    const [first = "", ...rest] = hanging(
+        `${theme.fg("muted", task.id)} ${current ? theme.bold(title) : title}${after}`,
+        width,
+        2,
+    );
+    return [`${statusText(theme, task.status)} ${first}`, ...rest];
 }
 
-/** An accent label padded into one column, then its value in the column beside it. */
-function field(theme: Theme, label: string, value: string, width: number, prose = false): string[] {
-    const lead = `  ${theme.fg("accent", label.padEnd(9))}  `;
-    const column = visibleWidth(lead);
-    const lines = prose
-        ? markdown(theme, value, Math.max(1, width - column))
-        : wrapTextWithAnsi(theme.fg("text", value), Math.max(1, width - column));
-    const [first = "", ...rest] = lines;
-    return [lead + first, ...rest.map((line) => " ".repeat(column) + line)];
+/** A blank row, the field's accent label on a line of its own, then its value at column 0. */
+function field(theme: Theme, label: string, value: string, width: number): string[] {
+    return ["", theme.fg("accent", label), ...markdown(theme, value, width)];
 }
 
-/** One task: its title row, then the goal, the brief and notes of every task still open. */
+/** pi-delegate's tool rows tint a job by status; a task uses the same pi background tokens. */
+function blockBg(theme: Theme, status: PlanStatus): (text: string) => string {
+    const bg = {
+        doing: "toolPendingBg",
+        blocked: "toolErrorBg",
+        done: "toolSuccessBg",
+        todo: "userMessageBg",
+    } as const;
+    return (text) => theme.bg(bg[status], text);
+}
+
+/** One task as a full-width block tinted by its status, like pi-delegate's transcript entries. */
 function taskBlock(
     plan: Plan,
     task: PlanTask,
@@ -120,33 +128,40 @@ function taskBlock(
     current: boolean,
     expanded: boolean,
 ): string[] {
-    const head = taskLines(plan, task, theme, width, current);
-    if (!expanded && task.status === "done") return head;
-    return [
-        ...head,
-        // Every label pads to nine columns, so the values start in one column.
-        ...field(theme, "Goal", task.goal, width, true),
-        ...(task.detail ? field(theme, "Detail", task.detail, width, true) : []),
-        ...task.notes.flatMap((note) => ["", ...markdown(theme, note, Math.max(1, width - 2), 2)]),
-        "",
+    const inner = Math.max(1, width - 2);
+    const groups = [
+        taskLines(plan, task, theme, inner, current),
+        ...(!expanded && task.status === "done"
+            ? []
+            : [
+                  field(theme, "Goal", task.goal, inner),
+                  ...(task.detail ? [field(theme, "Detail", task.detail, inner)] : []),
+                  ...(task.notes.length ? [field(theme, "Notes", task.notes.join("\n\n"), inner)] : []),
+              ]),
     ];
+    // Same padding as pi's tool-call boxes: one column each side, one row above and below.
+    const box = new Box(1, 1, blockBg(theme, task.status));
+    // field() leads each group with its blank row, so the groups stay one blank apart.
+    box.addChild(new Text(groups.flat().join("\n"), 0, 0));
+    // pi-delegate puts one blank row above each block.
+    return ["", ...box.render(width)];
 }
 
-/** Goal, tasks and detail as three sections; the headings show where the reader is in a long plan. */
+/** Goal, tasks, detail and notes as sections; the headings show where the reader is in a long plan. */
 function taskRows(plan: Plan, theme: Theme, width: number, expanded: boolean): string[] {
     const current = plan.tasks.find((task) => task.status === "doing") ?? nextTask(plan);
     const blocks = plan.tasks.flatMap((task) => taskBlock(plan, task, theme, width, task === current, expanded));
-    // The next heading brings its own leading blank line, so a task's trailing one would double it.
-    if (blocks.at(-1) === "") blocks.pop();
     return [
         ...markdown(theme, plan.goal, width),
         "",
-        section(theme, "Tasks", width, theme.fg("muted", ` ${planCount(plan)}`)),
+        section(theme, "Tasks", width),
         ...blocks,
         "",
         section(theme, "Detail", width),
         ...markdown(theme, plan.detail, width),
-        ...plan.notes.flatMap((note) => ["", ...markdown(theme, note, Math.max(1, width - 2), 2)]),
+        ...(plan.notes.length
+            ? ["", section(theme, "Notes", width), ...markdown(theme, plan.notes.flatMap(noteItem).join("\n"), width)]
+            : []),
     ].map((line) => truncateToWidth(line, width, "…", true));
 }
 
@@ -206,7 +221,7 @@ export class PlansScreen implements Component {
     private lastBody = { height: 0, total: 0 };
     private lastIndexes: (number | undefined)[] = [];
     private lastSidebar = 0;
-    private lastTextWidth = 0;
+    private lastWidth = 0;
 
     constructor(options: PlansScreenOptions) {
         this.options = options;
@@ -254,7 +269,7 @@ export class PlansScreen implements Component {
         const sidebar = sidebarRows(plans, unreadable, this.index, this.active, this.focus, theme, sidebarWidth, body);
         this.lastIndexes = sidebar.indexes;
         const detail = plan
-            ? this.detail(plan, Math.min(detailWidth, MAX_TEXT_WIDTH), detailWidth, body)
+            ? this.detail(plan, detailWidth, body)
             : [row(theme.fg("muted", "No readable plans."), detailWidth)];
         return [title, rule, ...sidebar.lines.map((line, index) => `${line} ${detail[index] ?? ""}`), rule, footer];
     }
@@ -298,21 +313,18 @@ export class PlansScreen implements Component {
         return { handled: true };
     }
 
-    /** The right pane: the plan's id and title stay put over the goal, tasks and detail, with a counter below. */
-    private detail(plan: Plan, textWidth: number, width: number, body: number): string[] {
+    /** The right pane: the plan's header stays put over the goal, tasks and detail, with a scroll counter below. */
+    private detail(plan: Plan, width: number, body: number): string[] {
         const { theme } = this.options;
-        if (this.lastTextWidth !== textWidth) {
-            this.lastTextWidth = textWidth;
+        if (this.lastWidth !== width) {
+            this.lastWidth = width;
             MARKDOWN_CACHE.delete(theme);
         }
         const blocked = plan.tasks.some((task) => task.status === "blocked") ? " · blocked" : "";
-        const progress = theme.fg("muted", `${doneCount(plan)} of ${plan.tasks.length} done${blocked}`);
-        const head = `${theme.fg("accent", plan.id)} ${theme.fg("text", plan.title)}`;
-        const header = [
-            head + " ".repeat(Math.max(0, textWidth - visibleWidth(head) - visibleWidth(progress))) + progress,
-        ];
-        const height = Math.max(0, body - header.length - 1);
-        const all = taskRows(plan, theme, textWidth, this.expanded);
+        const progress = theme.fg("muted", `· ${doneCount(plan)} of ${plan.tasks.length} done${blocked}`);
+        const header = `${statusText(theme, planStatus(plan))} ${theme.fg("accent", plan.id)} ${theme.fg("text", plan.title)} ${progress}`;
+        const height = Math.max(0, body - 2);
+        const all = taskRows(plan, theme, width, this.expanded);
         const start = Math.min(this.top, Math.max(0, all.length - height));
         this.top = start;
         this.lastBody = { height, total: all.length };
@@ -323,7 +335,7 @@ export class PlansScreen implements Component {
         );
         // Right-aligned like pi-delegate's counter; every row is padded so the pane's right edge holds still.
         const tail = " ".repeat(Math.max(0, width - visibleWidth(counter))) + counter;
-        return [...header, ...shown, ...Array(Math.max(0, height - shown.length)).fill(""), tail].map((line) =>
+        return [header, ...shown, ...Array(Math.max(0, height - shown.length)).fill(""), tail].map((line) =>
             truncateToWidth(line, width, "…", true),
         );
     }

@@ -27,9 +27,15 @@ function themeStub() {
     const colors: string[] = [];
     const theme: any = {
         fg: (color: string, text: string) => (colors.push(color), text),
+        bg: (_color: string, text: string) => text,
         bold: (text: string) => text,
     };
     return { theme, colors };
+}
+
+/** The inspector renders markdown with pi's own theme, so strip its colors to compare text. */
+function plain(line: string): string {
+    return line.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
 function setup(cwd: string, branch: unknown[] = []) {
@@ -145,17 +151,6 @@ describe("create", () => {
         assert.match(text(result), /### Detail\nsrc\/a\.ts/);
         assert.match(text(result), /### Notes\n- dropped the cache/);
         assert.deepEqual(setup_.state.widget, ["plan ship the widget 1/2", "  t2 b"]);
-    });
-
-    it("rejects a heading that would break the plan layout", async () => {
-        const setup_ = setup(project());
-        const message = /Headings inside detail use #### or lower/;
-        await assert.rejects(call(setup_, sample({ detail: "## Problem\ntext" })), message);
-        await assert.rejects(
-            call(setup_, sample({ tasks: [{ title: "a", goal: "x", detail: "### Goal\nx" }] })),
-            message,
-        );
-        await call(setup_, sample({ detail: "#### Chosen\ntext" }));
     });
 
     it("rejects a plan that already exists", async () => {
@@ -562,17 +557,22 @@ describe("PlansScreen", () => {
         assert.ok(lines.some((line) => line.includes("› ◐ foo 1/2")));
         assert.ok(lines.some((line) => line.includes("active · ship the widget")));
         assert.ok(lines.some((line) => line.includes("○ bar 0/0")));
-        assert.ok(lines.some((line) => /1 of 2 done/.test(line)));
-        assert.ok(lines.some((line) => line.trimEnd().includes("Tasks ─")));
+        assert.ok(
+            lines.some((line) => line.includes("· 1 of 2 done")),
+            "the progress follows the title",
+        );
+        const rule = lines.find((line) => line.trimEnd().includes("Tasks ─"))!;
+        assert.ok(!/[0-9]+\/[0-9]+/.test(rule), "the count lives in the header, not the rule");
         assert.ok(
             lines.some((line) => line.includes("│ ship the widget")),
             "the goal opens the body",
         );
-        assert.ok(lines.some((line) => line.includes("◐ wire the tool") && !line.includes("after")));
-        assert.ok(lines.some((line) => / {2}Goal {7}npm run check/.test(line)));
+        assert.ok(lines.some((line) => line.includes("◐ t2 wire the tool") && !line.includes("after")));
+        assert.ok(lines.some((line) => line.includes("◐ t2 wire the tool")));
+        assert.ok(!lines.some((line) => /wire the tool.*t2$/.test(line.trimEnd())), "the id stays on the left");
         assert.ok(!lines.some((line) => line.includes("dropped the cache")), "a done task is one line");
         // The bottom rule and footer close the screen, so the counter is the third-to-last row.
-        assert.ok(lines.at(-3)!.endsWith("1–10/14"), "the tasks scroll under the counter");
+        assert.ok(lines.at(-3)!.endsWith("1–10/25"), "the tasks scroll under the counter");
         for (const line of lines) assert.ok(visibleWidth(line) <= 100);
 
         value.handleInput("\x1b[C");
@@ -580,30 +580,75 @@ describe("PlansScreen", () => {
         assert.ok(value.render(100).some((line) => line.trimEnd().includes("Detail ─")));
     });
 
-    it("shows a done task's notes once the details are expanded", () => {
-        const { value } = screen("foo");
+    it("labels a done task's notes once the details are expanded", () => {
+        const { value } = screen("foo", 40);
         assert.ok(!value.render(100).some((line) => line.includes("dropped the cache")));
 
         value.handleInput("app.tools.expand");
-        const expanded = value.render(100);
-        assert.ok(expanded.some((line) => line.includes("dropped the cache")));
-        assert.ok(expanded.some((line) => / {2}Detail {5}src\/widget\.ts/.test(line)));
+        const expanded = value.render(100).map(plain);
+        const label = expanded.findIndex((line) => /│ +Notes$/.test(line.trimEnd()));
+        assert.ok(label >= 0, "the notes carry a label");
+        assert.ok(expanded[label + 1]!.includes("dropped the cache"));
     });
 
-    it("lines the detail up under the goal's value", () => {
-        const lines = screen("foo").value.render(100);
-        assert.ok(lines.some((line) => / {2}Detail {5}src\/tool\.ts/.test(line)));
+    it("puts each field label on a line of its own, with its value below it", () => {
+        const lines = screen("foo", 40).value.render(100).map(plain);
+        const start = lines.findIndex((line) => /│ +Goal$/.test(line.trimEnd()));
+        assert.ok(start >= 0);
+        assert.match(lines[start + 1]!.trimEnd(), /│ +npm run check$/);
+        assert.match(lines[start + 2]!.trimEnd(), /│$/);
+        assert.match(lines[start + 3]!.trimEnd(), /│ +Detail$/);
+        assert.match(lines[start + 4]!.trimEnd(), /│ +src\/tool\.ts$/);
+    });
+
+    it("puts the blockers after the title instead of at the right edge", () => {
+        const { value } = screen("foo", 40);
+        foo.tasks[0]!.status = "todo";
+        try {
+            const lines = value.render(100).map(plain);
+            assert.match(
+                lines.find((line) => line.includes("wire the tool"))!.trimEnd(),
+                /│ +◐ t2 wire the tool · after t1$/,
+            );
+        } finally {
+            foo.tasks[0]!.status = "done";
+        }
+    });
+
+    it("uses the whole width of the right pane", () => {
+        const { value } = screen("foo", 40);
+        const goal = foo.goal;
+        foo.goal = "g".repeat(130);
+        try {
+            const lines = value.render(200);
+            assert.ok(
+                lines.some((line) => line.includes(`│ ${"g".repeat(130)}`)),
+                "a long line is not capped",
+            );
+            assert.equal(visibleWidth(lines.at(-3)!), 200, "the counter sits at the right edge");
+        } finally {
+            foo.goal = goal;
+        }
     });
 
     it("wraps only headings and labels in accent, over text content", () => {
-        const marked: any = { fg: (color: string, text: string) => `<${color}>${text}`, bold: (text: string) => text };
-        const { value } = screen("foo", 16, [], marked);
+        const marked: any = {
+            fg: (color: string, text: string) => `<${color}>${text}`,
+            bg: (color: string, text: string) => `<${color}>${text}`,
+            bold: (text: string) => text,
+        };
+        const { value } = screen("foo", 40, [], marked);
         const lines = value.render(100);
 
-        assert.ok(lines.some((line) => line.includes("<accent>Goal       <text>npm run check")));
-        assert.ok(lines.some((line) => line.includes("<accent>Detail     <text>src/tool.ts")));
+        assert.ok(lines.some((line) => line.includes("<accent>Goal")));
+        assert.ok(lines.some((line) => line.includes("<accent>Detail")));
         assert.ok(lines.some((line) => line.includes("<accent>Tasks ")));
+        assert.ok(
+            lines.some((line) => line.includes("<muted>t2")),
+            "the task id is muted, on the left",
+        );
         assert.ok(lines.some((line) => line.includes("<text>ship the widget")));
+        assert.ok(lines.some((line) => line.includes("<text>npm run check")));
         assert.ok(
             lines.some((line) => line.includes("<text>npm run check: no errors")),
             "notes are text",
@@ -619,13 +664,53 @@ describe("PlansScreen", () => {
         );
     });
 
-    it("renders plan notes under the detail, in the same style as task notes", () => {
+    it("draws each task as a status-tinted block, header then fields in order", () => {
+        const { value } = screen("foo", 40);
+        const rows = value
+            .render(100)
+            .map(plain)
+            .map((line) => line.replace(/^\s*│\s+/, "").trimEnd());
+        const start = rows.indexOf("◐ t2 wire the tool");
+        assert.ok(start > 0);
+        assert.deepEqual(rows.slice(start, start + 12), [
+            "◐ t2 wire the tool",
+            "",
+            "Goal",
+            "npm run check",
+            "",
+            "Detail",
+            "src/tool.ts",
+            "",
+            "Notes",
+            "npm run check: no errors",
+            "",
+            "wired the dispatcher",
+        ]);
+        assert.equal(rows[start - 1], "", "a blank row separates the blocks");
+        assert.equal(rows[rows.indexOf("✓ t1 render the widget") + 1], "", "a done task stays one row");
+
+        const marked: any = {
+            fg: (color: string, text: string) => `<${color}>${text}`,
+            bg: (color: string, text: string) => `<${color}>${text}`,
+            bold: (text: string) => text,
+        };
+        const tinted = screen("foo", 40, [], marked).value.render(100);
+        assert.ok(tinted.some((line) => line.includes("<toolSuccessBg>") && line.includes("render the widget")));
+        assert.ok(tinted.some((line) => line.includes("<toolPendingBg>") && line.includes("wire the tool")));
+    });
+
+    it("renders plan notes as a list under their own section", () => {
         const { value } = screen("foo", 40);
         foo.notes = ["Ruling: widget stays in src", "second ruling"];
         try {
-            const lines = value.render(100);
-            assert.ok(lines.some((line) => line.includes("  Ruling: widget stays in src")));
-            assert.ok(lines.some((line) => line.includes("  second ruling")));
+            const lines = value
+                .render(100)
+                .map(plain)
+                .map((line) => line.trimEnd());
+            const start = lines.findIndex((line) => line.includes("Notes ─"));
+            assert.ok(start >= 0, "the notes carry a section rule");
+            assert.match(lines[start + 1]!, /│ - Ruling: widget stays in src$/);
+            assert.match(lines[start + 2]!, /│ - second ruling$/);
         } finally {
             foo.notes = [];
         }
@@ -682,7 +767,7 @@ describe("PlansScreen", () => {
         value.handleInput("tui.select.down");
         value.handleInput("tui.select.confirm");
         assert.deepEqual(chosen, ["foo"], "↓ scrolled the tasks instead of moving to bar");
-        assert.ok(value.render(100).at(-3)!.endsWith("2–11/14"));
+        assert.ok(value.render(100).at(-3)!.endsWith("2–11/25"));
 
         value.handleInput("\x1b[D");
         value.handleInput("tui.select.down");
@@ -695,7 +780,7 @@ describe("PlansScreen", () => {
         value.render(100);
 
         value.handleMouse({ type: "wheel", x: 80, y: 5, wheelDelta: 3 } as any);
-        assert.ok(value.render(100).at(-3)!.endsWith("4–13/14"), "three lines down stops at the plan's end");
+        assert.ok(value.render(100).at(-3)!.endsWith("4–13/25"), "three lines down stops at the plan's end");
         value.handleMouse({ type: "wheel", x: 1, y: 4, wheelDelta: 1 } as any);
         value.handleInput("tui.select.confirm");
         assert.deepEqual(chosen, ["bar"]);

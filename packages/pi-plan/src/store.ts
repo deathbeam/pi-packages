@@ -179,7 +179,7 @@ export function taskLine(task: PlanTask): string {
 }
 
 /** Notes as list items; a continuation line indents by two so it stays inside its item. */
-function noteItem(note: string): string[] {
+export function noteItem(note: string): string[] {
     const [first = "", ...rest] = note.split("\n");
     return [`- ${first}`, ...rest.map((line) => `  ${line}`)];
 }
